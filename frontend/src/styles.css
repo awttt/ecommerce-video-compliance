@@ -1,0 +1,121 @@
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: #f4f6f8;
+  color: #1f2933;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 60px;
+  padding: 0 20px;
+  background: #14202b;
+  color: #f7fafc;
+}
+
+.brand {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+}
+
+.brand strong {
+  font-size: 16px;
+  letter-spacing: 0.02em;
+}
+
+.brand span {
+  color: #9fb0c0;
+  font-size: 12px;
+}
+
+.page {
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+.video-shell {
+  overflow: hidden;
+  background: #101418;
+  border-radius: 8px;
+}
+
+.video-shell .video-js {
+  width: 100%;
+  height: 380px;
+}
+
+.video-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 220px;
+  color: #627384;
+  background: #fff;
+  border: 1px dashed #d5dee6;
+  border-radius: 8px;
+}
+
+.timeline {
+  position: relative;
+  height: 44px;
+  margin-top: 12px;
+  background: #e7edf2;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.timeline .seg {
+  position: absolute;
+  top: 6px;
+  height: 24px;
+  min-width: 4px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  opacity: 0.88;
+  cursor: pointer;
+}
+
+.timeline .seg.speech {
+  top: 24px;
+  height: 12px;
+}
+
+.timeline .seg.active {
+  outline: 2px solid #14202b;
+}
+
+.legend {
+  display: flex;
+  gap: 14px;
+  margin: 8px 0 12px;
+  color: #526272;
+  font-size: 12px;
+}
+
+.legend i {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 6px;
+  border-radius: 2px;
+}
+
+.hint {
+  margin-top: 8px;
+  color: #627384;
+  font-size: 12px;
+}
+
+.click-row {
+  cursor: pointer;
+}

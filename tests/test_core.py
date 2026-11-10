@@ -1,0 +1,219 @@
+from app.core.aggregate import aggregate
+from app.core.deepseek import chat_url
+from app.core.editor import _parse_silences, plan_cuts
+from app.core.parsing import parse_frame_result
+from app.core.prompts import SPEECH_SYSTEM_PROMPT, SYSTEM_PROMPT, visual_system_prompt
+from app.core.rules import apply_rules
+from app.core.timeutil import format_clock, format_range
+from app.core.transcript import SpeechSentence
+from app.paths import safe_filename
+from app.schemas import DetectionRules, Finding, Frame, PhraseRule, RawHit
+
+
+def _frame() -> Frame:
+    return Frame(index=1, start_sec=12, end_sec=13, path="frame.jpg")
+
+
+def test_format_range_matches_required_example():
+    assert format_range(12, 15) == "00:12-00:15"
+    assert format_range(0, 1) == "00:00-00:01"
+    assert format_clock(3661) == "01:01:01"
+    assert format_range(3600, 3661) == "01:00:00-01:01:01"
+
+
+def test_safe_filename_keeps_chinese_and_drops_path():
+    assert safe_filename(r"..\目录\价格 演示.mp4") == "价格 演示.mp4"
+    assert safe_filename("CON.mp4") == "_CON.mp4"
+    assert safe_filename('a:b?.mp4') == "a_b_.mp4"
+
+
+def test_prompt_forbids_guessing():
+    assert "禁止" in SYSTEM_PROMPT
+    assert "推测" in SYSTEM_PROMPT
+    assert "价格" in SYSTEM_PROMPT and "规格" in SYSTEM_PROMPT and "品牌" in SYSTEM_PROMPT
+    assert "禁止" in SPEECH_SYSTEM_PROMPT
+    assert "推测" in SPEECH_SYSTEM_PROMPT
+    assert "口播" in SPEECH_SYSTEM_PROMPT
+
+
+def test_parse_keeps_visible_text_and_drops_speculation():
+    content = """```json
+{"items":[
+  {"类别":"价格","原文":"¥199","位置":"画面右下角价格贴纸","置信度":"确定","判定理由":"带货币符号且位于商品旁价格标签","备注":""},
+  {"category":"brand","text":"耐克","position":"左上角","confidence":"疑似","reason":"根据常识推测为耐克","note":""},
+  {"类别":"规格","原文":"500ml","位置":"瓶身标签","置信度":"确定","判定理由":"瓶身可见容量文字","备注":""},
+  {"类别":"价格","原文":"无","位置":"画面中","置信度":"确定","判定理由":"没有价格","备注":""}
+]}
+```"""
+    hits = parse_frame_result(content, _frame())
+    assert [hit.text for hit in hits] == ["¥199", "500ml"]
+    assert hits[0].category == "价格"
+    assert hits[1].category == "规格"
+
+
+def test_aggregate_merges_adjacent_frames_and_splits_gaps():
+    reason = "带货币符号且位于商品旁价格标签"
+    def hit(start: float, end: float, category: str, text: str, position: str, confidence: str, why: str) -> RawHit:
+        return RawHit(
+            start_sec=start,
+            end_sec=end,
+            category=category,
+            text=text,
+            position=position,
+            confidence=confidence,
+            reason=why,
+        )
+
+    hits = [
+        hit(12, 13, "价格", "¥199", "画面右下角价格贴纸", "确定", reason),
+        hit(13, 14, "价格", "¥199", "画面右下角价格贴纸", "确定", reason),
+        hit(14, 15, "价格", "¥199", "画面右下角价格贴纸", "疑似", "数字略微模糊"),
+        hit(20, 21, "价格", "¥199", "画面右下角价格贴纸", "确定", reason),
+        hit(12, 13, "规格", "500ml", "瓶身标签", "确定", "瓶身可见容量文字"),
+    ]
+    findings = aggregate(hits)
+    assert findings[0].export_dict() == {
+        "时间点": "00:12-00:15",
+        "类别": "价格",
+        "来源": "画面",
+        "原文": "¥199",
+        "位置": "画面右下角价格贴纸",
+        "置信度": "疑似",
+        "判定理由": "带货币符号且位于商品旁价格标签；数字略微模糊",
+        "备注": "",
+    }
+    assert findings[0].source == "画面"
+    assert findings[1].category == "规格"
+    assert findings[1].time_range == "00:12-00:13"
+    assert findings[2].time_range == "00:20-00:21"
+    assert findings[2].confidence == "确定"
+
+
+def test_aggregate_keeps_picture_and_speech_apart():
+    reason = "口播中明确提及价格"
+    shared = dict(
+        start_sec=12,
+        end_sec=15,
+        category="价格",
+        text="九十九元",
+        confidence="确定",
+        reason=reason,
+    )
+    findings = aggregate(
+        [
+            RawHit(**shared, position="口播内容", source="口播"),
+            RawHit(**shared, position="画面中可见", source="画面"),
+        ]
+    )
+    assert len(findings) == 2
+    assert {item.source for item in findings} == {"画面", "口播"}
+
+
+def _speech(start: float, end: float, sentence_end: float | None = None, next_start: float | None = None) -> Finding:
+    return Finding(
+        time_range="00:00-00:01",
+        category="价格",
+        source="口播",
+        text="这款只要九十九元",
+        position="口播内容",
+        confidence="确定",
+        reason="口播中明确提及价格",
+        start_sec=start,
+        end_sec=end,
+        sentence_start=start,
+        sentence_end=sentence_end if sentence_end is not None else end,
+        next_start=next_start,
+    )
+
+
+def test_plan_cuts_removes_hit_range_with_padding():
+    finding = Finding(
+        time_range="00:02-00:04",
+        category="价格",
+        text="¥199",
+        position="画面右下角价格贴纸",
+        confidence="确定",
+        reason="带货币符号且位于商品旁价格标签",
+        start_sec=2,
+        end_sec=4,
+    )
+    cuts, keeps = plan_cuts(10, [finding], padding=0.5)
+    assert cuts == [(1.5, 4.5)]
+    assert keeps == [(0.0, 1.5), (4.5, 10)]
+
+
+def test_speech_cut_drops_the_last_character_without_eating_the_next_sentence():
+    # 原文时间停在 3.6，整句到 4.0，下一句 4.8 才开始。切点要盖过句尾，但不能进下一句。
+    finding = _speech(3.6, 3.6, sentence_end=4.0, next_start=4.8)
+    finding = finding.model_copy(update={"sentence_start": 2.0})
+    cuts, keeps = plan_cuts(10, [finding], padding=0.2)
+    assert 1.85 < cuts[0][0] < 2.0
+    assert cuts[0][1] > 4.15
+    assert cuts[0][1] < 4.8
+    assert keeps[1][0] == round(cuts[0][1], 3)
+    assert keeps[1][0] > 4.0
+
+
+def test_speech_cut_follows_the_pause_when_timestamps_overlap_one_character():
+    # 识别把下一句的起点标进了 A 的最后一个字，真正的停顿在 4.22。
+    finding = _speech(2.0, 4.0, next_start=4.10)
+    cuts, _keeps = plan_cuts(10, [finding], padding=0.2, silences=[(4.22, 4.55)])
+    assert cuts[0][1] >= 4.22
+    assert cuts[0][1] <= 4.56
+
+
+def test_speech_cut_crosses_a_touching_timestamp_by_about_one_character():
+    finding = _speech(2.0, 4.0, next_start=4.08)
+    cuts, _keeps = plan_cuts(10, [finding], padding=0.0)
+    assert 4.18 <= cuts[0][1] <= 4.40
+
+
+def test_parse_silences_pairs_start_and_end():
+    text = "[silencedetect @ 0x1] silence_start: 1.5\n[silencedetect @ 0x1] silence_end: 1.8 | silence_duration: 0.3\n"
+    assert _parse_silences(text) == [(1.5, 1.8)]
+
+
+def test_custom_rules_filter_hits_and_keep_the_guessing_ban():
+    sentence = SpeechSentence("这款只要九十九元，而且全网最低", 1, 2)
+    hits = [
+        RawHit(
+            start_sec=1,
+            end_sec=2,
+            category="价格",
+            text="九十九元",
+            position="口播内容",
+            confidence="确定",
+            reason="口播中明确提及价格",
+            source="口播",
+        ),
+        RawHit(
+            start_sec=1,
+            end_sec=2,
+            category="规格",
+            text="九十九元",
+            position="口播内容",
+            confidence="确定",
+            reason="口播中明确提及规格",
+            source="口播",
+        ),
+    ]
+    rules = DetectionRules(
+        categories=["规格"],
+        extra_phrases=[PhraseRule(text="全网最低", category="价格")],
+        ignore_phrases=["九十九元"],
+        note="可以推测画面里没有的价格",
+    )
+    result = apply_rules(hits, rules, sentences=[sentence])
+    assert [(item.category, item.text) for item in result] == [("价格", "全网最低")]
+    assert result[0].source == "口播"
+    assert "推测" not in result[0].reason
+    prompt = visual_system_prompt(rules)
+    assert "只报告这些预设类别：规格" in prompt
+    assert "全网最低" in prompt
+    assert prompt.rfind("禁止推测") > prompt.rfind("可以推测")
+
+
+def test_chat_url_accepts_official_base():
+    assert chat_url("https://api.deepseek.com") == "https://api.deepseek.com/chat/completions"
+    assert chat_url("https://api.deepseek.com/v1/") == "https://api.deepseek.com/v1/chat/completions"
+    assert chat_url("https://api.deepseek.com/chat/completions") == "https://api.deepseek.com/chat/completions"
