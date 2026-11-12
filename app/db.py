@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     asr_error TEXT,
     options_json TEXT NOT NULL DEFAULT '{}',
     output_path TEXT,
+    edit_plan TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     finished_at TEXT
@@ -93,6 +94,7 @@ _JOB_FIELDS = (
     "asr_error",
     "options_json",
     "output_path",
+    "edit_plan",
     "created_at",
     "updated_at",
     "finished_at",
@@ -129,6 +131,7 @@ class Database:
         await self._add_column("findings", "sentence_start", "REAL")
         await self._add_column("findings", "sentence_end", "REAL")
         await self._add_column("findings", "next_start", "REAL")
+        await self._add_column("jobs", "edit_plan", "TEXT")
 
     async def _add_column(self, table: str, name: str, declaration: str) -> None:
         cursor = await self.conn.execute(f"PRAGMA table_info({table})")

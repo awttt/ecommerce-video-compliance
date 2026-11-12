@@ -20,7 +20,7 @@ from app.core.editor import EditorError
 from app.core.ffmpeg import FFmpegError, ffmpeg_available, resolve_bin
 from app.paths import data_dir, exports_dir, video_dir
 from app.paths import safe_filename
-from app.schemas import CutRequest, JobPublic, SettingPublic, SettingUpdate
+from app.schemas import CutRequest, CutsUpdate, JobPublic, SettingPublic, SettingUpdate
 from app.services.manager import BusyError, JobNotFound, get_manager
 
 router = APIRouter(prefix="/api")
@@ -241,6 +241,20 @@ async def job_media(job_id: str) -> FileResponse:
     )
 
 
+@router.get("/jobs/{job_id}/strip/{index}")
+async def job_strip(job_id: str, index: int) -> FileResponse:
+    _check_id(job_id)
+    try:
+        path = await get_manager().strip_image(job_id, index)
+    except JobNotFound as exc:
+        raise HTTPException(status_code=404, detail="任务不存在") from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="缩略图不存在") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return FileResponse(path, media_type="image/jpeg")
+
+
 @router.get("/jobs/{job_id}/output")
 async def job_output(job_id: str) -> FileResponse:
     state = await _state(job_id)
@@ -271,11 +285,10 @@ async def export_job(job_id: str, fmt: str = "json") -> FileResponse:
     return FileResponse(path, media_type=media, filename=path.name)
 
 
-@router.post("/jobs/{job_id}/cut", response_model=JobPublic, response_model_by_alias=True)
-async def cut_job(job_id: str, body: CutRequest) -> JobPublic:
+async def _edit_public(job_id: str, action):
     _check_id(job_id)
     try:
-        state = await get_manager().cut(job_id, body.padding_sec)
+        state = await action()
     except JobNotFound as exc:
         raise HTTPException(status_code=404, detail="任务不存在") from exc
     except (EditorError, RuntimeError) as exc:
@@ -283,6 +296,26 @@ async def cut_job(job_id: str, body: CutRequest) -> JobPublic:
     except FFmpegError as exc:
         raise HTTPException(status_code=500, detail=str(exc)[:300]) from exc
     return state.to_public()
+
+
+@router.post("/jobs/{job_id}/edit/plan", response_model=JobPublic, response_model_by_alias=True)
+async def plan_edit(job_id: str, body: CutRequest) -> JobPublic:
+    return await _edit_public(job_id, lambda: get_manager().plan_edit(job_id, body.padding_sec))
+
+
+@router.put("/jobs/{job_id}/cuts", response_model=JobPublic, response_model_by_alias=True)
+async def update_cuts(job_id: str, body: CutsUpdate) -> JobPublic:
+    return await _edit_public(job_id, lambda: get_manager().save_cuts(job_id, body.cuts))
+
+
+@router.post("/jobs/{job_id}/cut/render", response_model=JobPublic, response_model_by_alias=True)
+async def render_edit(job_id: str) -> JobPublic:
+    return await _edit_public(job_id, lambda: get_manager().render_edit(job_id))
+
+
+@router.post("/jobs/{job_id}/cut", response_model=JobPublic, response_model_by_alias=True)
+async def cut_job(job_id: str, body: CutRequest) -> JobPublic:
+    return await _edit_public(job_id, lambda: get_manager().cut(job_id, body.padding_sec))
 
 
 class OpenDirRequest(BaseModel):

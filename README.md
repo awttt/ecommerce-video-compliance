@@ -26,7 +26,7 @@ ecommerce-video-compliance/
 │   │   ├── aggregate.py        # 相邻命中收成时间区间，画面和口播不合并
 │   │   ├── parsing.py          # 丢掉推测和空原文
 │   │   ├── rules.py            # 自定义类别、命中词、忽略词
-│   │   └── editor.py           # 按命中区间剪辑；口播按整句和停顿切
+│   │   └── editor.py           # 按命中区间剪辑；口播按引用的字和停顿切
 │   └── exporting.py
 ├── frontend/                   # React + Ant Design + Video.js
 ├── packaging/evc.spec          # PyInstaller
@@ -173,9 +173,9 @@ powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
 
 ## 剪辑预留
 
-`app/core/editor.py` 的 `plan_cuts` 和 `render_clean_video` 是「一键生成无违规视频」的入口。画面命中向两侧加边距。口播按整句切除：句尾再覆盖大约一个字的尾音；两句之间有停顿时，切在停顿上，避免把上一句的最后一个字留在下一句开头。然后用 FFmpeg 把剩下的画面和音轨重新编码拼接。
+`app/core/editor.py` 的 `plan_cuts` 和 `render_clean_video` 是「一键生成无违规视频」的入口。画面命中向两侧加边距。口播只切被引用的那几个字：句尾再覆盖大约一个字的尾音；这几个字后面有停顿时，切在停顿上，避免把上一句的最后一个字留在下一句开头。整句时间不放进删除段。然后用 FFmpeg 把剩下的画面和音轨重新编码拼接。
 
-界面里的「实验：剪掉命中片段」已经接到这个入口。接口是 `POST /api/jobs/{id}/cut`。一次上传多个视频用 `POST /api/jobs/batch`，排队识别，同一时间只处理一个。
+检测完成后点「剪辑」，会按上面的规则把删除段摆到时间轴上，这一步不编码。先点选一段，再用「设为起点」「设为终点」或 0.1 秒按钮微调；放大后也可以拖把手。点「生成成片」才重新编码。预览可以听原片、循环这一段，或按保留段跳过。接口是 `POST /api/jobs/{id}/edit/plan`、`PUT /api/jobs/{id}/cuts`、`POST /api/jobs/{id}/cut/render` 和 `GET /api/jobs/{id}/strip/{index}`。`POST /api/jobs/{id}/cut` 仍会按边距直接出片。一次上传多个视频用 `POST /api/jobs/batch`，排队识别，同一时间只处理一个。
 
 ## 测试
 

@@ -171,6 +171,45 @@ def test_upload_mock_pipeline_export_and_cleanup(tmp_path: Path, monkeypatch):
         book = load_workbook(BytesIO(sheet.content))
         header = [cell.value for cell in book.active[1]]
         assert header[:3] == ["时间点", "类别", "来源"]
+        assert body["cuts"] == []
+        assert body["has_edit_plan"] is False
+        assert body["edit_rendered"] is False
+
+        early = client.post(f"/api/jobs/{body['id']}/cut/render")
+        assert early.status_code == 400
+        assert "还没有剪辑方案" in early.text
+
+        output = video_dir(body["id"]) / "clean.mp4"
+        planned = client.post(f"/api/jobs/{body['id']}/edit/plan", json={"padding_sec": 0.2})
+        assert planned.status_code == 200, planned.text
+        assert planned.json()["has_edit_plan"] is True
+        assert planned.json()["edit_rendered"] is False
+        assert planned.json()["cuts"]
+        assert not output.exists()
+        assert "整句" not in planned.json()["message"]
+
+        strip = client.get(f"/api/jobs/{body['id']}/strip/0")
+        assert strip.status_code == 200, strip.text
+        assert strip.headers["content-type"].startswith("image/jpeg")
+        assert strip.content[:2] == b"\xff\xd8"
+        missing = client.get(f"/api/jobs/{body['id']}/strip/99")
+        assert missing.status_code == 404
+
+        saved = client.put(
+            f"/api/jobs/{body['id']}/cuts",
+            json={"cuts": [{"start_sec": 1.0, "end_sec": 0.4}]},
+        )
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["cuts"] == [{"start_sec": 0.4, "end_sec": 1.0}]
+        assert saved.json()["edit_rendered"] is False
+        assert not output.exists()
+
+        rendered = client.post(f"/api/jobs/{body['id']}/cut/render")
+        assert rendered.status_code == 200, rendered.text
+        assert rendered.json()["edit_rendered"] is True
+        assert rendered.json()["cuts"] == [{"start_sec": 0.4, "end_sec": 1.0}]
+        assert output.is_file()
+        assert 1.1 < probe_duration(output) < 1.8
 
         cut = client.post(f"/api/jobs/{body['id']}/cut", json={"padding_sec": 0.1})
         assert cut.status_code == 200, cut.text

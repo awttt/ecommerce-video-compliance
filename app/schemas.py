@@ -161,6 +161,11 @@ class RunConfig(BaseModel):
     rules: DetectionRules = Field(default_factory=lambda: DetectionRules())
 
 
+class CutSpan(BaseModel):
+    start_sec: float = Field(ge=0)
+    end_sec: float = Field(ge=0)
+
+
 class JobPublic(BaseModel):
     id: str
     filename: str
@@ -183,6 +188,9 @@ class JobPublic(BaseModel):
     mock: bool = False
     output_ready: bool = False
     preview_hint: str = ""
+    cuts: list[CutSpan] = Field(default_factory=list)
+    edit_rendered: bool = False
+    has_edit_plan: bool = False
     created_at: str
     updated_at: str
     finished_at: str | None = None
@@ -294,6 +302,10 @@ class SettingPublic(BaseModel):
 
 class CutRequest(BaseModel):
     padding_sec: float = Field(default=0.2, ge=0, le=2)
+
+
+class CutsUpdate(BaseModel):
+    cuts: list[CutSpan] = Field(default_factory=list, max_length=200)
 
 
 DEFAULT_SETTINGS: dict[str, object] = {

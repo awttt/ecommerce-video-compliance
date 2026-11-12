@@ -1,6 +1,8 @@
 from app.core.aggregate import aggregate
 from app.core.deepseek import chat_url
-from app.core.editor import _parse_silences, plan_cuts
+import pytest
+
+from app.core.editor import EditorError, _parse_silences, draft_cuts, normalize_cuts, plan_cuts
 from app.core.parsing import parse_frame_result
 from app.core.prompts import SPEECH_SYSTEM_PROMPT, SYSTEM_PROMPT, visual_system_prompt
 from app.core.rules import apply_rules
@@ -142,16 +144,24 @@ def test_plan_cuts_removes_hit_range_with_padding():
     assert keeps == [(0.0, 1.5), (4.5, 10)]
 
 
-def test_speech_cut_drops_the_last_character_without_eating_the_next_sentence():
-    # 原文时间停在 3.6，整句到 4.0，下一句 4.8 才开始。切点要盖过句尾，但不能进下一句。
+def test_speech_cut_follows_the_quoted_words_and_one_character_of_tail():
+    # 引用停在 3.6，整句从 2.0 到 4.0。删除段贴着引用，句尾多一个字，不扩到整句。
     finding = _speech(3.6, 3.6, sentence_end=4.0, next_start=4.8)
     finding = finding.model_copy(update={"sentence_start": 2.0})
     cuts, keeps = plan_cuts(10, [finding], padding=0.2)
-    assert 1.85 < cuts[0][0] < 2.0
-    assert cuts[0][1] > 4.15
-    assert cuts[0][1] < 4.8
-    assert keeps[1][0] == round(cuts[0][1], 3)
-    assert keeps[1][0] > 4.0
+    assert cuts[0][0] == pytest.approx(3.55, abs=0.02)
+    assert cuts[0][1] == pytest.approx(3.86, abs=0.02)
+    assert cuts[0][1] < 4.0
+    assert keeps[0][0] == 0
+    assert keeps[-1][1] == 10
+
+
+def test_picture_padding_does_not_stretch_the_spoken_quote():
+    finding = _speech(3.0, 3.4, sentence_end=9.0, next_start=8.0)
+    finding = finding.model_copy(update={"sentence_start": 0.2})
+    cuts, _keeps = plan_cuts(10, [finding], padding=2.0)
+    assert cuts[0][0] == pytest.approx(2.95, abs=0.02)
+    assert cuts[0][1] == pytest.approx(3.66, abs=0.02)
 
 
 def test_speech_cut_follows_the_pause_when_timestamps_overlap_one_character():
@@ -166,6 +176,59 @@ def test_speech_cut_crosses_a_touching_timestamp_by_about_one_character():
     finding = _speech(2.0, 4.0, next_start=4.08)
     cuts, _keeps = plan_cuts(10, [finding], padding=0.0)
     assert 4.18 <= cuts[0][1] <= 4.40
+
+
+def test_normalize_cuts_keeps_several_separate_ranges():
+    cuts, keeps = normalize_cuts(22, [(20, 21), (3, 5), (10, 14)])
+    assert cuts == [(3.0, 5.0), (10.0, 14.0), (20.0, 21.0)]
+    assert keeps == [(0.0, 3.0), (5.0, 10.0), (14.0, 20.0), (21.0, 22.0)]
+
+
+def test_normalize_cuts_keeps_the_seconds_the_user_dragged():
+    cuts, keeps = normalize_cuts(10, [(2, 4)])
+    assert cuts == [(2.0, 4.0)]
+    assert keeps == [(0.0, 2.0), (4.0, 10.0)]
+
+
+def test_normalize_cuts_drops_slivers_merges_overlaps_and_swaps_ends():
+    cuts, keeps = normalize_cuts(10, [(1, 1.02), (4, 2.5), (3.2, 3.6)])
+    assert cuts == [(2.5, 4.0)]
+    assert keeps == [(0.0, 2.5), (4.0, 10.0)]
+
+
+def test_speech_plan_uses_the_quoted_span_when_the_sentence_covers_the_video():
+    intro = _speech(5.31, 6.44, sentence_end=14.08, next_start=14.08).model_copy(update={"sentence_start": 0.0})
+    ending = _speech(14.09, 16.2, sentence_end=21.84).model_copy(
+        update={"sentence_start": 14.08, "text": "品牌是某某官方正品"}
+    )
+    cuts, keeps = plan_cuts(21.84, [intro, ending], padding=0.2)
+    assert cuts[0][0] == pytest.approx(5.26, abs=0.02)
+    assert cuts[0][1] == pytest.approx(6.70, abs=0.02)
+    assert cuts[1][0] == pytest.approx(14.04, abs=0.02)
+    assert cuts[1][1] == pytest.approx(16.46, abs=0.02)
+    assert keeps[0] == (0.0, round(cuts[0][0], 3))
+    assert keeps[-1][1] == 21.84
+    draft, draft_keeps = draft_cuts(21.84, [intro, ending], padding=0.2)
+    assert draft_keeps
+    assert draft[0][0] > 5
+
+
+def test_draft_cuts_returns_a_plan_when_the_quote_covers_the_video():
+    finding = _speech(0.0, 21.84)
+    with pytest.raises(EditorError, match="没有可保留的画面"):
+        plan_cuts(21.84, [finding], padding=0)
+    cuts, keeps = draft_cuts(21.84, [finding], padding=0)
+    assert keeps == []
+    assert cuts[0][0] == 0
+    assert cuts[-1][1] == 21.84
+
+
+def test_normalize_cuts_rejects_a_fully_removed_video_and_allows_an_empty_plan():
+    with pytest.raises(EditorError):
+        normalize_cuts(10, [(0, 10)])
+    cuts, keeps = normalize_cuts(10, [])
+    assert cuts == []
+    assert keeps == [(0.0, 10.0)]
 
 
 def test_parse_silences_pairs_start_and_end():

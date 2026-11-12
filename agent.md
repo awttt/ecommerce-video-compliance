@@ -67,8 +67,8 @@
 `plan_cuts(duration, findings, padding, silences=...)` 返回要删的区间和要留的区间。
 
 - 画面：`padding` 向两侧对称扩展。界面上的边距只按这个语义给画面用，范围 0–2 秒。
-- 口播：按整句切，而不是只切被引用的那几个字。句首只收很短的一段，避免吃进上一句。句尾再覆盖大约一个字（约 0.26 秒）。若 FFmpeg `silencedetect` 在句尾附近找到停顿，切在停顿上，使下一句开头不带上一句的最后一个字。下一句的时间戳若落在这个停顿之后，不要切进下一句的起音。两句时间戳几乎贴在一起且没有停顿时，仍向后多切大约一个字。
-- 没有句子边界的旧命中（升级前的记录）用命中自己的 `end_sec` 做同样的句尾补偿。新识别才会带上整句边界。
+- 口播：初始删除段用被引用的那几个字的起止（`start_sec`–`end_sec`），不把 `sentence_start`–`sentence_end` 整句放进去。句首只收很短的一段（不超过 0.05 秒，并且不超过画面边距）。句尾再覆盖大约一个字（约 0.26 秒）。画面边距不拉长口播。若 FFmpeg `silencedetect` 在这几个字的结尾附近找到停顿，切在停顿上，使下一句开头不带上一句的最后一个字。下一句的时间戳若落在这个停顿之后，不要切进下一句的起音。两句时间戳几乎贴在一起且没有停顿时，仍向后多切大约一个字。
+- 整句时间只在选中删除段时显示，方便把边缘再扩到没说中的半句。手改后的秒数是绝对时间，不再套画面边距，也不再加口播句尾。没有句子边界的旧命中同样按自己的 `start_sec`–`end_sec` 做句尾补偿。
 - 保留段短于 0.12 秒就丢掉。全部被切掉则报错，不生成空视频。
 - 编码是 libx264 veryfast、crf 22、yuv420p、aac，并加 `+faststart`。音轨编码失败就退回只有画面。剪辑前会探测静音；探测失败就只用时间戳，不要让静音探测失败把整个剪辑打挂。
 
@@ -87,7 +87,7 @@
 - `POST /jobs` 单文件字段名 `file`。`POST /jobs/batch` 字段名 `files`，一次最多 20 个。非法文件记在 `errors` 里，不要因此丢掉同批里的合法文件。
 - `GET /jobs`，`GET /jobs/{id}`，`GET /jobs/{id}/events`
 - `POST /jobs/{id}/cancel`，`DELETE /jobs/{id}`
-- `GET /jobs/{id}/media`，`GET /jobs/{id}/output`
+- `GET /jobs/{id}/media`，`GET /jobs/{id}/output`，`GET /jobs/{id}/strip/{index}`（时间轴缩略图 JPEG）
 - `GET /jobs/{id}/export?fmt=json|xlsx`
 - `POST /jobs/{id}/cut`，正文 `{padding_sec}`
 - `POST /system/open-dir`，打开 `exports` 或 `data`

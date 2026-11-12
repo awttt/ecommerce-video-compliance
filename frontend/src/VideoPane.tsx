@@ -5,20 +5,28 @@ import zhCN from "video.js/dist/lang/zh-CN.json";
 
 videojs.addLanguage("zh-CN", zhCN);
 
+export type PlayerControls = {
+  seek: (seconds: number, options?: { play?: boolean }) => void;
+};
+
 export function VideoPane({
   mediaUrl,
   mimeType,
   emptyText,
   onReady,
+  onTime,
 }: {
   mediaUrl: string | null;
   mimeType: string;
   emptyText: string;
-  onReady: (seek: (seconds: number) => void) => void;
+  onReady: (player: PlayerControls) => void;
+  onTime?: (seconds: number, playing: boolean) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const onReadyRef = useRef(onReady);
+  const onTimeRef = useRef(onTime);
   onReadyRef.current = onReady;
+  onTimeRef.current = onTime;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -33,13 +41,22 @@ export function VideoPane({
       language: "zh-CN",
       sources: [{ src: mediaUrl, type: mimeType || "video/mp4" }],
     });
-    onReadyRef.current((seconds: number) => {
-      player.currentTime(Math.max(0, seconds));
-      const pending = player.play();
-      pending?.catch(() => undefined);
+    const notify = () => onTimeRef.current?.(player.currentTime() || 0, !element.paused);
+    player.on("timeupdate", notify);
+    player.on("seeked", notify);
+    onReadyRef.current({
+      seek: (seconds, options) => {
+        player.currentTime(Math.max(0, seconds));
+        if (options?.play === false) {
+          element.pause();
+          return;
+        }
+        const pending = player.play();
+        pending?.catch(() => undefined);
+      },
     });
     return () => {
-      onReadyRef.current(() => undefined);
+      onReadyRef.current({ seek: () => undefined });
       player.dispose();
       host.replaceChildren();
     };

@@ -9,6 +9,13 @@ export interface Finding {
   备注: string;
   start_sec: number;
   end_sec: number;
+  sentence_start?: number | null;
+  sentence_end?: number | null;
+}
+
+export interface CutSpan {
+  start_sec: number;
+  end_sec: number;
 }
 
 export interface Job {
@@ -33,6 +40,9 @@ export interface Job {
   mock: boolean;
   output_ready: boolean;
   preview_hint: string;
+  cuts: CutSpan[];
+  edit_rendered: boolean;
+  has_edit_plan: boolean;
   created_at: string;
   updated_at: string;
   finished_at: string | null;

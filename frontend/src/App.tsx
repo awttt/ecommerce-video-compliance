@@ -39,17 +39,20 @@ import { useEffect, useRef, useState } from "react";
 import {
   cancelJob,
   createJobs,
-  cutJob,
   deleteJob,
   downloadExport,
   getJob,
   getSettings,
   listJobs,
   openDir,
+  planEdit,
+  renderEdit,
+  saveCuts,
   saveSettings,
 } from "./api";
-import { CATEGORY_COLOR, TERMINAL, type Finding, type Job, type PhraseRule, type Settings } from "./types";
-import { VideoPane } from "./VideoPane";
+import { CutTimeline } from "./CutTimeline";
+import { CATEGORY_COLOR, TERMINAL, type CutSpan, type Finding, type Job, type PhraseRule, type Settings } from "./types";
+import { VideoPane, type PlayerControls } from "./VideoPane";
 
 const { Dragger } = Upload;
 const { Text, Paragraph } = Typography;
@@ -61,6 +64,22 @@ function statusTag(status: string) {
   if (status === "queued") return <Tag color="processing">排队</Tag>;
   if (status === "running") return <Tag color="processing">识别中</Tag>;
   return <Tag>{status}</Tag>;
+}
+
+function coversDuration(cuts: CutSpan[], duration: number | null): boolean {
+  if (!duration || cuts.length === 0) return false;
+  const ordered = [...cuts].sort((left, right) => left.start_sec - right.start_sec);
+  let cursor = 0;
+  for (const cut of ordered) {
+    if (cut.start_sec - cursor >= 0.12) return false;
+    cursor = Math.max(cursor, cut.end_sec);
+  }
+  return duration - cursor < 0.12;
+}
+
+function sameCuts(left: CutSpan[], right: CutSpan[]): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((cut, index) => cut.start_sec === right[index]?.start_sec && cut.end_sec === right[index]?.end_sec);
 }
 
 function previewMime(filename: string): string {
@@ -100,8 +119,30 @@ export function Shell() {
   const [ruleNote, setRuleNote] = useState("");
   const [source, setSource] = useState<"media" | "output">("media");
   const [activeKey, setActiveKey] = useState("");
-  const seekRef = useRef<(seconds: number) => void>(() => undefined);
+  const [editorOn, setEditorOn] = useState(false);
+  const [cuts, setCuts] = useState<CutSpan[]>([]);
+  const [previewMode, setPreviewMode] = useState<"original" | "segment" | "keep">("keep");
+  const [selectedCut, setSelectedCut] = useState<CutSpan | null>(null);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [editBusy, setEditBusy] = useState(false);
+  const seekRef = useRef<PlayerControls["seek"]>(() => undefined);
   const defaultsApplied = useRef(false);
+  const seenJob = useRef<string | null>(null);
+  const saveTimer = useRef(0);
+  const saveToken = useRef(0);
+  const cutsRef = useRef(cuts);
+  const previewRef = useRef(previewMode);
+  const selectedCutRef = useRef(selectedCut);
+  const sourceRef = useRef(source);
+  const scrubRef = useRef(false);
+  const editorOnRef = useRef(editorOn);
+  const lastTime = useRef(0);
+  const pendingSeek = useRef<number | null>(null);
+  cutsRef.current = cuts;
+  previewRef.current = previewMode;
+  selectedCutRef.current = selectedCut;
+  sourceRef.current = source;
+  editorOnRef.current = editorOn;
   const [form] = Form.useForm();
 
   async function refreshSettings() {
@@ -152,6 +193,22 @@ export function Shell() {
     setIgnoreText(settings.rules.ignore_phrases.join("\n"));
     setRuleNote(settings.rules.note);
   }, [settings]);
+
+  useEffect(() => {
+    if (!job) {
+      seenJob.current = null;
+      return;
+    }
+    if (seenJob.current === job.id) return;
+    seenJob.current = job.id;
+    window.clearTimeout(saveTimer.current);
+    setPreviewMode("keep");
+    setSelectedCut(null);
+    setCurrentTime(0);
+    lastTime.current = 0;
+    setEditorOn(Boolean(job.has_edit_plan));
+    setCuts(job.cuts ?? []);
+  }, [job]);
 
   const jobId = job?.id;
   const jobStatus = job?.status;
@@ -251,9 +308,104 @@ export function Shell() {
     return `${finding.start_sec}-${finding.来源}-${finding.类别}-${finding.原文}`;
   }
 
+  function seekOriginal(sec: number, play = false) {
+    if (play) {
+      scrubRef.current = true;
+      window.setTimeout(() => {
+        scrubRef.current = false;
+      }, 400);
+    }
+    if (sourceRef.current !== "media") {
+      sourceRef.current = "media";
+      pendingSeek.current = sec;
+      setSource("media");
+      return;
+    }
+    seekRef.current(sec, { play });
+  }
+
+  function rememberCuts(next: CutSpan[]) {
+    setCuts(next);
+    if (!job) return;
+    const token = ++saveToken.current;
+    const id = job.id;
+    window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => {
+      saveCuts(id, next)
+        .then((saved) => {
+          if (saveToken.current !== token) return;
+          setCuts(saved.cuts);
+          setJob(saved);
+        })
+        .catch((error: Error) => message.error(error.message));
+    }, 500);
+  }
+
+  function handleTime(sec: number, playing: boolean) {
+    const previous = lastTime.current;
+    lastTime.current = sec;
+    if (editorOnRef.current) setCurrentTime(sec);
+    if (sourceRef.current !== "media" || !playing || scrubRef.current || !editorOnRef.current) return;
+    if (sec < previous || sec - previous > 0.45) return;
+    if (previewRef.current === "keep") {
+      const hit = cutsRef.current.find((cut) => previous < cut.start_sec + 0.02 && sec >= cut.start_sec && sec < cut.end_sec - 0.03);
+      if (!hit) return;
+      seekRef.current(hit.end_sec, { play: true });
+      return;
+    }
+    if (previewRef.current === "segment") {
+      const cut = selectedCutRef.current;
+      if (!cut || previous >= cut.end_sec || sec < cut.end_sec - 0.04) return;
+      seekRef.current(cut.start_sec, { play: true });
+    }
+  }
+
+  async function enterEditor() {
+    if (!job) return;
+    if (job.has_edit_plan) {
+      setEditorOn(true);
+      setCuts(job.cuts);
+      setSource("media");
+      return;
+    }
+    setEditBusy(true);
+    try {
+      const next = await planEdit(job.id, padding);
+      setJob(next);
+      setCuts(next.cuts);
+      setEditorOn(true);
+      setSource("media");
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "生成剪辑方案失败");
+    } finally {
+      setEditBusy(false);
+    }
+  }
+
+  async function generateEdit() {
+    if (!job) return;
+    const token = ++saveToken.current;
+    window.clearTimeout(saveTimer.current);
+    setEditBusy(true);
+    try {
+      const saved = await saveCuts(job.id, cutsRef.current);
+      if (saveToken.current !== token) return;
+      const next = await renderEdit(saved.id);
+      if (saveToken.current !== token) return;
+      setJob(next);
+      setCuts(next.cuts);
+      setSource("output");
+      message.success("剪辑视频已生成");
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "生成成片失败");
+    } finally {
+      setEditBusy(false);
+    }
+  }
+
   function seekTo(finding: Finding) {
     setActiveKey(findingKey(finding));
-    seekRef.current(finding.start_sec);
+    seekOriginal(finding.start_sec, true);
   }
 
   const columns: ColumnsType<Finding> = [
@@ -448,48 +600,87 @@ export function Shell() {
                       mediaUrl={mediaUrl}
                       mimeType={mediaMime}
                       emptyText="还没有可预览的视频"
-                      onReady={(seek) => {
-                        seekRef.current = seek;
+                      onTime={handleTime}
+                      onReady={(player) => {
+                        seekRef.current = player.seek;
+                        if (pendingSeek.current == null) return;
+                        const sec = pendingSeek.current;
+                        pendingSeek.current = null;
+                        player.seek(sec, { play: false });
                       }}
                     />
                     {job.preview_hint ? <div className="hint">{job.preview_hint}</div> : null}
+                    {editorOn && coversDuration(cuts, job.duration_sec) ? (
+                      <Alert
+                        style={{ marginTop: 12 }}
+                        type="warning"
+                        showIcon
+                        message="删除段盖住了整段视频。选中一段后，用「设为起点」「设为终点」或 0.1 秒按钮把边缘往里收，留下要保留的画面后再生成。"
+                      />
+                    ) : null}
+                    {editorOn && job.duration_sec ? (
+                      <CutTimeline
+                        jobId={job.id}
+                        duration={job.duration_sec}
+                        findings={job.findings}
+                        cuts={cuts}
+                        currentTime={currentTime}
+                        activeKey={activeKey}
+                        findingKey={findingKey}
+                        onSeek={(sec) => seekOriginal(sec, false)}
+                        onChange={rememberCuts}
+                        onGesture={(active) => {
+                          scrubRef.current = active;
+                        }}
+                        onSelectFinding={seekTo}
+                        onSelect={setSelectedCut}
+                        onActivate={(cut) => {
+                          if (previewRef.current === "segment") seekOriginal(cut.start_sec, true);
+                        }}
+                      />
+                    ) : job.duration_sec ? (
+                      <div
+                        className="timeline"
+                        onClick={(event) => {
+                          const rect = event.currentTarget.getBoundingClientRect();
+                          const ratio = (event.clientX - rect.left) / rect.width;
+                          seekOriginal(Math.max(0, ratio * (job.duration_sec || 0)), true);
+                        }}
+                      >
+                        {job.findings.map((finding) => (
+                          <Tooltip key={findingKey(finding)} title={`${finding.时间点} ${finding.来源} ${finding.类别} ${finding.原文}`}>
+                            <button
+                              type="button"
+                              className={`${finding.来源 === "口播" ? "seg speech" : "seg"}${activeKey === findingKey(finding) ? " active" : ""}`}
+                              style={{
+                                left: `${(finding.start_sec / (job.duration_sec || 1)) * 100}%`,
+                                width: `${Math.max(((finding.end_sec - finding.start_sec) / (job.duration_sec || 1)) * 100, 0.8)}%`,
+                                background: CATEGORY_COLOR[finding.类别] || "#5c6b7a",
+                              }}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                seekTo(finding);
+                              }}
+                            />
+                          </Tooltip>
+                        ))}
+                      </div>
+                    ) : null}
                     {job.duration_sec ? (
-                      <>
-                        <div
-                          className="timeline"
-                          onClick={(event) => {
-                            const rect = event.currentTarget.getBoundingClientRect();
-                            const ratio = (event.clientX - rect.left) / rect.width;
-                            seekRef.current(Math.max(0, ratio * (job.duration_sec || 0)));
-                          }}
-                        >
-                          {job.findings.map((finding) => (
-                            <Tooltip key={findingKey(finding)} title={`${finding.时间点} ${finding.来源} ${finding.类别} ${finding.原文}`}>
-                              <button
-                                type="button"
-                                className={`${finding.来源 === "口播" ? "seg speech" : "seg"}${activeKey === findingKey(finding) ? " active" : ""}`}
-                                style={{
-                                  left: `${(finding.start_sec / (job.duration_sec || 1)) * 100}%`,
-                                  width: `${Math.max(((finding.end_sec - finding.start_sec) / (job.duration_sec || 1)) * 100, 0.8)}%`,
-                                  background: CATEGORY_COLOR[finding.类别] || "#5c6b7a",
-                                }}
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  seekTo(finding);
-                                }}
-                              />
-                            </Tooltip>
-                          ))}
-                        </div>
-                        <div className="legend">
-                          {Object.entries(CATEGORY_COLOR).map(([name, color]) => (
-                            <span key={name}>
-                              <i style={{ background: color }} />
-                              {name}
-                            </span>
-                          ))}
-                        </div>
-                      </>
+                      <div className="legend">
+                        {Object.entries(CATEGORY_COLOR).map(([name, color]) => (
+                          <span key={name}>
+                            <i style={{ background: color }} />
+                            {name}
+                          </span>
+                        ))}
+                        {editorOn ? (
+                          <span>
+                            <i style={{ background: "#8d3d3d" }} />
+                            删除
+                          </span>
+                        ) : null}
+                      </div>
                     ) : null}
                     <Table
                       size="small"
@@ -513,25 +704,60 @@ export function Shell() {
                       </Button>
                       <Button
                         icon={<ScissorOutlined />}
-                        disabled={job.status !== "done" || job.findings.length === 0}
-                        onClick={() => {
-                          Modal.confirm({
-                            title: "按命中时间段生成新视频？",
-                            content: `画面命中会向两侧各扩展 ${padding} 秒。口播按整句切除，并切到句间停顿，避免把上一句的最后一个字留在下一句开头。然后重新编码拼接。`,
-                            okText: "开始剪辑",
-                            cancelText: "取消",
-                            onOk: async () => {
-                              const next = await cutJob(job.id, padding);
-                              setJob(next);
-                              setSource("output");
-                              message.success("剪辑视频已生成");
-                            },
-                          });
-                        }}
+                        disabled={editBusy || job.status !== "done" || job.findings.length === 0}
+                        onClick={() => enterEditor().catch((error: Error) => message.error(error.message))}
                       >
-                        实验：剪掉命中片段
+                        剪辑
                       </Button>
                       <InputNumber min={0} max={2} step={0.1} value={padding} onChange={(value) => setPadding(Number(value) || 0)} addonAfter="画面边距" />
+                      {editorOn ? (
+                        <>
+                          <Button
+                            type={job.edit_rendered && sameCuts(cuts, job.cuts ?? []) ? "default" : "primary"}
+                            disabled={editBusy || cuts.length === 0}
+                            onClick={() => generateEdit()}
+                          >
+                            {job.edit_rendered && sameCuts(cuts, job.cuts ?? []) ? "生成成片" : "生成成片（有未生成的修改）"}
+                          </Button>
+                          <Button
+                            disabled={editBusy}
+                            onClick={() => {
+                              Modal.confirm({
+                                title: "按命中重新生成删除段？",
+                                content: `会覆盖时间轴上改过的区间。画面命中向两侧各扩展 ${padding} 秒。口播只标被引用的那几个字，句尾再留大约一个字。`,
+                                okText: "重置",
+                                cancelText: "取消",
+                                onOk: async () => {
+                                  const token = ++saveToken.current;
+                                  window.clearTimeout(saveTimer.current);
+                                  const next = await planEdit(job.id, padding);
+                                  if (saveToken.current !== token) return;
+                                  setJob(next);
+                                  setCuts(next.cuts);
+                                  setEditorOn(true);
+                                  setSource("media");
+                                },
+                              });
+                            }}
+                          >
+                            重置为自动方案
+                          </Button>
+                          <Segmented
+                            size="small"
+                            value={previewMode}
+                            onChange={(value) => {
+                              const mode = value as "original" | "segment" | "keep";
+                              setPreviewMode(mode);
+                              if (mode === "segment" && selectedCut) seekOriginal(selectedCut.start_sec, true);
+                            }}
+                            options={[
+                              { label: "原片", value: "original" },
+                              { label: "这一段", value: "segment" },
+                              { label: "保留结果", value: "keep" },
+                            ]}
+                          />
+                        </>
+                      ) : null}
                       {running ? (
                         <Button danger onClick={() => cancelJob(job.id).then(setJob).catch((error: Error) => message.error(error.message))}>
                           取消

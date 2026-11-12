@@ -14,8 +14,8 @@ from pathlib import Path
 
 from app.core.aggregate import aggregate
 from app.core.deepseek import build_recognizer
-from app.core.editor import detect_silences, plan_cuts, render_clean_video
-from app.core.ffmpeg import probe_video
+from app.core.editor import detect_silences, draft_cuts, normalize_cuts, render_clean_video
+from app.core.ffmpeg import FFmpegError, extract_strip, probe_video
 from app.core.pipeline import JobCancelled, Progress, run_pipeline
 from app.core.speech import NoAudio, SpeechProgress, run_speech
 from app.core.tencent_asr import MockAsrClient, TencentAsrClient
@@ -23,13 +23,14 @@ from app.core.timeutil import utcnow
 from app.db import Database
 from app.exporting import export_file, write_json, write_xlsx
 from app.paths import audio_dir, data_dir, exports_dir, frames_dir, video_dir
-from app.schemas import DEFAULT_SETTINGS, DetectionRules, Finding, JobPublic, RawHit, RunConfig, SettingPublic, SettingUpdate
+from app.schemas import DEFAULT_SETTINGS, CutSpan, DetectionRules, Finding, JobPublic, RawHit, RunConfig, SettingPublic, SettingUpdate
 
 log = logging.getLogger(__name__)
 
 TERMINAL = {"done", "failed", "cancelled"}
 _PREVIEWABLE = {".mp4", ".webm", ".m4v"}
 _MAX_QUEUE = 20
+_strip_locks: dict[str, asyncio.Lock] = {}
 
 
 class JobNotFound(Exception):
@@ -50,6 +51,50 @@ def _preview_hint(path: str) -> str:
     if Path(path).suffix.lower() in _PREVIEWABLE:
         return ""
     return "该封装可能无法在窗口内直接预览，识别结果仍然可用。建议使用 H.264 MP4。"
+
+
+def _load_edit_plan(raw) -> dict | None:
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("cuts"), list):
+        return None
+    cuts: list[dict[str, float]] = []
+    for item in data["cuts"]:
+        if not isinstance(item, dict):
+            continue
+        try:
+            start = float(item["start_sec"])
+            end = float(item["end_sec"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        cuts.append({"start_sec": start, "end_sec": end})
+    try:
+        padding = float(data.get("padding_sec") or 0)
+    except (TypeError, ValueError):
+        padding = 0.0
+    return {"padding_sec": padding, "cuts": cuts, "rendered": bool(data.get("rendered"))}
+
+
+def _plan_cuts(plan: dict | None) -> list[dict[str, float]]:
+    if not plan:
+        return []
+    return list(plan.get("cuts") or [])
+
+
+def _plan_rendered(plan: dict | None) -> bool:
+    return bool(plan and plan.get("rendered"))
+
+
+def _plan_payload(padding_sec: float, cuts: list[tuple[float, float]], *, rendered: bool) -> dict:
+    return {
+        "padding_sec": padding_sec,
+        "cuts": [{"start_sec": start, "end_sec": end} for start, end in cuts],
+        "rendered": rendered,
+    }
 
 
 @dataclass
@@ -79,6 +124,7 @@ class JobState:
     updated_at: str
     finished_at: str | None
     findings: list[Finding] = field(default_factory=list)
+    edit_plan: dict | None = None
     visual_findings: list[Finding] = field(default_factory=list)
     speech_hits: list[RawHit] = field(default_factory=list)
     speech_ratio: float = 0.0
@@ -114,6 +160,7 @@ class JobState:
             "asr_error": self.asr_error,
             "options_json": json.dumps(self.options, ensure_ascii=False),
             "output_path": self.output_path,
+            "edit_plan": json.dumps(self.edit_plan, ensure_ascii=False) if self.edit_plan else None,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "finished_at": self.finished_at,
@@ -143,6 +190,9 @@ class JobState:
             mock=bool(self.options.get("mock")),
             output_ready=output_ready,
             preview_hint=_preview_hint(self.source_path),
+            cuts=[CutSpan(start_sec=item["start_sec"], end_sec=item["end_sec"]) for item in _plan_cuts(self.edit_plan)],
+            edit_rendered=_plan_rendered(self.edit_plan),
+            has_edit_plan=self.edit_plan is not None,
             created_at=self.created_at,
             updated_at=self.updated_at,
             finished_at=self.finished_at,
@@ -186,6 +236,7 @@ def _state_from_row(row, findings: list[Finding]) -> JobState:
         options=options,
         output_path=row["output_path"],
         created_at=row["created_at"],
+        edit_plan=_load_edit_plan(_cell(row, "edit_plan", None)),
         updated_at=row["updated_at"],
         finished_at=row["finished_at"],
         findings=findings,
@@ -755,6 +806,7 @@ class JobManager:
         shutil.rmtree(video_dir(job_id), ignore_errors=True)
         shutil.rmtree(frames_dir(job_id), ignore_errors=True)
         shutil.rmtree(audio_dir(job_id), ignore_errors=True)
+        _strip_locks.pop(job_id, None)
         for path in exports_dir().glob(f"{job_id}_*"):
             path.unlink(missing_ok=True)
 
@@ -770,25 +822,75 @@ class JobManager:
             write_xlsx(path, state.filename, state.duration_sec, state.fps, state.findings)
         return path
 
-    async def cut(self, job_id: str, padding_sec: float) -> JobState:
+    async def _editable(self, job_id: str) -> tuple[JobState, Path]:
         state = await self.get(job_id)
         if state.status != "done":
             raise RuntimeError("任务还没完成，不能剪辑")
-        if not state.findings:
-            raise RuntimeError("没有命中区间，无需剪辑")
         source = Path(state.source_path)
         if not source.is_file():
             raise RuntimeError("原视频不存在，无法剪辑")
+        return state, source
+
+    async def plan_edit(self, job_id: str, padding_sec: float) -> JobState:
+        state, source = await self._editable(job_id)
+        if not state.findings:
+            raise RuntimeError("没有命中区间，无需剪辑")
         probe = await probe_video(source)
+        duration = probe.duration or state.duration_sec or 0
         silences = await detect_silences(source)
-        _cuts, keeps = plan_cuts(
-            probe.duration or state.duration_sec or 0,
-            state.findings,
-            padding_sec,
-            silences=silences,
+        cuts, keeps = draft_cuts(duration, state.findings, padding_sec, silences)
+        await self.ensure_strip(job_id, source)
+        state.edit_plan = _plan_payload(padding_sec, cuts, rendered=False)
+        if keeps:
+            state.message = f"已生成剪辑方案，共 {len(cuts)} 段待删除"
+        else:
+            state.message = "删除段盖住了整段视频。选中一段后，用起点、终点或 0.1 秒按钮把边缘往里收，留下要保留的画面。"
+        state.touch()
+        await self.db.upsert_job(state.to_row())
+        self._publish(state)
+        return state
+
+    async def save_cuts(self, job_id: str, spans: list[CutSpan]) -> JobState:
+        state, source = await self._editable(job_id)
+        duration = state.duration_sec or 0
+        if duration <= 0:
+            probe = await probe_video(source)
+            duration = probe.duration or 0
+        padding = 0.2
+        if state.edit_plan is not None:
+            try:
+                padding = float(state.edit_plan.get("padding_sec") or 0)
+            except (TypeError, ValueError):
+                padding = 0.2
+        cuts, _keeps = normalize_cuts(
+            duration,
+            [(item.start_sec, item.end_sec) for item in spans],
+            require_keep=False,
         )
+        state.edit_plan = _plan_payload(padding, cuts, rendered=False)
+        state.message = f"已保存剪辑方案，共 {len(cuts)} 段待删除"
+        state.touch()
+        await self.db.upsert_job(state.to_row())
+        self._publish(state)
+        return state
+
+    async def render_edit(self, job_id: str) -> JobState:
+        state, source = await self._editable(job_id)
+        plan = state.edit_plan
+        if not plan or "cuts" not in plan:
+            raise RuntimeError("还没有剪辑方案")
+        probe = await probe_video(source)
+        duration = probe.duration or state.duration_sec or 0
+        cuts, keeps = normalize_cuts(
+            duration,
+            [(float(item["start_sec"]), float(item["end_sec"])) for item in plan["cuts"]],
+        )
+        if not cuts:
+            raise RuntimeError("没有要删除的区间，无需剪辑")
         output = video_dir(state.id) / "clean.mp4"
         await render_clean_video(source, output, keeps, probe)
+        padding = float(plan.get("padding_sec") or 0)
+        state.edit_plan = _plan_payload(padding, cuts, rendered=True)
         state.output_path = str(output)
         state.message = f"已生成剪辑视频，保留 {len(keeps)} 段"
         state.touch()
@@ -796,11 +898,47 @@ class JobManager:
         self._publish(state)
         return state
 
+    async def cut(self, job_id: str, padding_sec: float) -> JobState:
+        await self.plan_edit(job_id, padding_sec)
+        return await self.render_edit(job_id)
+
+    async def ensure_strip(self, job_id: str, source: Path) -> None:
+        """时间轴缩略图。已经有图就跳过；抽失败时留空，界面退回纯色条。"""
+        directory = frames_dir(job_id) / "strip"
+        if _strip_ready(directory):
+            return
+        lock = _strip_locks.setdefault(job_id, asyncio.Lock())
+        async with lock:
+            if _strip_ready(directory):
+                return
+            try:
+                await extract_strip(source, directory)
+            except (FFmpegError, OSError):
+                log.warning("timeline strip failed for %s", job_id)
+
+    async def strip_image(self, job_id: str, index: int) -> Path:
+        _state, source = await self._editable(job_id)
+        if index < 0 or index > 20_000:
+            raise FileNotFoundError
+        path = frames_dir(job_id) / "strip" / f"strip_{index:04d}.jpg"
+        if path.is_file() and path.stat().st_size > 0:
+            return path
+        await self.ensure_strip(job_id, source)
+        if path.is_file() and path.stat().st_size > 0:
+            return path
+        raise FileNotFoundError
+
 
 def combine_findings(visual: list[Finding], speech_hits: list[RawHit]) -> list[Finding]:
     merged = list(visual) + aggregate(speech_hits)
     merged.sort(key=lambda item: (item.start_sec, item.source, item.category, item.text))
     return merged
+
+
+def _strip_ready(directory: Path) -> bool:
+    if not directory.is_dir():
+        return False
+    return any(path.is_file() and path.stat().st_size > 0 for path in directory.glob("strip_*.jpg"))
 
 
 def _kill_processes(holder: dict) -> None:

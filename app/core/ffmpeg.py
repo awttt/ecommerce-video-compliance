@@ -266,6 +266,40 @@ async def extract_frames(
         await reader
 
 
+async def extract_strip(video: Path, directory: Path) -> int:
+    """大约每秒一张、高度约 48 像素的时间轴缩略图。失败时不留半成品。"""
+    directory.mkdir(parents=True, exist_ok=True)
+    pattern = str(directory / "strip_%04d.jpg")
+    cmd = [
+        resolve_bin("ffmpeg"),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-i",
+        str(video),
+        "-map",
+        "0:v:0",
+        "-an",
+        "-vf",
+        "fps=1,scale=-2:48",
+        "-q:v",
+        "8",
+        "-start_number",
+        "0",
+        pattern,
+    ]
+    code, text = await _run(cmd)
+    files = [path for path in directory.glob("strip_*.jpg") if path.stat().st_size > 0]
+    if code != 0 or not files:
+        for path in directory.glob("strip_*.jpg"):
+            path.unlink(missing_ok=True)
+        detail = text.strip() or "时间轴缩略图生成失败"
+        raise FFmpegError(detail[:300])
+    return len(files)
+
+
 async def ffmpeg_encoders() -> set[str]:
     global _ENCODERS
     if _ENCODERS is None:

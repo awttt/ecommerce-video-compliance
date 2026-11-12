@@ -32,6 +32,10 @@ class EditorError(RuntimeError):
     pass
 
 
+_MIN_CUT = 0.05
+_MAX_CUTS = 200
+
+
 def merge_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
     if not intervals:
         return []
@@ -46,6 +50,51 @@ def merge_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, f
     return merged
 
 
+def keeps_for(
+    duration: float,
+    cuts: list[tuple[float, float]],
+    min_keep: float = 0.12,
+) -> list[tuple[float, float]]:
+    """由已经合并、按时间排好的删除段得到保留段。"""
+    keeps: list[tuple[float, float]] = []
+    cursor = 0.0
+    for start, end in cuts:
+        if start - cursor >= min_keep:
+            keeps.append((round(cursor, 3), round(start, 3)))
+        cursor = max(cursor, end)
+    if duration - cursor >= min_keep:
+        keeps.append((round(cursor, 3), round(duration, 3)))
+    return keeps
+
+
+def normalize_cuts(
+    duration: float,
+    cuts: list[tuple[float, float]],
+    min_keep: float = 0.12,
+    *,
+    require_keep: bool = True,
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    """收动手改的删除段。只夹取、合并，不再加画面边距或口播句尾。"""
+    if duration <= 0:
+        raise EditorError("视频时长无效，无法剪辑")
+    if len(cuts) > _MAX_CUTS:
+        raise EditorError("删除段不能超过 200 条")
+    cleaned: list[tuple[float, float]] = []
+    for start, end in cuts:
+        start = max(0.0, min(float(start), duration))
+        end = max(0.0, min(float(end), duration))
+        if end < start:
+            start, end = end, start
+        if end - start < _MIN_CUT:
+            continue
+        cleaned.append((round(start, 3), round(end, 3)))
+    merged = merge_intervals(cleaned)
+    keeps = keeps_for(duration, merged, min_keep)
+    if require_keep and not keeps:
+        raise EditorError("删除段盖住了整段视频，没有可保留的画面")
+    return merged, keeps
+
+
 def plan_cuts(
     duration: float,
     findings: list[Finding],
@@ -55,9 +104,33 @@ def plan_cuts(
 ) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
     """返回 (要删掉的区间, 要保留的区间)。
 
-    画面命中向两侧加同样的边距。口播命中按整句切：句尾再吃掉大约一个字的尾音，
-    下一句已经开始时则停在两句之间的停顿，避免把 A 的最后一个字留在 B 的开头。
+    画面命中向两侧加同样的边距。口播只切被引用的那几个字，句尾再吃掉大约一个字，
+    字后面有停顿时则切在停顿上，避免把上一句的最后一个字留在下一句开头。
     """
+    cuts = _planned_cuts(duration, findings, padding, silences)
+    keeps = keeps_for(duration, cuts, min_keep)
+    if not keeps:
+        raise EditorError("命中区间覆盖了整个视频，没有可保留的画面")
+    return cuts, keeps
+
+
+def draft_cuts(
+    duration: float,
+    findings: list[Finding],
+    padding: float,
+    silences: list[tuple[float, float]] | None = None,
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    """时间轴上的初始删除段。整段都被盖住时也返回，方便把边缘往里拖。"""
+    cuts = _planned_cuts(duration, findings, padding, silences)
+    return normalize_cuts(duration, cuts, require_keep=False)
+
+
+def _planned_cuts(
+    duration: float,
+    findings: list[Finding],
+    padding: float,
+    silences: list[tuple[float, float]] | None,
+) -> list[tuple[float, float]]:
     if duration <= 0:
         raise EditorError("视频时长无效，无法剪辑")
     if not findings:
@@ -68,18 +141,7 @@ def plan_cuts(
         window = _speech_window(item, padding, duration, pauses) if item.source == "口播" else _picture_window(item, padding, duration)
         if window is not None:
             cuts.append(window)
-    cuts = merge_intervals(cuts)
-    keeps: list[tuple[float, float]] = []
-    cursor = 0.0
-    for start, end in cuts:
-        if start - cursor >= min_keep:
-            keeps.append((round(cursor, 3), round(start, 3)))
-        cursor = max(cursor, end)
-    if duration - cursor >= min_keep:
-        keeps.append((round(cursor, 3), round(duration, 3)))
-    if not keeps:
-        raise EditorError("命中区间覆盖了整个视频，没有可保留的画面")
-    return cuts, keeps
+    return merge_intervals(cuts)
 
 
 def _picture_window(item: Finding, padding: float, duration: float) -> tuple[float, float] | None:
@@ -96,15 +158,12 @@ def _speech_window(
     duration: float,
     silences: list[tuple[float, float]],
 ) -> tuple[float, float] | None:
+    """删除段只用引用原文的起止。整句时间留给界面提示，不参与这里。"""
     start = item.start_sec
     end = item.end_sec
-    if item.sentence_start is not None:
-        start = min(start, item.sentence_start)
-    if item.sentence_end is not None:
-        end = max(end, item.sentence_end)
     lead = min(max(padding, 0.0), _SPEECH_LEAD)
     cut_start = max(0.0, start - lead)
-    cut_end = _speech_end(end, item.next_start, duration, silences, padding)
+    cut_end = _speech_end(end, item.next_start, duration, silences)
     if cut_end - cut_start <= 0.01:
         return None
     return cut_start, cut_end
@@ -115,9 +174,8 @@ def _speech_end(
     next_start: float | None,
     duration: float,
     silences: list[tuple[float, float]],
-    padding: float,
 ) -> float:
-    tail = max(_SPEECH_TAIL, max(padding, 0.0))
+    tail = _SPEECH_TAIL
     pause = _pause_after(end, next_start, silences)
     if pause is not None:
         silence_start, silence_end = pause

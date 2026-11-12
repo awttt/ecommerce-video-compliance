@@ -1,4 +1,4 @@
-import type { BatchResult, Job, Settings } from "./types";
+import type { BatchResult, CutSpan, Job, Settings } from "./types";
 
 async function readError(response: Response): Promise<string> {
   try {
@@ -58,12 +58,24 @@ export function deleteJob(id: string): Promise<void> {
   return request<void>(`/api/jobs/${id}`, { method: "DELETE" });
 }
 
-export function cutJob(id: string, paddingSec: number): Promise<Job> {
-  return request<Job>(`/api/jobs/${id}/cut`, {
+export function planEdit(id: string, paddingSec: number): Promise<Job> {
+  return request<Job>(`/api/jobs/${id}/edit/plan`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ padding_sec: paddingSec }),
   });
+}
+
+export function saveCuts(id: string, cuts: CutSpan[]): Promise<Job> {
+  return request<Job>(`/api/jobs/${id}/cuts`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cuts }),
+  });
+}
+
+export function renderEdit(id: string): Promise<Job> {
+  return request<Job>(`/api/jobs/${id}/cut/render`, { method: "POST" });
 }
 
 export function openDir(target: "exports" | "data"): Promise<{ path: string }> {
