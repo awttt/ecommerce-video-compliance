@@ -15,7 +15,16 @@ from pathlib import Path
 
 from app.core.aggregate import aggregate, refold_findings
 from app.core.deepseek import build_recognizer
-from app.core.relay import CHAT_BASE, KEY_GROUP_ID, KEY_NAME, PICTURE_MODEL, RelayClient, RelayError, usable_api_key
+from app.core.relay import (
+    CHAT_BASE,
+    KEY_GROUP_ID,
+    KEY_NAME,
+    PICTURE_MODEL,
+    RelayClient,
+    RelayError,
+    configured_model,
+    usable_api_key,
+)
 from app.logging_setup import redact
 from app.core.editor import detect_silences, draft_cuts, normalize_cuts, render_clean_video
 from app.core.ffmpeg import FFmpegError, extract_strip, probe_video
@@ -685,7 +694,7 @@ class JobManager:
         secret_id, secret_key, region, _secret_source = self._effective_tencent()
         options = state.options
         base_url = str(options.get("base_url") or self._settings["base_url"])
-        model = str(options.get("model") or self._settings["model"])
+        model = configured_model(options.get("model") or self._settings["model"])
         if source == "account":
             base_url = CHAT_BASE
             model = PICTURE_MODEL

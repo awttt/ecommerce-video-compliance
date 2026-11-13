@@ -15,8 +15,17 @@ CHAT_BASE = "https://token4u.cc/v1"
 KEY_NAME = "电商视频合规"
 # 用户可见分组「国产模型-bot创建」。Key 不绑这个分组时，中转站不会给它分配渠道。
 KEY_GROUP_ID = 14
-# 该分组公布的 DeepSeek 模型。登录后的画面请求固定用这个名字。
-PICTURE_MODEL = "deepseek-v4.1-flash-1017"
+# 登录后的画面和口播文本请求固定用这个名字。glm-5.3-flash 支持 OpenAI 兼容的视觉输入，峰值价格大约是 DeepSeek 的四分之一。
+PICTURE_MODEL = "glm-5.3-flash"
+
+
+def configured_model(value: object) -> str:
+    """把空值和旧的 DeepSeek 模型名换成当前画面模型。其它已保存的名字保留。"""
+    text = str(value or "").strip()
+    if not text or text.lower().startswith("deepseek"):
+        return PICTURE_MODEL
+    return text
+
 
 _REASON = {
     "INVALID_CREDENTIALS": (400, "邮箱或密码不正确"),

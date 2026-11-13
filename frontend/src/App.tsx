@@ -618,7 +618,7 @@ export function Shell() {
           <Col xs={24} lg={8}>
             <Card title="上传视频">
               {settings?.mock_mode ? (
-                <Alert type="warning" showIcon style={{ marginBottom: 12 }} message="模拟识别已打开，不会调用 DeepSeek。" />
+                <Alert type="warning" showIcon style={{ marginBottom: 12 }} message="模拟识别已打开，不会调用模型。" />
               ) : null}
               {!settings.has_api_key && !settings.mock_mode ? (
                 <Alert
@@ -978,7 +978,7 @@ export function Shell() {
 
       <Drawer title="设置" open={settingsOpen} onClose={() => setSettingsOpen(false)} width={460}>
         <Paragraph type="secondary">
-          当前账号 {settings.account_email}。画面识别使用这个账号的密钥，请求地址固定为 https://token4u.cc/v1，模型固定为 deepseek-v4.1-flash-1017。口播继续用腾讯云。
+          当前账号 {settings.account_email}。画面识别使用这个账号的密钥，请求地址固定为 https://token4u.cc/v1，模型固定为 glm-5.3-flash。口播继续用腾讯云。
         </Paragraph>
         <Paragraph type="secondary">
           API Key 只保存在本机数据库。当前来源：
@@ -1018,15 +1018,24 @@ export function Shell() {
           <Form.Item label="JPEG 质量（2 最清晰）" name="jpeg_q" rules={[{ required: true }]}>
             <InputNumber min={2} max={15} style={{ width: "100%" }} />
           </Form.Item>
-          <Form.Item label="图像细节" name="detail">
+          <Form.Item
+            label="图像细节"
+            name="detail"
+            extra="低细节会把抽帧长边压到不超过 640。模型只接收图片，不接受 detail 参数。"
+          >
             <Select
               options={[
                 { value: "original", label: "原图（适合小字价格）" },
-                { value: "low", label: "低细节（更快，可能漏小字）" },
+                { value: "low", label: "低细节（长边不超过 640）" },
               ]}
             />
           </Form.Item>
-          <Form.Item label="思考模式" name="thinking" valuePropName="checked">
+          <Form.Item
+            label="思考模式"
+            name="thinking"
+            valuePropName="checked"
+            extra="glm-5.3-flash 不能关闭思考。关掉时用低强度推理，打开时用高强度。"
+          >
             <Switch checkedChildren="开" unCheckedChildren="关" />
           </Form.Item>
           <Form.Item label="单帧超时（秒）" name="timeout_sec">

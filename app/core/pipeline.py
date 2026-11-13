@@ -22,6 +22,14 @@ class JobCancelled(Exception):
     pass
 
 
+def recognition_max_edge(max_width: int, detail: str) -> int:
+    """低细节只在本地缩小长边。模型图片对象不接受 detail。"""
+    edge = max(1, int(max_width))
+    if detail == "low":
+        return min(edge, 640)
+    return edge
+
+
 class Progress:
     def __init__(
         self,
@@ -170,7 +178,7 @@ async def _run(
                 video,
                 work_dir,
                 fps=config.fps,
-                max_edge=config.max_width,
+                max_edge=recognition_max_edge(config.max_width, config.detail),
                 jpeg_q=config.jpeg_q,
                 duration=probe.duration,
                 cancel=cancel,

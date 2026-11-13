@@ -11,7 +11,7 @@ pytestmark = pytest.mark.skipif(ffmpeg_bin() is None or not has_encoder("libx264
 
 
 def _config(**overrides) -> RunConfig:
-    data = dict(fps=1, concurrency=2, max_width=640, jpeg_q=6, mock=True, api_key="", model="deepseek-flash")
+    data = dict(fps=1, concurrency=2, max_width=640, jpeg_q=6, mock=True, api_key="", model="glm-5.3-flash")
     data.update(overrides)
     return RunConfig(**data)
 

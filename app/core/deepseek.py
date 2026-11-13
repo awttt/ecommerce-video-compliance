@@ -1,4 +1,8 @@
-"""DeepSeek V4.1 Flash 多模态调用。模型名 deepseek-flash，默认关闭思考模式。"""
+"""OpenAI 兼容的画面与口播文本调用。模型名 glm-5.3-flash。
+
+glm-5.3-flash 拒绝 thinking.type=disabled，并且省略 reasoning_effort 时默认是 max。
+思考开关因此改成推理强度：关闭用 low，打开用 high。图片只传 image_url.url。
+"""
 
 from __future__ import annotations
 
@@ -22,6 +26,7 @@ from app.schemas import DetectionRules, Frame, RawHit, RunConfig
 log = logging.getLogger(__name__)
 
 _RETRY_STATUS = {408, 409, 429, 500, 502, 503, 504}
+_MAX_TOKENS = {"low": 2048, "high": 4096}
 
 
 class Recognizer(Protocol):
@@ -44,6 +49,16 @@ def chat_url(base_url: str) -> str:
     if base.endswith("/chat/completions"):
         return base
     return base + "/chat/completions"
+
+
+def model_controls(thinking: bool) -> dict:
+    """glm-5.3-flash 必须开启思考。强度用 low 代替以前的关闭，避免默认 max。"""
+    effort = "high" if thinking else "low"
+    return {
+        "max_tokens": _MAX_TOKENS[effort],
+        "thinking": {"type": "enabled"},
+        "reasoning_effort": effort,
+    }
 
 
 def _encode_image(path: str) -> str:
@@ -136,16 +151,12 @@ class DeepSeekRecognizer:
                 {"role": "system", "content": speech_system_prompt(self.config.rules)},
                 {"role": "user", "content": speech_user_prompt(lines, self.config.rules)},
             ],
-            "max_tokens": 1024,
             "response_format": {"type": "json_object"},
-            "thinking": {"type": "enabled" if self.config.thinking else "disabled"},
         }
-        if self.config.thinking:
-            body["reasoning_effort"] = "low"
+        body.update(model_controls(self.config.thinking))
         return body
 
     def _body(self, frame: Frame, encoded: str) -> dict:
-        detail = "original" if self.config.detail == "high" else self.config.detail
         body: dict = {
             "model": self.config.model,
             "messages": [
@@ -156,24 +167,18 @@ class DeepSeekRecognizer:
                         {"type": "text", "text": user_prompt(frame, self.config.rules)},
                         {
                             "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{encoded}",
-                                "detail": detail,
-                            },
+                            "image_url": {"url": f"data:image/jpeg;base64,{encoded}"},
                         },
                     ],
                 },
             ],
-            "max_tokens": 768,
             "response_format": {"type": "json_object"},
-            "thinking": {"type": "enabled" if self.config.thinking else "disabled"},
         }
-        if self.config.thinking:
-            body["reasoning_effort"] = "low"
+        body.update(model_controls(self.config.thinking))
         return body
 
     async def _complete(self, client: httpx.AsyncClient, body: dict) -> str:
-        last_error = "DeepSeek 请求失败"
+        last_error = "模型请求失败"
         for attempt in range(3):
             try:
                 response = await client.post(
@@ -182,11 +187,11 @@ class DeepSeekRecognizer:
                     json=body,
                 )
             except httpx.TimeoutException as exc:
-                last_error = "DeepSeek 请求超时"
-                log.warning("deepseek timeout attempt %s: %s", attempt + 1, exc)
+                last_error = "模型请求超时"
+                log.warning("chat timeout attempt %s: %s", attempt + 1, exc)
             except httpx.HTTPError as exc:
-                last_error = "无法连接 DeepSeek，请检查网络"
-                log.warning("deepseek network attempt %s: %s", attempt + 1, exc)
+                last_error = "无法连接模型服务，请检查网络"
+                log.warning("chat network attempt %s: %s", attempt + 1, exc)
             else:
                 if response.status_code == 200:
                     return _message_text(response.json())
@@ -194,7 +199,7 @@ class DeepSeekRecognizer:
                 if response.status_code not in _RETRY_STATUS:
                     raise APIStatusError(response.status_code, detail)
                 last_error = detail
-                log.warning("deepseek status %s attempt %s", response.status_code, attempt + 1)
+                log.warning("chat status %s attempt %s", response.status_code, attempt + 1)
             await asyncio.sleep(0.4 * (2**attempt))
         raise RuntimeError(last_error)
 
@@ -203,7 +208,7 @@ def _message_text(payload: dict) -> str:
     try:
         message = payload["choices"][0]["message"]
     except (KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError("DeepSeek 响应缺少内容") from exc
+        raise RuntimeError("模型响应缺少内容") from exc
     content = message.get("content")
     if isinstance(content, list):
         content = "".join(
@@ -223,10 +228,10 @@ def _error_detail(response: httpx.Response) -> str:
         message = response.text
     message = redact(str(message or "")).strip().replace("\n", " ")
     if response.status_code in {401, 403}:
-        return "DeepSeek API Key 无效或没有权限"
+        return "模型 API Key 无效或没有权限"
     if not message:
-        return f"DeepSeek 返回 HTTP {response.status_code}"
-    return f"DeepSeek 返回 HTTP {response.status_code}：{message[:240]}"
+        return f"模型返回 HTTP {response.status_code}"
+    return f"模型返回 HTTP {response.status_code}：{message[:240]}"
 
 
 class MockRecognizer:
@@ -324,5 +329,5 @@ def build_recognizer(config: RunConfig) -> DeepSeekRecognizer | MockRecognizer:
     if config.mock:
         return MockRecognizer(config.rules)
     if not config.api_key:
-        raise RuntimeError("未配置 DeepSeek API Key。请在设置中填写后再开始检测。")
+        raise RuntimeError("未配置画面识别 API Key。请登录后再开始检测。")
     return DeepSeekRecognizer(config)

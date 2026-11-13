@@ -375,3 +375,72 @@ def test_chat_url_accepts_official_base():
     assert chat_url("https://api.deepseek.com/v1/") == "https://api.deepseek.com/v1/chat/completions"
     assert chat_url("https://api.deepseek.com/chat/completions") == "https://api.deepseek.com/chat/completions"
     assert chat_url("https://token4u.cc/v1") == "https://token4u.cc/v1/chat/completions"
+
+
+def test_glm_request_enables_thinking_and_drops_image_detail():
+    from app.core.deepseek import DeepSeekRecognizer, model_controls
+    from app.core.pipeline import recognition_max_edge
+    from app.core.relay import PICTURE_MODEL, configured_model
+    from app.schemas import DEFAULT_SETTINGS, RunConfig
+
+    assert configured_model("deepseek-flash") == PICTURE_MODEL
+    assert configured_model("deepseek-v4.1-flash") == PICTURE_MODEL
+    assert configured_model("deepseek-v4.1-flash-1017") == PICTURE_MODEL
+    assert configured_model("DeepSeek-V4") == PICTURE_MODEL
+    assert configured_model("  ") == PICTURE_MODEL
+    assert configured_model("glm-4.5-air") == "glm-4.5-air"
+    assert RunConfig().model == PICTURE_MODEL
+    assert DEFAULT_SETTINGS["model"] == PICTURE_MODEL
+
+    assert model_controls(False) == {
+        "max_tokens": 2048,
+        "thinking": {"type": "enabled"},
+        "reasoning_effort": "low",
+    }
+    assert model_controls(True)["reasoning_effort"] == "high"
+    assert model_controls(True)["max_tokens"] == 4096
+
+    recognizer = DeepSeekRecognizer(RunConfig(thinking=False, detail="low"))
+    body = recognizer._body(Frame(index=0, start_sec=0, end_sec=1, path="frame.jpg"), "abcd")
+    assert body["model"] == PICTURE_MODEL
+    assert body["thinking"] == {"type": "enabled"}
+    assert body["reasoning_effort"] == "low"
+    assert body["max_tokens"] == 2048
+    assert body["response_format"] == {"type": "json_object"}
+    assert "temperature" not in body
+    image = body["messages"][1]["content"][1]
+    assert image == {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,abcd"}}
+
+    speech = recognizer._speech_body([SpeechSentence(text="九十九元", start_sec=1, end_sec=2)])
+    assert speech["model"] == PICTURE_MODEL
+    assert speech["response_format"] == {"type": "json_object"}
+    assert speech["reasoning_effort"] == "low"
+    assert "image_url" not in str(speech["messages"])
+
+    thinking = DeepSeekRecognizer(RunConfig(thinking=True))
+    assert thinking._speech_body([SpeechSentence(text="九十九元", start_sec=1, end_sec=2)])["reasoning_effort"] == "high"
+    assert recognition_max_edge(1280, "original") == 1280
+    assert recognition_max_edge(1280, "high") == 1280
+    assert recognition_max_edge(1280, "low") == 640
+    assert recognition_max_edge(480, "low") == 480
+
+
+async def test_saved_deepseek_model_loads_as_glm(tmp_path):
+    from app.core.relay import PICTURE_MODEL
+    from app.db import Database
+    from app.schemas import DEFAULT_SETTINGS
+
+    db = Database(tmp_path / "app.db")
+    await db.connect()
+    stored = dict(DEFAULT_SETTINGS)
+    stored["model"] = "deepseek-v4.1-flash-1017"
+    stored["base_url"] = "https://example.invalid"
+    await db.save_settings(stored)
+    loaded = await db.load_settings()
+    assert loaded["model"] == PICTURE_MODEL
+    assert loaded["base_url"] == "https://example.invalid"
+    custom = dict(DEFAULT_SETTINGS)
+    custom["model"] = "glm-4.5-air"
+    await db.save_settings(custom)
+    assert (await db.load_settings())["model"] == "glm-4.5-air"
+    await db.close()

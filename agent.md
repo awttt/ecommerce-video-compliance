@@ -1,6 +1,6 @@
 # 给 Agent 的项目说明
 
-本地电商视频合规检测。用户上传视频后，程序抽帧并用 DeepSeek 看画面，同时用腾讯云录音文件识别看口播，标出价格、规格、品牌和时间区间，可导出，也可把命中片段剪掉后重新拼接。只跑在本机，不部署云端。界面、提示词和导出字段用中文；代码标识符用英文。
+本地电商视频合规检测。用户上传视频后，程序抽帧并用 `glm-5.3-flash` 看画面，同时用腾讯云录音文件识别看口播，标出价格、规格、品牌和时间区间，可导出，也可把命中片段剪掉后重新拼接。只跑在本机，不部署云端。界面、提示词和导出字段用中文；代码标识符用英文。
 
 先读本文件，再按下面的地图改代码。用户向的说明在 `README.md`。不要另起一个项目。
 
@@ -10,11 +10,11 @@
 - 类别只有「价格」「规格」「品牌」。来源只有「画面」「口播」。两者即使原文相同也不合并。
 - 导出固定 8 列，顺序不要改：时间点、类别、来源、原文、位置、置信度、判定理由、备注。JSON 在 `结果` 数组里。口播位置固定为「口播内容」。
 - 口播原文必须是某一句转写里的连续子串，对不上就丢掉。画面命中的时间是抽帧区间，不是模型自己编的时间。
-- 官方接口的默认模型名是 `deepseek-flash`。代码不要自己插入 `/v1`。`chat_url()` 只在基地址后面补 `/chat/completions`；基地址已经以该路径结尾就原样使用。当前这台机器的网关把基地址配成 `https://token4u.cc/v1`，模型 id 是 `deepseek-v4.1-flash`，存在本机数据库里。改代码时不要把用户已保存的地址和模型改回默认值。
-- 视觉请求只在 user 消息里放 `image_url` 的 data URL。默认 `"thinking": {"type": "disabled"}`，思考关闭时不要再带 `reasoning_effort`。使用 `response_format: json_object`；若 400 且错误提到 `response_format`，去掉该字段重试一次。408/409/429/500/502/503/504 和网络超时可重试。401/403 表示密钥无效。请求里不要带 temperature。
+- 画面模型是 `glm-5.3-flash`（`PICTURE_MODEL`）。登录后的请求固定用这个名字，基地址固定为 `https://token4u.cc/v1`。`chat_url()` 只在基地址后面补 `/chat/completions`；基地址已经以该路径结尾就原样使用，不要自己再插入 `/v1`。加载设置时，空的模型名和 `deepseek*`（例如 `deepseek-flash`、`deepseek-v4.1-flash`、`deepseek-v4.1-flash-1017`）改成 `glm-5.3-flash`。其它已保存的模型名保留，但登录账号发起的请求仍固定用 `glm-5.3-flash`。不要改用户已保存的基地址。
+- 视觉请求只在 user 消息里放 `image_url.url` 的 data URL，不要带 `detail`。`glm-5.3-flash` 的 `thinking.type` 只能是 `enabled`，传 `disabled` 会 400。思考开关关闭时带 `reasoning_effort: low` 和 `max_tokens: 2048`；打开时用 `high` 和 `4096`。不要省略 `reasoning_effort`，上游默认是 `max`。使用 `response_format: json_object`；若 400 且错误提到 `response_format`，去掉该字段重试一次。408/409/429/500/502/503/504 和网络超时可重试。401/403 表示密钥无效。请求里不要带 temperature。低细节只把抽帧长边压到不超过 640，不传给模型。
 - 服务只监听 `127.0.0.1` 或 `localhost`。不要改成对外网卡。
 - 密钥只放在 gitignore 的 `.env` 和 `data/app.db`。不要写进任务记录、日志、测试、提交或聊天回复。`GET /api/settings` 只返回打码后的密钥。PUT 时空的密钥字段表示「不修改」。`clear_api_key` / `clear_tencent_secret` 只清本机保存的值。
-- 有效密钥的优先级：DeepSeek 用数据库里的 `api_key`，否则用 `DEEPSEEK_API_KEY`。腾讯云必须 SecretId 和 SecretKey 成对出现，数据库一对优先，否则用 `TENCENTCLOUD_SECRET_ID` + `TENCENTCLOUD_SECRET_KEY`。地域用设置里的 `tencent_region`，否则 `TENCENTCLOUD_REGION`，否则 `ap-shanghai`。基地址没有环境变量，只在数据库设置里。
+- 有效密钥的优先级：画面识别用数据库里的 `api_key`，否则用 `DEEPSEEK_API_KEY`（环境变量名保持不变）。腾讯云必须 SecretId 和 SecretKey 成对出现，数据库一对优先，否则用 `TENCENTCLOUD_SECRET_ID` + `TENCENTCLOUD_SECRET_KEY`。地域用设置里的 `tencent_region`，否则 `TENCENTCLOUD_REGION`，否则 `ap-shanghai`。基地址没有环境变量，只在数据库设置里。登录后的请求改用账号密钥和 `https://token4u.cc/v1`。
 - `.env.example` 保持空值。`load_dotenv()` 用 `setdefault`，已经存在的环境变量优先。
 
 ## 改哪里
@@ -24,7 +24,7 @@
 | 画面或口播提示词、禁止推测 | `app/core/prompts.py` |
 | 丢掉不合法命中、口播原文必须命中原句、词级时间 | `app/core/parsing.py` |
 | 自定义类别开关、额外命中词、忽略词 | `app/core/rules.py`，结构在 `app/schemas.py` 的 `DetectionRules`，界面在 `frontend/src/App.tsx` 的审核规则抽屉 |
-| DeepSeek 请求体、重试、模拟识别 | `app/core/deepseek.py` |
+| 画面模型请求体、重试、模拟识别 | `app/core/deepseek.py` |
 | 腾讯云录音文件识别、分片、时间戳 | `app/core/tencent_asr.py`，句子结构在 `app/core/transcript.py` |
 | 抽音频、口播进度、和画面并行 | `app/core/speech.py`，调度在 `app/services/manager.py` |
 | 抽帧、画面进度 | `app/core/pipeline.py`，`app/core/ffmpeg.py` |
@@ -43,13 +43,13 @@
 
 1. `POST /api/jobs` 或 `POST /api/jobs/batch` 把文件放到 `data/videos/{job_id}/`。
 2. 同一时间只跑一个任务。其余保持 `queued`，最多 20 个。`EVC_INLINE_JOBS=1` 时在请求里同步跑完，测试靠这个。
-3. 画面：FFmpeg 按 FPS（0.5–2）抽 JPEG，边抽边发给 DeepSeek。口播：抽出 16 kHz 单声道，走腾讯云「录音文件识别」（`CreateRecTask` / `DescribeTaskStatus`，SourceType 1）。缺腾讯云密钥时跳过口播，任务仍然成功，`asr_error` 写明已跳过。
+3. 画面：FFmpeg 按 FPS（0.5–2）抽 JPEG，边抽边发给 `glm-5.3-flash`。口播：抽出 16 kHz 单声道，走腾讯云「录音文件识别」（`CreateRecTask` / `DescribeTaskStatus`，SourceType 1）。缺腾讯云密钥时跳过口播，任务仍然成功，`asr_error` 写明已跳过。
 4. 两边并行。总进度大约是画面 70% + 口播 30%，完成前不超过 99。画面先结束时提示「画面已完成，正在等待口播结果」。
 5. `aggregate()` 收成 `Finding`。口播命中额外带 `sentence_start`、`sentence_end`、`next_start`，只给剪辑用，不进导出。
 6. 临时帧在 `data/frames/{job_id}`，临时音频在 `data/audio/{job_id}`。任务结束就删，除非 `EVC_KEEP_FRAMES=1`。
 7. `POST /api/jobs/{id}/cut` 生成 `clean.mp4`。预览在原片和剪辑结果之间切换。
 
-进度用约 700 ms 轮询 `GET /api/jobs/{id}`，也有 SSE `/events`。取消要停掉抽帧进程、音频进程，并关掉 DeepSeek 和 ASR 客户端。
+进度用约 700 ms 轮询 `GET /api/jobs/{id}`，也有 SSE `/events`。取消要停掉抽帧进程、音频进程，并关掉画面模型和 ASR 客户端。
 
 ## 审核规则
 

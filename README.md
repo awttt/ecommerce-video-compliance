@@ -1,6 +1,6 @@
 # 电商视频素材合规检测
 
-本地桌面工具。上传电商视频后，按可配置帧率抽帧，调用 DeepSeek V4.1 Flash（接口模型名 `deepseek-flash`）读取画面里的价格、规格、品牌。开启口播检测时，同时用 FFmpeg 抽出音频，调用腾讯云录音文件识别，再用同一套规则判断口播。画面和口播并行处理，相邻命中收成时间区间。
+本地桌面工具。上传电商视频后，按可配置帧率抽帧，调用 `glm-5.3-flash` 读取画面里的价格、规格、品牌。开启口播检测时，同时用 FFmpeg 抽出音频，调用腾讯云录音文件识别，再用同一套规则判断口播。画面和口播并行处理，相邻命中收成时间区间。
 
 程序只跑在本机：FastAPI 监听 `127.0.0.1`，窗口用 pywebview，历史放在 SQLite。不部署云端服务。
 
@@ -19,7 +19,7 @@ ecommerce-video-compliance/
 │   ├── db.py
 │   ├── core/
 │   │   ├── ffmpeg.py           # 探测、抽帧、提取音频
-│   │   ├── deepseek.py         # deepseek-flash 画面与口播文本判定
+│   │   ├── deepseek.py         # glm-5.3-flash 画面与口播文本判定
 │   │   ├── tencent_asr.py      # 腾讯云录音文件识别
 │   │   ├── speech.py           # 提取音频、识别、判定
 │   │   ├── pipeline.py         # 抽帧和识别并行
@@ -69,11 +69,11 @@ ecommerce-video-compliance/
 - Python 3.11+
 - Node.js 18+（只在构建界面时需要）
 - FFmpeg 5+，并且 `ffmpeg`、`ffprobe` 在 PATH 中
-- 能访问 `https://api.deepseek.com`
+- 能访问 `https://token4u.cc`（登录后的画面请求发到 `https://token4u.cc/v1`，模型固定为 `glm-5.3-flash`）
 - 口播检测还要能访问 `https://asr.tencentcloudapi.com`，并准备腾讯云 SecretId / SecretKey
 - Windows 桌面窗口使用系统 WebView2（Win10/11 一般已经带了）
 
-DeepSeek 控制台创建 API Key。视觉请求使用 Chat Completions，图片用 base64。默认关闭思考模式，避免每帧都先输出长推理。
+登录 token4u.cc 账号后，程序用该账号的密钥调用画面模型。视觉请求使用 Chat Completions，图片用 base64 data URL，不带 `detail`。`glm-5.3-flash` 不能关闭思考；思考开关关闭时用 `reasoning_effort: low`，避免默认的 `max`。
 
 ## 开发运行
 
@@ -134,7 +134,7 @@ python -m app.cli 你的视频.mp4 --no-asr
 - 打包后的 exe：`%APPDATA%\EcommerceVideoCompliance`
 - 也可以用环境变量 `EVC_DATA_DIR` 指定
 
-里面有 `app.db`、上传视频副本、导出文件和 `logs/app.log`。DeepSeek API Key 和腾讯云密钥明文存在本机数据库，不要把 `data/` 或 `.env` 交给别人。
+里面有 `app.db`、上传视频副本、导出文件和 `logs/app.log`。画面识别密钥和腾讯云密钥明文存在本机数据库，不要把 `data/` 或 `.env` 交给别人。
 
 `.env` 示例：
 
@@ -151,7 +151,7 @@ EVC_FFPROBE=C:\ffmpeg\bin\ffprobe.exe
 
 ## 使用
 
-1. 打开设置，填写 DeepSeek API Key。模型保持 `deepseek-flash`，接口地址保持 `https://api.deepseek.com`。
+1. 登录 token4u.cc 账号。画面请求地址固定为 `https://token4u.cc/v1`，模型固定为 `glm-5.3-flash`。
 2. 需要口播检测时，打开「口播检测」，填写腾讯云 SecretId、SecretKey。地域默认 `ap-shanghai`，引擎默认 `16k_zh`。可以随时关掉口播，只检测画面。
 3. 拖入视频。抽帧可在 0.5–2 FPS 之间调，并发默认 4。
 4. 进度会同时显示抽帧、画面识别和口播阶段。画面检测与音频识别并行。
@@ -159,7 +159,7 @@ EVC_FFPROBE=C:\ffmpeg\bin\ffprobe.exe
 6. 导出 JSON 或 Excel。文件同时写在数据目录的 `exports/`。
 7. 任务结束后，中间 jpg 和临时音频会删除。视频副本和结果留下，方便回看历史。没有腾讯云密钥或口播识别失败时，画面结果仍然保留，并在任务上显示原因。
 
-画面长边默认压到 1280 像素。DeepSeek 还会把图片缩到大约 1300×1300 的像素量，再放大本地帧不会增加识别细节，只会变慢。价格字很小的时候不要改成「低细节」。
+画面长边默认压到 1280 像素。低细节会再把长边压到不超过 640。价格字很小的时候不要改成「低细节」。
 
 ## Windows 打包
 
@@ -184,11 +184,11 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-不访问 DeepSeek 或腾讯云。有 FFmpeg 时会生成一个很短的测试视频，跑通抽帧、模拟画面识别、模拟口播、聚合、导出、清理和实验剪辑。
+不访问模型接口或腾讯云。有 FFmpeg 时会生成一个很短的测试视频，跑通抽帧、模拟画面识别、模拟口播、聚合、导出、清理和实验剪辑。
 
 ## 口播检测
 
-音频用 FFmpeg 抽成 16kHz 单声道。本地文件通过录音文件识别的 `CreateRecTask`（`SourceType=1`）上传，再轮询 `DescribeTaskStatus` 取带时间戳的句子。单段音频超过约 4.5MB 时按时间切开，时间戳加回视频里的起点。口播文本交给 `deepseek-flash` 做文本判定，原文对不上句子的会被丢掉。
+音频用 FFmpeg 抽成 16kHz 单声道。本地文件通过录音文件识别的 `CreateRecTask`（`SourceType=1`）上传，再轮询 `DescribeTaskStatus` 取带时间戳的句子。单段音频超过约 4.5MB 时按时间切开，时间戳加回视频里的起点。口播文本交给 `glm-5.3-flash` 做文本判定，原文对不上句子的会被丢掉。
 
 腾讯云密钥不会写进任务记录，日志里的 SecretId 和签名会打码。海外账号可以把 `TENCENT_ASR_HOST` 设成对应域名。
 

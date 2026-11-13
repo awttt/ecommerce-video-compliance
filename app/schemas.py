@@ -148,7 +148,7 @@ class RunConfig(BaseModel):
     jpeg_q: int = 5
     api_key: str = ""
     base_url: str = "https://api.deepseek.com"
-    model: str = "deepseek-flash"
+    model: str = "glm-5.3-flash"
     detail: str = "original"
     thinking: bool = False
     timeout_sec: float = 60
@@ -380,7 +380,7 @@ class CutsUpdate(BaseModel):
 DEFAULT_SETTINGS: dict[str, object] = {
     "api_key": "",
     "base_url": "https://api.deepseek.com",
-    "model": "deepseek-flash",
+    "model": "glm-5.3-flash",
     "fps": 1.0,
     "concurrency": 4,
     "max_width": 1280,
