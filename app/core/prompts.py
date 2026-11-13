@@ -1,4 +1,4 @@
-"""发给 deepseek-flash 的画面审核提示。只允许报告画面里看得见的内容。"""
+"""发给 glm-5.3-flash 的画面审核提示。只允许报告画面里看得见的内容。"""
 
 from __future__ import annotations
 

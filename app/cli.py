@@ -16,7 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="检测一个本地视频里的价格、规格、品牌")
     parser.add_argument("video", type=Path, help="视频文件路径")
     parser.add_argument("--fps", type=float, default=None, help="抽帧 FPS，0.5 到 2")
-    parser.add_argument("--concurrency", type=int, default=None, help="同时请求 DeepSeek 的数量")
+    parser.add_argument("--concurrency", type=int, default=None, help="同时请求模型的数量")
     parser.add_argument("--mock", action="store_true", help="不调用模型，返回固定样例命中")
     parser.add_argument("--no-asr", action="store_true", help="关闭这一次的口播检测")
     parser.add_argument("--json", dest="json_path", type=Path, default=None, help="把结果写入这个 JSON 文件")

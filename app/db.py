@@ -9,6 +9,7 @@ from pathlib import Path
 
 import aiosqlite
 
+from app.core.relay import configured_model
 from app.schemas import DEFAULT_SETTINGS, DetectionRules, Finding
 
 log = logging.getLogger(__name__)
@@ -158,6 +159,7 @@ class Database:
                 stored = {}
             if isinstance(stored, dict):
                 merged.update(stored)
+        merged["model"] = configured_model(merged.get("model"))
         try:
             merged["rules"] = DetectionRules.model_validate(merged.get("rules") or {}).model_dump()
         except Exception:
