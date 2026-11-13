@@ -20,7 +20,7 @@ from pathlib import Path
 
 import httpx
 
-from app.core.pipeline import JobCancelled
+from app.core.pipeline import JobCancelled, wait_while_paused
 from app.core.transcript import SpeechSentence, SpeechWord
 
 log = logging.getLogger(__name__)
@@ -220,6 +220,7 @@ class TencentAsrClient:
         *,
         cancel: asyncio.Event,
         on_status: Callable[[str], Awaitable[None]],
+        resume: asyncio.Event | None = None,
     ) -> list[SpeechSentence]:
         client = self._client
         if client is None:
@@ -227,12 +228,13 @@ class TencentAsrClient:
         sentences: list[SpeechSentence] = []
         total = max(len(pieces), 1)
         for index, (offset, path) in enumerate(pieces, start=1):
+            await wait_while_paused(cancel, resume)
             if cancel.is_set():
                 raise JobCancelled()
             await on_status(f"正在提交腾讯云识别（{index}/{total}）")
             task_id = await self._create(client, path)
             await on_status(f"口播识别中（{index}/{total}）")
-            data = await self._poll(client, task_id, cancel)
+            data = await self._poll(client, task_id, cancel, resume)
             sentences.extend(parse_asr_data(data, offset))
         return sentences
 
@@ -257,9 +259,18 @@ class TencentAsrClient:
             raise TencentAsrError("腾讯云没有返回识别任务编号")
         return int(task_id)
 
-    async def _poll(self, client: httpx.AsyncClient, task_id: int, cancel: asyncio.Event) -> dict:
+    async def _poll(
+        self,
+        client: httpx.AsyncClient,
+        task_id: int,
+        cancel: asyncio.Event,
+        resume: asyncio.Event | None = None,
+    ) -> dict:
         deadline = time.monotonic() + 30 * 60
         while True:
+            held = time.monotonic()
+            await wait_while_paused(cancel, resume)
+            deadline += time.monotonic() - held
             if cancel.is_set():
                 raise JobCancelled()
             if time.monotonic() > deadline:
@@ -336,7 +347,9 @@ class MockAsrClient:
         *,
         cancel: asyncio.Event,
         on_status: Callable[[str], Awaitable[None]],
+        resume: asyncio.Event | None = None,
     ) -> list[SpeechSentence]:
+        await wait_while_paused(cancel, resume)
         if cancel.is_set():
             raise JobCancelled()
         await on_status("口播识别中（模拟）")

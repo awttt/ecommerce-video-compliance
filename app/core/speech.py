@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from app.core.ffmpeg import FFmpegError, extract_audio, probe_video, speech_codec
-from app.core.pipeline import JobCancelled, cleanup_tree
+from app.core.pipeline import JobCancelled, cleanup_tree, wait_while_paused
 from app.core.tencent_asr import MAX_AUDIO_BYTES, MockAsrClient, TencentAsrClient, chunk_spans
 from app.schemas import RawHit
 
@@ -36,10 +36,11 @@ async def run_speech(
     cancel: asyncio.Event,
     on_progress: SpeechCb,
     on_process: ProcessCb | None = None,
+    resume: asyncio.Event | None = None,
 ) -> list[RawHit]:
     work_dir.mkdir(parents=True, exist_ok=True)
     try:
-        return await _run(video, work_dir, asr, judge, cancel, on_progress, on_process)
+        return await _run(video, work_dir, asr, judge, cancel, on_progress, on_process, resume)
     finally:
         cleanup_tree(work_dir)
 
@@ -52,12 +53,16 @@ async def _run(
     cancel: asyncio.Event,
     on_progress: SpeechCb,
     on_process: ProcessCb | None,
+    resume: asyncio.Event | None = None,
 ) -> list[RawHit]:
     await on_progress(SpeechProgress(stage="audio", message="正在提取音频", hits=[], ratio=0.15))
     probe = await probe_video(video)
     if not probe.has_audio:
         raise NoAudio("视频没有音轨，已跳过口播检测")
     pieces = await _pieces(video, work_dir, probe.duration, cancel, on_process)
+    if cancel.is_set():
+        raise JobCancelled()
+    await wait_while_paused(cancel, resume)
     if cancel.is_set():
         raise JobCancelled()
     await on_progress(SpeechProgress(stage="submitting", message="正在提交腾讯云识别", hits=[], ratio=0.35))
@@ -67,8 +72,11 @@ async def _run(
         ratio = 0.4 if stage == "submitting" else 0.7
         await on_progress(SpeechProgress(stage=stage, message=message, hits=[], ratio=ratio))
 
-    sentences = await asr.transcribe(pieces, cancel=cancel, on_status=on_status)
+    sentences = await asr.transcribe(pieces, cancel=cancel, on_status=on_status, resume=resume)
     sentences = [item for item in sentences if item.text.strip()]
+    if cancel.is_set():
+        raise JobCancelled()
+    await wait_while_paused(cancel, resume)
     if cancel.is_set():
         raise JobCancelled()
     if not sentences:

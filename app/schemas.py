@@ -7,6 +7,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.core.relay import configured_model
+from app.core.rule_catalog import default_extra_phrases
+
 
 class Frame(BaseModel):
     index: int
@@ -68,6 +71,7 @@ _RULE_CATEGORIES = ("价格", "规格", "品牌")
 class PhraseRule(BaseModel):
     text: str
     category: Literal["价格", "规格", "品牌"]
+    source: Literal["口播", "画面"] = "口播"
 
     @field_validator("text")
     @classmethod
@@ -77,6 +81,13 @@ class PhraseRule(BaseModel):
             raise ValueError("规则文字需要在 1 到 40 个字之间")
         return cleaned
 
+    @field_validator("source", mode="before")
+    @classmethod
+    def _source(cls, value: object) -> object:
+        if value is None or value == "":
+            return "口播"
+        return value
+
 
 class DetectionRules(BaseModel):
     """用户自定义的审核规则。不能放宽「禁止推测、原文必须原样出现」。"""
@@ -84,7 +95,7 @@ class DetectionRules(BaseModel):
     categories: list[Literal["价格", "规格", "品牌"]] = Field(
         default_factory=lambda: ["价格", "规格", "品牌"]
     )
-    extra_phrases: list[PhraseRule] = Field(default_factory=list, max_length=30)
+    extra_phrases: list[PhraseRule] = Field(default_factory=list, max_length=300)
     ignore_phrases: list[str] = Field(default_factory=list, max_length=30)
     note: str = ""
 
@@ -105,7 +116,7 @@ class DetectionRules(BaseModel):
         seen: set[tuple[str, str]] = set()
         unique: list[PhraseRule] = []
         for item in value:
-            key = (item.category, item.text)
+            key = (item.source, item.category, item.text)
             if key in seen:
                 continue
             seen.add(key)
@@ -194,6 +205,10 @@ class JobPublic(BaseModel):
     created_at: str
     updated_at: str
     finished_at: str | None = None
+    started_at: str | None = None
+    paused_total_sec: float = 0
+    hold_sec: float = 0
+    paused_at: str | None = None
     findings: list[Finding] = Field(default_factory=list)
 
 
@@ -208,6 +223,8 @@ class SettingUpdate(BaseModel):
     thinking: bool | None = None
     timeout_sec: float | None = Field(default=None, ge=15, le=180)
     mock_mode: bool | None = None
+    mcp_enabled: bool | None = None
+    model: str | None = None
     asr_enabled: bool | None = None
     tencent_secret_id: str | None = None
     tencent_secret_key: str | None = None
@@ -215,6 +232,13 @@ class SettingUpdate(BaseModel):
     tencent_region: str | None = None
     asr_engine: str | None = None
     rules: DetectionRules | None = None
+
+    @field_validator("model")
+    @classmethod
+    def _model(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return configured_model(value)
 
     @field_validator("api_key")
     @classmethod
@@ -268,6 +292,7 @@ class SettingPublic(BaseModel):
     thinking: bool
     timeout_sec: float
     mock_mode: bool
+    mcp_enabled: bool = False
     asr_enabled: bool
     has_tencent_secret: bool
     tencent_secret_id_masked: str
@@ -389,6 +414,7 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "thinking": False,
     "timeout_sec": 60.0,
     "mock_mode": False,
+    "mcp_enabled": False,
     "asr_enabled": True,
     "tencent_secret_id": "",
     "tencent_secret_key": "",
@@ -396,7 +422,7 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "asr_engine": "16k_zh",
     "rules": {
         "categories": ["价格", "规格", "品牌"],
-        "extra_phrases": [],
+        "extra_phrases": default_extra_phrases(),
         "ignore_phrases": [],
         "note": "",
     },

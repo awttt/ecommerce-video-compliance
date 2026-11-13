@@ -1,9 +1,11 @@
 import {
+  CaretRightOutlined,
   CloudUploadOutlined,
   DeleteOutlined,
   DownloadOutlined,
   FolderOpenOutlined,
   HistoryOutlined,
+  PauseOutlined,
   ScissorOutlined,
   SettingOutlined,
   WalletOutlined,
@@ -42,12 +44,20 @@ import {
   accountLogout,
   accountRefresh,
   cancelJob,
+  clearQueue,
   createJobs,
+  deleteAllJobs,
   deleteJob,
+  downloadBatchExport,
   downloadExport,
+  getHealth,
   getJob,
+  getQueue,
   getSettings,
   listJobs,
+  pauseQueue,
+  resumeQueue,
+  retryFailedFrames,
   openDir,
   planEdit,
   renderEdit,
@@ -55,13 +65,31 @@ import {
   saveSettings,
 } from "./api";
 import { formatBalance, LoginPage, RegisterPage } from "./AuthPages";
+import { mcpAgentPrompt, mcpEndpoint } from "./mcpPrompt";
 import { CutTimeline } from "./CutTimeline";
+import {
+  directoryEntries,
+  folderImportMessage,
+  isVideoName,
+  MAX_PICKED,
+  mergePicked,
+  pickedKey,
+  videosFromEntries,
+  type PickedVideo,
+} from "./dropVideos";
 import { RechargePage } from "./RechargePage";
-import { CATEGORY_COLOR, TERMINAL, type CutSpan, type Finding, type Job, type PhraseRule, type Settings } from "./types";
+import { batchElapsed, jobElapsed } from "./elapsed";
+import { draftsFromPhrases, groupKey, phrasesFromDrafts, RULE_GROUPS } from "./ruleForm";
+import { CATEGORY_COLOR, TERMINAL, type CutSpan, type Finding, type Job, type Settings } from "./types";
 import { VideoPane, type PlayerControls } from "./VideoPane";
 
 const { Dragger } = Upload;
 const { Text, Paragraph } = Typography;
+
+const MODEL_OPTIONS = [
+  { value: "glm-5.3-flash", label: "GLM 5.3 Flash" },
+  { value: "deepseek-flash", label: "DeepSeek 4.1 Flash" },
+];
 
 const CATEGORY_PILL: Record<string, string> = {
   价格: "pill--price",
@@ -88,6 +116,7 @@ function statusTag(status: string) {
   if (status === "done") return <span className="pill pill--confirmed"><i className="status-dot" />完成</span>;
   if (status === "failed") return <span className="pill pill--error"><i className="status-dot" />失败</span>;
   if (status === "cancelled") return <span className="pill pill--neutral">已取消</span>;
+  if (status === "paused") return <span className="pill pill--neutral">已暂停</span>;
   if (status === "queued") return <span className="pill pill--active"><i className="status-dot" />排队</span>;
   if (status === "running") return <span className="pill pill--active"><i className="status-dot" />识别中</span>;
   return <span className="pill pill--neutral">{status}</span>;
@@ -116,12 +145,76 @@ function previewMime(filename: string): string {
   return "video/mp4";
 }
 
+function canRetryFrames(job: Job): boolean {
+  return (job.status === "failed" || job.status === "done") && job.failed_frames > 0;
+}
+
+function retryNotice(job: Job): string {
+  if (job.error === "interrupted") return "程序退出时任务未完成";
+  if (job.status === "failed") return job.error || job.message || `部分帧识别失败（${job.failed_frames} 帧）`;
+  if (job.message.includes("部分帧识别失败")) return job.message;
+  return `部分帧识别失败（${job.failed_frames} 帧）`;
+}
+
 function stepIndex(job: Job | null): number {
   if (!job) return 0;
   if (job.stage === "done" || job.status === "done") return 3;
   if (job.stage === "aggregating") return 2;
   if (job.frames_recognized > 0 || job.stage === "recognizing") return 1;
   return 0;
+}
+
+function mcpStatus(enabled: boolean, live: boolean | null): { type: "success" | "info" | "warning"; text: string } {
+  if (live === null) return { type: "info", text: "还没确认这次运行有没有开放给 agent。" };
+  if (live) return { type: "success", text: "这次运行已经开放给 agent，可以直接连接。" };
+  if (enabled) return { type: "warning", text: "开关已保存。重新启动程序后，agent 才能连上。" };
+  return { type: "info", text: "这次运行没有开放给 agent。打开开关并重新启动程序后再生效。" };
+}
+
+function McpDrawer({
+  enabled,
+  live,
+  saving,
+  onToggle,
+}: {
+  enabled: boolean;
+  live: boolean | null;
+  saving: boolean;
+  onToggle: (checked: boolean) => Promise<void>;
+}) {
+  const { message } = AntApp.useApp();
+  const url = mcpEndpoint(window.location);
+  const prompt = mcpAgentPrompt(url);
+  const status = mcpStatus(enabled, live);
+  return (
+    <>
+      <Paragraph type="secondary">
+        打开后，本机 agent 可以提交视频或扫描一个文件夹，跑完后拿回批量报告。开关保存在本机，重新启动程序后才生效。
+      </Paragraph>
+      <div className="mcp-switch-row">
+        <Text>允许 agent 调用</Text>
+        <Switch checked={enabled} loading={saving} onChange={(checked) => void onToggle(checked)} />
+      </div>
+      <Alert type={status.type} showIcon message={status.text} style={{ marginBottom: 16 }} />
+      <Text strong>发给 agent 的提示语</Text>
+      <Paragraph type="secondary" style={{ marginTop: 4 }}>
+        复制下面整段，发给正在用的 agent，让它把这个地址配成 MCP。地址是 {url}。
+      </Paragraph>
+      <Input.TextArea className="mcp-prompt" readOnly rows={16} value={prompt} />
+      <Button
+        type="primary"
+        style={{ marginTop: 12 }}
+        onClick={() => {
+          navigator.clipboard.writeText(prompt).then(
+            () => message.success("已复制，发给 agent 即可"),
+            () => message.error("复制失败，请手动选择提示语"),
+          );
+        }}
+      >
+        复制提示语
+      </Button>
+    </>
+  );
 }
 
 export function Shell() {
@@ -136,17 +229,29 @@ export function Shell() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [history, setHistory] = useState<Job[]>([]);
   const [job, setJob] = useState<Job | null>(null);
+  const [retryingId, setRetryingId] = useState("");
   const [fps, setFps] = useState(1);
   const [concurrency, setConcurrency] = useState(4);
   const [padding, setPadding] = useState(0.2);
-  const [picked, setPicked] = useState<File[]>([]);
+  const [picked, setPicked] = useState<PickedVideo[]>([]);
+  const pickedRef = useRef<PickedVideo[]>([]);
+  const directoryNamesRef = useRef<Set<string>>(new Set());
+  const overflowRef = useRef(0);
+  const overflowTimer = useRef<number | null>(null);
+  const dropRef = useRef<HTMLDivElement>(null);
+  const uploadingRef = useRef(false);
+  const scanningRef = useRef(false);
   const [batch, setBatch] = useState<Job[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  uploadingRef.current = uploading;
+  scanningRef.current = scanning;
   const [rulesOpen, setRulesOpen] = useState(false);
+  const [mcpOpen, setMcpOpen] = useState(false);
+  const [mcpSaving, setMcpSaving] = useState(false);
+  const [mcpLive, setMcpLive] = useState<boolean | null>(null);
   const [ruleCategories, setRuleCategories] = useState<string[]>(["价格", "规格", "品牌"]);
-  const [extraPhrases, setExtraPhrases] = useState<PhraseRule[]>([]);
-  const [draftPhrase, setDraftPhrase] = useState("");
-  const [draftCategory, setDraftCategory] = useState("价格");
+  const [phraseDrafts, setPhraseDrafts] = useState<Record<string, string>>({});
   const [ignoreText, setIgnoreText] = useState("");
   const [ruleNote, setRuleNote] = useState("");
   const [source, setSource] = useState<"media" | "output">("media");
@@ -157,8 +262,12 @@ export function Shell() {
   const [selectedCut, setSelectedCut] = useState<CutSpan | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [editAction, setEditAction] = useState<"plan" | "render" | "reset" | null>(null);
-  const [fileAction, setFileAction] = useState<"json" | "xlsx" | "dir" | null>(null);
+  const [fileAction, setFileAction] = useState<"json" | "xlsx" | "batch-xlsx" | "dir" | null>(null);
   const [cancellingJob, setCancellingJob] = useState(false);
+  const [queuePaused, setQueuePaused] = useState(false);
+  const [queueAction, setQueueAction] = useState<"pause" | "resume" | null>(null);
+  const [clearingHistory, setClearingHistory] = useState(false);
+  const [clearingQueue, setClearingQueue] = useState(false);
   const editBusy = editAction !== null;
   const seekRef = useRef<PlayerControls["seek"]>(() => undefined);
   const defaultsApplied = useRef(false);
@@ -190,6 +299,19 @@ export function Shell() {
     setHistory(await listJobs());
   }
 
+  async function retryFrames(id: string) {
+    setRetryingId(id);
+    try {
+      const next = await retryFailedFrames(id);
+      setJob(next);
+      await refreshHistory();
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "重试失败");
+    } finally {
+      setRetryingId("");
+    }
+  }
+
   useEffect(() => {
     refreshSettings().catch((error: Error) => {
       setBootError(error.message);
@@ -199,8 +321,30 @@ export function Shell() {
 
   const loggedIn = Boolean(settings?.account_logged_in);
   useEffect(() => {
-    if (!loggedIn) return;
-    refreshHistory().catch(() => undefined);
+    if (!loggedIn) return undefined;
+    let stop = false;
+    listJobs()
+      .then((jobs) => {
+        if (stop) return;
+        setHistory(jobs);
+        const active = jobs
+          .filter((item) => !TERMINAL.includes(item.status))
+          .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
+        if (active.length === 0) return;
+        setBatch((current) => (current.length > 0 ? current : active));
+        setJob(
+          (current) => current ?? active.find((item) => item.status === "paused" || item.status === "running") ?? null,
+        );
+      })
+      .catch(() => undefined);
+    getQueue()
+      .then((state) => {
+        if (!stop) setQueuePaused(state.paused);
+      })
+      .catch(() => undefined);
+    return () => {
+      stop = true;
+    };
   }, [loggedIn]);
 
   useEffect(() => {
@@ -222,18 +366,38 @@ export function Shell() {
       timeout_sec: settings.timeout_sec,
       mock_mode: settings.mock_mode,
       asr_enabled: settings.asr_enabled,
+      model: settings.model,
       tencent_region: settings.tencent_region,
       asr_engine: settings.asr_engine,
     });
   }, [form, settings]);
 
+  function applyRuleForm(rules: Settings["rules"]) {
+    setRuleCategories(rules.categories);
+    setPhraseDrafts(draftsFromPhrases(rules.extra_phrases));
+    setIgnoreText(rules.ignore_phrases.join("\n"));
+    setRuleNote(rules.note);
+  }
+
   useEffect(() => {
-    if (!settings?.rules) return;
-    setRuleCategories(settings.rules.categories);
-    setExtraPhrases(settings.rules.extra_phrases);
-    setIgnoreText(settings.rules.ignore_phrases.join("\n"));
-    setRuleNote(settings.rules.note);
-  }, [settings]);
+    if (!settings?.rules || rulesOpen) return;
+    applyRuleForm(settings.rules);
+  }, [settings, rulesOpen]);
+
+  useEffect(() => {
+    if (!mcpOpen) return;
+    let cancelled = false;
+    getHealth()
+      .then((health) => {
+        if (!cancelled) setMcpLive(Boolean(health.mcp));
+      })
+      .catch(() => {
+        if (!cancelled) setMcpLive(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mcpOpen]);
 
   useEffect(() => {
     if (!job) {
@@ -314,20 +478,158 @@ export function Shell() {
   }, [batchKey, jobId]);
 
   const running = job != null && !TERMINAL.includes(job.status);
+  const hasActiveWork =
+    running ||
+    batch.some((item) => !TERMINAL.includes(item.status)) ||
+    history.some((item) => !TERMINAL.includes(item.status));
+  const [now, setNow] = useState(() => Date.now());
+  const clockOn =
+    running ||
+    batch.some((item) => !TERMINAL.includes(item.status)) ||
+    history.some((item) => !TERMINAL.includes(item.status));
+  useEffect(() => {
+    if (!clockOn) return undefined;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [clockOn]);
+  const currentElapsed = job ? jobElapsed(job, now) : null;
+  const totalElapsed = batchElapsed(batch, now);
   const mediaUrl =
     job == null ? null : source === "output" && job.output_ready ? `/api/jobs/${job.id}/output` : `/api/jobs/${job.id}/media`;
   const mediaMime = previewMime(source === "output" ? "clean.mp4" : job?.filename || "");
+  const uploadReady = Boolean(settings?.account_logged_in) && workspace === "detect";
+
+  function commitPicked(next: PickedVideo[]) {
+    pickedRef.current = next;
+    setPicked(next);
+  }
+
+  function addIncoming(incoming: PickedVideo[]) {
+    const merged = mergePicked(pickedRef.current, incoming);
+    commitPicked(merged.next);
+    return merged;
+  }
+
+  function warnOverflow(count: number) {
+    if (count <= 0) return;
+    overflowRef.current += count;
+    if (overflowTimer.current != null) return;
+    overflowTimer.current = window.setTimeout(() => {
+      overflowTimer.current = null;
+      const pending = overflowRef.current;
+      overflowRef.current = 0;
+      if (pending > 0) message.warning(`一次最多 ${MAX_PICKED} 个视频，还有 ${pending} 个没有加入`);
+    }, 0);
+  }
+
+  useEffect(() => {
+    const node = dropRef.current;
+    if (!node || !uploadReady) return undefined;
+    let cancelled = false;
+    // 捕获阶段先于内部的文件输入。先记下文件夹，等这一轮把同批的普通文件收完，再递归读目录。
+    const onDrop = (event: DragEvent) => {
+      const directories = directoryEntries(event.dataTransfer?.items);
+      if (directories.length === 0) return;
+      event.preventDefault();
+      directoryNamesRef.current = new Set(directories.map((entry) => entry.name));
+      window.setTimeout(() => {
+        directoryNamesRef.current = new Set();
+        if (cancelled || uploadingRef.current || scanningRef.current) return;
+        scanningRef.current = true;
+        setScanning(true);
+        void videosFromEntries(directories)
+          .then((videos) => {
+            if (cancelled) return;
+            const merged = addIncoming(videos);
+            const notice = folderImportMessage(videos.length, merged);
+            message[notice.type](notice.text);
+          })
+          .catch(() => {
+            if (!cancelled) message.error("读取文件夹失败");
+          })
+          .finally(() => {
+            scanningRef.current = false;
+            if (!cancelled) setScanning(false);
+          });
+      }, 0);
+    };
+    node.addEventListener("drop", onDrop, true);
+    return () => {
+      cancelled = true;
+      scanningRef.current = false;
+      node.removeEventListener("drop", onDrop, true);
+    };
+  }, [message, uploadReady]);
+
+  async function changeQueue(pause: boolean) {
+    if (queueAction) return;
+    setQueueAction(pause ? "pause" : "resume");
+    try {
+      const next = pause ? await pauseQueue() : await resumeQueue();
+      setQueuePaused(next.paused);
+      const pendingIds = new Set(batch.filter((item) => !TERMINAL.includes(item.status)).map((item) => item.id));
+      if (job && !TERMINAL.includes(job.status)) pendingIds.add(job.id);
+      if (pendingIds.size > 0) {
+        const updated = await Promise.all([...pendingIds].map((id) => getJob(id)));
+        const byId = new Map(updated.map((item) => [item.id, item]));
+        setBatch((current) => current.map((item) => byId.get(item.id) ?? item));
+        if (job && byId.has(job.id)) setJob(byId.get(job.id) ?? job);
+      }
+      setNow(Date.now());
+      refreshHistory().catch(() => undefined);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : pause ? "暂停失败" : "开始失败");
+    } finally {
+      setQueueAction(null);
+    }
+  }
+
+  async function clearQueued() {
+    if (clearingQueue) return;
+    setClearingQueue(true);
+    try {
+      const result = await clearQueue();
+      setBatch((current) => current.filter((item) => TERMINAL.includes(item.status)));
+      setHistory((current) => current.filter((item) => TERMINAL.includes(item.status)));
+      setJob((current) => (current && !TERMINAL.includes(current.status) ? null : current));
+      message.success(result.deleted > 0 ? `已清空 ${result.deleted} 个排队视频` : "队列是空的");
+      refreshHistory().catch(() => undefined);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "清空队列失败");
+      throw error;
+    } finally {
+      setClearingQueue(false);
+    }
+  }
+
+  async function clearHistory() {
+    if (clearingHistory) return;
+    setClearingHistory(true);
+    try {
+      const result = await deleteAllJobs();
+      setJob(null);
+      setBatch([]);
+      setHistory([]);
+      setSource("media");
+      message.success(result.deleted > 0 ? `已删除 ${result.deleted} 条历史` : "没有可删除的历史");
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "删除历史失败");
+      throw error;
+    } finally {
+      setClearingHistory(false);
+    }
+  }
 
   async function startBatch() {
     if (picked.length === 0) return;
     const formData = new FormData();
-    picked.forEach((file) => formData.append("files", file));
+    picked.forEach((item) => formData.append("files", item.file));
     formData.append("fps", String(fps));
     formData.append("concurrency", String(concurrency));
     setUploading(true);
     try {
       const created = await createJobs(formData);
-      setPicked([]);
+      commitPicked([]);
       setBatch((current) => {
         const incoming = new Set(created.jobs.map((item) => item.id));
         const older = current.filter((item) => !incoming.has(item.id) && !TERMINAL.includes(item.status));
@@ -449,7 +751,7 @@ export function Shell() {
     }
   }
 
-  async function runFileAction(action: "json" | "xlsx" | "dir", task: () => Promise<void>) {
+  async function runFileAction(action: "json" | "xlsx" | "batch-xlsx" | "dir", task: () => Promise<void>) {
     if (fileAction !== null) return;
     setFileAction(action);
     try {
@@ -527,7 +829,7 @@ export function Shell() {
       setSettings(result.settings);
       setJob(null);
       setBatch([]);
-      setPicked([]);
+      commitPicked([]);
       setHistory([]);
       setWorkspace("detect");
       setAuthPage("login");
@@ -577,7 +879,16 @@ export function Shell() {
           <Button type="text" icon={<HistoryOutlined />} onClick={() => { setHistoryOpen(true); refreshHistory().catch(() => undefined); }}>
             历史
           </Button>
-          <Button type="text" onClick={() => setRulesOpen(true)}>审核规则</Button>
+          <Button
+            type="text"
+            onClick={() => {
+              if (settings?.rules) applyRuleForm(settings.rules);
+              setRulesOpen(true);
+            }}
+          >
+            审核规则
+          </Button>
+          <Button type="text" onClick={() => setMcpOpen(true)}>MCP</Button>
           <Button type="text" icon={<SettingOutlined />} onClick={() => setSettingsOpen(true)}>设置</Button>
           <Button
             type="text"
@@ -628,35 +939,49 @@ export function Shell() {
                   message="账号已登录，还没有拿到画面识别密钥。请点右上角的刷新余额。"
                 />
               ) : null}
-              <Dragger
-                multiple
-                showUploadList={false}
-                disabled={uploading}
-                accept="video/*,.mp4,.mov,.mkv,.avi,.webm,.m4v,.flv"
-                beforeUpload={(file) => {
-                  setPicked((current) => {
-                    const exists = current.some(
-                      (item) => item.name === file.name && item.size === file.size && item.lastModified === file.lastModified,
-                    );
-                    return exists ? current : [...current, file];
-                  });
-                  return Upload.LIST_IGNORE;
-                }}
-              >
-                <div className="upload-icon"><CloudUploadOutlined /></div>
-                <p className="upload-title">拖拽视频到这里，或点击选择</p>
-                <p className="upload-sub">支持 mp4 / mov / mkv / avi / webm · 可一次选多个，最多 20 个</p>
-              </Dragger>
+              <div className="slider-row" style={{ marginBottom: 12 }}>
+                <Text>画面模型</Text>
+                <Select
+                  style={{ width: "100%" }}
+                  value={MODEL_OPTIONS.some((item) => item.value === settings.model) ? settings.model : "glm-5.3-flash"}
+                  options={MODEL_OPTIONS}
+                  disabled={uploading}
+                  onChange={(value) => {
+                    void saveSettings({ model: value })
+                      .then(setSettings)
+                      .catch((error: Error) => message.error(error.message));
+                  }}
+                />
+              </div>
+              <div ref={dropRef}>
+                <Dragger
+                  multiple
+                  showUploadList={false}
+                  disabled={uploading || scanning}
+                  accept="video/*,.mp4,.mov,.mkv,.avi,.webm,.m4v,.flv,.wmv,.mpeg,.mpg,.ts"
+                  beforeUpload={(file) => {
+                    if (uploadingRef.current || scanningRef.current) return Upload.LIST_IGNORE;
+                    if (directoryNamesRef.current.has(file.name) || !isVideoName(file.name)) return Upload.LIST_IGNORE;
+                    const merged = addIncoming([{ file, label: file.name }]);
+                    warnOverflow(merged.overflow);
+                    return Upload.LIST_IGNORE;
+                  }}
+                >
+                  <div className="upload-icon"><CloudUploadOutlined /></div>
+                  <p className="upload-title">{scanning ? "正在读取文件夹…" : "拖拽视频或文件夹到这里，或点击选择"}</p>
+                  <p className="upload-sub">支持 mp4 / mov / mkv / avi / webm 等 · 文件夹会连同子目录里的视频一起加入 · 一次最多 {MAX_PICKED} 个</p>
+                </Dragger>
+              </div>
               {picked.length > 0 ? (
-                <div style={{ marginTop: 12 }}>
-                  {picked.map((file) => (
-                    <div className="file-row" key={`${file.name}-${file.size}-${file.lastModified}`}>
-                      <Text ellipsis>{file.name}</Text>
+                <div className="picked-list">
+                  {picked.map((item) => (
+                    <div className="file-row" key={pickedKey(item)}>
+                      <Text ellipsis={{ tooltip: item.label }}>{item.label}</Text>
                       <Button
                         size="small"
                         type="text"
                         disabled={uploading}
-                        onClick={() => setPicked((current) => current.filter((item) => item !== file))}
+                        onClick={() => commitPicked(pickedRef.current.filter((current) => pickedKey(current) !== pickedKey(item)))}
                       >
                         移除
                       </Button>
@@ -674,6 +999,47 @@ export function Shell() {
               >
                 {picked.length > 1 ? `开始识别（${picked.length} 个）` : "开始识别"}
               </Button>
+              <div className="queue-actions">
+                <Button
+                  icon={<PauseOutlined />}
+                  disabled={queuePaused || queueAction !== null || !hasActiveWork}
+                  loading={queueAction === "pause"}
+                  onClick={() => void changeQueue(true)}
+                >
+                  暂停
+                </Button>
+                <Button
+                  icon={<CaretRightOutlined />}
+                  type={queuePaused ? "primary" : "default"}
+                  disabled={!queuePaused || queueAction !== null}
+                  loading={queueAction === "resume"}
+                  onClick={() => void changeQueue(false)}
+                >
+                  开始
+                </Button>
+              </div>
+              <Popconfirm
+                title="清空当前队列？"
+                description="正在识别和还在排队的视频会停掉，本地副本一起删除。已经完成的记录保留。"
+                okText="清空"
+                cancelText="取消"
+                okButtonProps={{ danger: true, loading: clearingQueue }}
+                onConfirm={() => clearQueued()}
+              >
+                <Button
+                  danger
+                  block
+                  className="queue-clear"
+                  icon={<DeleteOutlined />}
+                  disabled={!hasActiveWork || clearingQueue || queueAction !== null}
+                  loading={clearingQueue}
+                >
+                  一键清空队列
+                </Button>
+              </Popconfirm>
+              {queuePaused ? (
+                <Paragraph className="hint">识别已暂停。点「开始」后从停下的位置继续，排队的视频也会接着跑。</Paragraph>
+              ) : null}
               <div className="slider-row">
                 <Text>抽帧密度 {fps} FPS</Text>
                 <Slider min={0.5} max={2} step={0.1} value={fps} onChange={setFps} disabled={uploading} />
@@ -682,23 +1048,39 @@ export function Shell() {
               </div>
               {batch.length > 0 ? (
                 <div style={{ marginTop: 20 }}>
-                  <span className="section-label">本批队列</span>
-                  {batch.map((item) => (
-                    <div
-                      className="queue-row"
-                      key={item.id}
-                      onClick={() => {
-                        if (item.id !== job?.id) setSource("media");
-                        setJob(item);
-                      }}
-                    >
-                      <Text ellipsis>{item.filename}</Text>
-                      <Space size={4}>
-                        {statusTag(item.status)}
-                        {!TERMINAL.includes(item.status) ? <Text type="secondary">{Math.round(item.progress)}%</Text> : null}
-                      </Space>
-                    </div>
-                  ))}
+                  <div className="section-head">
+                    <span className="section-label">本批队列</span>
+                    {totalElapsed ? <span className="elapsed">总耗时 {totalElapsed}</span> : null}
+                  </div>
+                  {batch.map((item) => {
+                    const spent = jobElapsed(item, now);
+                    return (
+                      <div
+                        className={`queue-row${item.id === job?.id ? " is-selected" : ""}`}
+                        key={item.id}
+                        role="button"
+                        tabIndex={0}
+                        aria-current={item.id === job?.id ? "true" : undefined}
+                        onClick={() => {
+                          if (item.id !== job?.id) setSource("media");
+                          setJob(item);
+                        }}
+                        onKeyDown={(event) => {
+                          if (event.key !== "Enter" && event.key !== " ") return;
+                          event.preventDefault();
+                          if (item.id !== job?.id) setSource("media");
+                          setJob(item);
+                        }}
+                      >
+                        <Text ellipsis>{item.filename}</Text>
+                        <Space size={4}>
+                          {statusTag(item.status)}
+                          {spent ? <Text type="secondary">{spent}</Text> : null}
+                          {!TERMINAL.includes(item.status) ? <Text type="secondary">{Math.round(item.progress)}%</Text> : null}
+                        </Space>
+                      </div>
+                    );
+                  })}
                 </div>
               ) : null}
               <Paragraph className="hint">
@@ -725,6 +1107,7 @@ export function Shell() {
                       ? ` · 抽帧 ${job.frames_extracted}/${job.frames_estimated} · 已识别 ${job.frames_recognized}`
                       : ""}
                     {job.failed_frames ? ` · 失败 ${job.failed_frames} 帧` : ""}
+                    {currentElapsed ? ` · 总耗时 ${currentElapsed}` : ""}
                   </div>
                   {job.speech_message && job.speech_message !== job.asr_error ? (
                     <div className="job-meta is-muted">口播：{job.speech_message}</div>
@@ -732,8 +1115,25 @@ export function Shell() {
                   {job.mock ? (
                     <Alert style={{ marginTop: 12 }} type="warning" showIcon message="这次是模拟识别，原文不是模型读出来的。" />
                   ) : null}
-                  {job.error && job.status === "failed" ? (
-                    <Alert style={{ marginTop: 12 }} type="error" showIcon message={job.error} />
+                  {canRetryFrames(job) ? (
+                    <Alert
+                      style={{ marginTop: 12 }}
+                      type={job.status === "failed" ? "error" : "warning"}
+                      showIcon
+                      message={retryNotice(job)}
+                      action={
+                        <Button size="small" loading={retryingId === job.id} onClick={() => retryFrames(job.id)}>
+                          重试失败的 {job.failed_frames} 帧
+                        </Button>
+                      }
+                    />
+                  ) : job.error && job.status === "failed" ? (
+                    <Alert
+                      style={{ marginTop: 12 }}
+                      type="error"
+                      showIcon
+                      message={job.error === "interrupted" ? "程序退出时任务未完成" : job.error}
+                    />
                   ) : null}
                   {job.asr_error && job.status !== "failed" ? (
                     <Alert style={{ marginTop: 12 }} type="warning" showIcon message={job.asr_error} />
@@ -863,6 +1263,24 @@ export function Shell() {
                       >
                         导出 Excel
                       </Button>
+                      {batch.length > 1 ? (
+                        <Button
+                          icon={<DownloadOutlined />}
+                          loading={fileAction === "batch-xlsx"}
+                          disabled={!batch.some((item) => item.status === "done") || fileAction !== null}
+                          onClick={() => void runFileAction("batch-xlsx", async () => {
+                            const ready = batch.filter((item) => item.status === "done").length;
+                            await downloadBatchExport(batch.map((item) => item.id));
+                            if (ready < batch.length) {
+                              message.warning(`已导出 ${ready} 个已完成的视频，另外 ${batch.length - ready} 个还在处理`);
+                            } else {
+                              message.success(`已导出 ${ready} 个视频`);
+                            }
+                          })}
+                        >
+                          批量导出 Excel
+                        </Button>
+                      ) : null}
                       <Button
                         icon={<FolderOpenOutlined />}
                         loading={fileAction === "dir"}
@@ -942,6 +1360,27 @@ export function Shell() {
                         </>
                       ) : null}
                       {running ? (
+                        <>
+                        {queuePaused ? (
+                          <Button
+                            icon={<CaretRightOutlined />}
+                            type="primary"
+                            loading={queueAction === "resume"}
+                            disabled={queueAction !== null}
+                            onClick={() => void changeQueue(false)}
+                          >
+                            开始
+                          </Button>
+                        ) : (
+                          <Button
+                            icon={<PauseOutlined />}
+                            loading={queueAction === "pause"}
+                            disabled={queueAction !== null}
+                            onClick={() => void changeQueue(true)}
+                          >
+                            暂停
+                          </Button>
+                        )}
                         <Button
                           danger
                           loading={cancellingJob}
@@ -957,6 +1396,7 @@ export function Shell() {
                         >
                           取消
                         </Button>
+                        </>
                       ) : null}
                     </div>
                   </div>
@@ -978,7 +1418,7 @@ export function Shell() {
 
       <Drawer title="设置" open={settingsOpen} onClose={() => setSettingsOpen(false)} width={460}>
         <Paragraph type="secondary">
-          当前账号 {settings.account_email}。画面识别使用这个账号的密钥，请求地址固定为 https://token4u.cc/v1，模型固定为 glm-5.3-flash。口播继续用腾讯云。
+          当前账号 {settings.account_email}。画面识别使用这个账号的密钥，请求地址固定为 https://token4u.cc/v1。画面模型可以在 GLM 5.3 Flash 和 DeepSeek 4.1 Flash 之间切换。口播继续用腾讯云。
         </Paragraph>
         <Paragraph type="secondary">
           API Key 只保存在本机数据库。当前来源：
@@ -1006,6 +1446,9 @@ export function Shell() {
             }
           }}
         >
+          <Form.Item label="画面模型" name="model" rules={[{ required: true }]}>
+            <Select options={MODEL_OPTIONS} />
+          </Form.Item>
           <Form.Item label="默认抽帧 FPS" name="fps" rules={[{ required: true }]}>
             <InputNumber min={0.5} max={2} step={0.1} style={{ width: "100%" }} />
           </Form.Item>
@@ -1034,7 +1477,7 @@ export function Shell() {
             label="思考模式"
             name="thinking"
             valuePropName="checked"
-            extra="glm-5.3-flash 不能关闭思考。关掉时用低强度推理，打开时用高强度。"
+            extra="两个模型都保持思考开启。关掉时用低强度推理，打开时用高强度。"
           >
             <Switch checkedChildren="开" unCheckedChildren="关" />
           </Form.Item>
@@ -1085,9 +1528,9 @@ export function Shell() {
         </Form>
       </Drawer>
 
-      <Drawer title="审核规则" open={rulesOpen} onClose={() => setRulesOpen(false)} width={480}>
+      <Drawer title="审核规则" open={rulesOpen} onClose={() => setRulesOpen(false)} width={560}>
         <Paragraph type="secondary">
-          规则只保存在本机。关闭某个类别后，那一类不再报告。额外命中词只要在口播里原样出现就会报告；画面仍要模型在这一帧里看见同样的文字。忽略词和原文完全一致时不报告。补充说明不能放宽「禁止推测」。
+          规则只保存在本机。口播词按原话匹配，X 表示数字。画面词只写进画面提示，必须在这一帧里看得见。短词只要原话里连续出现就会命中。忽略词和原文完全一致，或原文只是忽略词里的一段时不报告。补充说明不能放宽「禁止推测」。
         </Paragraph>
         <div style={{ marginBottom: 12 }}>
           <Text>启用类别</Text>
@@ -1099,61 +1542,23 @@ export function Shell() {
             />
           </div>
         </div>
-        <Text>额外命中词</Text>
-        <Space.Compact style={{ width: "100%", marginTop: 8 }}>
-          <Select
-            value={draftCategory}
-            style={{ width: 96 }}
-            onChange={setDraftCategory}
-            options={[
-              { value: "价格", label: "价格" },
-              { value: "规格", label: "规格" },
-              { value: "品牌", label: "品牌" },
-            ]}
-          />
-          <Input
-            value={draftPhrase}
-            placeholder="必须原样出现的文字"
-            onChange={(event) => setDraftPhrase(event.target.value)}
-            onPressEnter={() => {
-              const text = draftPhrase.trim();
-              if (!text) return;
-              setExtraPhrases((current) =>
-                current.some((item) => item.text === text && item.category === draftCategory)
-                  ? current
-                  : [...current, { text, category: draftCategory }],
-              );
-              setDraftPhrase("");
-            }}
-          />
-          <Button
-            onClick={() => {
-              const text = draftPhrase.trim();
-              if (!text) return;
-              setExtraPhrases((current) =>
-                current.some((item) => item.text === text && item.category === draftCategory)
-                  ? current
-                  : [...current, { text, category: draftCategory }],
-              );
-              setDraftPhrase("");
-            }}
-          >
-            添加
-          </Button>
-        </Space.Compact>
-        {extraPhrases.map((item) => (
-          <div className="file-row" key={`${item.category}-${item.text}`}>
-            <span className="phrase-item">
-              <span className={`pill ${CATEGORY_PILL[item.category] ?? "pill--neutral"}`}>{item.category}</span>
-              <span>{item.text}</span>
-            </span>
-            <Button size="small" type="text" onClick={() => setExtraPhrases((current) => current.filter((phrase) => phrase !== item))}>
-              移除
-            </Button>
+        {RULE_GROUPS.map((group) => (
+          <div className="rule-group" key={groupKey(group.source, group.category)}>
+            <Text strong>{group.title}</Text>
+            <Text type="secondary" className="rule-group-hint">{group.hint}</Text>
+            <Input.TextArea
+              rows={group.category === "品牌" && group.source === "口播" ? 4 : 6}
+              value={phraseDrafts[groupKey(group.source, group.category)] ?? ""}
+              placeholder="一行一个"
+              onChange={(event) => {
+                const value = event.target.value;
+                setPhraseDrafts((current) => ({ ...current, [groupKey(group.source, group.category)]: value }));
+              }}
+            />
           </div>
         ))}
-        <div style={{ marginTop: 16 }}>
-          <Text>忽略词</Text>
+        <div className="rule-group">
+          <Text strong>忽略词</Text>
           <Input.TextArea
             style={{ marginTop: 8 }}
             rows={4}
@@ -1162,8 +1567,8 @@ export function Shell() {
             onChange={(event) => setIgnoreText(event.target.value)}
           />
         </div>
-        <div style={{ marginTop: 16 }}>
-          <Text>补充说明</Text>
+        <div className="rule-group">
+          <Text strong>补充说明</Text>
           <Input.TextArea
             style={{ marginTop: 8 }}
             rows={4}
@@ -1177,7 +1582,12 @@ export function Shell() {
           type="primary"
           style={{ marginTop: 16 }}
           onClick={async () => {
-            if (ruleCategories.length === 0 && extraPhrases.length === 0) {
+            const parsed = phrasesFromDrafts(phraseDrafts);
+            if (parsed.error) {
+              message.error(parsed.error);
+              return;
+            }
+            if (ruleCategories.length === 0 && parsed.phrases.length === 0) {
               message.error("至少启用一个类别，或添加一条额外命中词");
               return;
             }
@@ -1185,7 +1595,7 @@ export function Shell() {
               const saved = await saveSettings({
                 rules: {
                   categories: ruleCategories,
-                  extra_phrases: extraPhrases,
+                  extra_phrases: parsed.phrases,
                   ignore_phrases: ignoreText
                     .split(/\n+/)
                     .map((item) => item.trim())
@@ -1194,6 +1604,7 @@ export function Shell() {
                 },
               });
               setSettings(saved);
+              applyRuleForm(saved.rules);
               message.success("审核规则已保存，之后的识别会使用这套规则");
             } catch (error) {
               message.error(error instanceof Error ? error.message : "保存失败");
@@ -1204,9 +1615,56 @@ export function Shell() {
         </Button>
       </Drawer>
 
-      <Drawer title="历史记录" open={historyOpen} onClose={() => setHistoryOpen(false)} width={460}>
+      <Drawer title="MCP" open={mcpOpen} onClose={() => setMcpOpen(false)} width={560}>
+        <McpDrawer
+          enabled={Boolean(settings.mcp_enabled)}
+          live={mcpLive}
+          saving={mcpSaving}
+          onToggle={async (checked) => {
+            setMcpSaving(true);
+            try {
+              const saved = await saveSettings({ mcp_enabled: checked });
+              setSettings(saved);
+              message.success(checked ? "已打开。重新启动程序后，agent 才能连上。" : "已关闭。重新启动程序后停止接受 agent 调用。");
+            } catch (error) {
+              message.error(error instanceof Error ? error.message : "保存失败");
+            } finally {
+              setMcpSaving(false);
+            }
+          }}
+        />
+      </Drawer>
+
+      <Drawer
+        title="历史记录"
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        width={460}
+        extra={
+          <Popconfirm
+            title="删除全部历史记录？"
+            description="本地视频副本和导出文件会一起删掉。正在识别的任务会先停掉。"
+            okText="删除"
+            cancelText="取消"
+            okButtonProps={{ danger: true, loading: clearingHistory }}
+            onConfirm={() => clearHistory()}
+          >
+            <Button
+              danger
+              size="small"
+              icon={<DeleteOutlined />}
+              disabled={history.length === 0 || clearingHistory}
+              loading={clearingHistory}
+            >
+              一键删除历史
+            </Button>
+          </Popconfirm>
+        }
+      >
         {history.length === 0 ? <Text type="secondary">还没有记录</Text> : null}
-        {history.map((item) => (
+        {history.map((item) => {
+          const spent = jobElapsed(item, now);
+          return (
           <Card
             key={item.id}
             size="small"
@@ -1222,6 +1680,7 @@ export function Shell() {
                 <div>{item.filename}</div>
                 <Text type="secondary">
                   {new Date(item.created_at).toLocaleString()} · {item.hit_count} 条命中
+                  {spent ? ` · 总耗时 ${spent}` : ""}
                 </Text>
               </div>
               <Space>
@@ -1241,7 +1700,8 @@ export function Shell() {
               </Space>
             </Space>
           </Card>
-        ))}
+          );
+        })}
       </Drawer>
     </div>
   );

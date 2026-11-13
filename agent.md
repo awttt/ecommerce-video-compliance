@@ -1,6 +1,6 @@
 # 给 Agent 的项目说明
 
-本地电商视频合规检测。用户上传视频后，程序抽帧并用 `glm-5.3-flash` 看画面，同时用腾讯云录音文件识别看口播，标出价格、规格、品牌和时间区间，可导出，也可把命中片段剪掉后重新拼接。只跑在本机，不部署云端。界面、提示词和导出字段用中文；代码标识符用英文。
+本地电商视频合规检测。用户上传视频后，程序抽帧并用选中的画面模型看画面，同时用腾讯云录音文件识别看口播，标出价格、规格、品牌和时间区间，可导出，也可把命中片段剪掉后重新拼接。只跑在本机，不部署云端。界面、提示词和导出字段用中文；代码标识符用英文。
 
 先读本文件，再按下面的地图改代码。用户向的说明在 `README.md`。不要另起一个项目。
 
@@ -10,7 +10,7 @@
 - 类别只有「价格」「规格」「品牌」。来源只有「画面」「口播」。两者即使原文相同也不合并。
 - 导出固定 8 列，顺序不要改：时间点、类别、来源、原文、位置、置信度、判定理由、备注。JSON 在 `结果` 数组里。口播位置固定为「口播内容」。
 - 口播原文必须是某一句转写里的连续子串，对不上就丢掉。画面命中的时间是抽帧区间，不是模型自己编的时间。
-- 画面模型是 `glm-5.3-flash`（`PICTURE_MODEL`）。登录后的请求固定用这个名字，基地址固定为 `https://token4u.cc/v1`。`chat_url()` 只在基地址后面补 `/chat/completions`；基地址已经以该路径结尾就原样使用，不要自己再插入 `/v1`。加载设置时，空的模型名和 `deepseek*`（例如 `deepseek-flash`、`deepseek-v4.1-flash`、`deepseek-v4.1-flash-1017`）改成 `glm-5.3-flash`。其它已保存的模型名保留，但登录账号发起的请求仍固定用 `glm-5.3-flash`。不要改用户已保存的基地址。
+- 画面模型只有两个：`glm-5.3-flash`（GLM 5.3 Flash，`PICTURE_MODEL`，默认）和 `deepseek-flash`（DeepSeek 4.1 Flash，`DEEPSEEK_FLASH_MODEL`）。登录后的请求用设置里选中的那个，基地址固定为 `https://token4u.cc/v1`。`chat_url()` 只在基地址后面补 `/chat/completions`；基地址已经以该路径结尾就原样使用，不要自己再插入 `/v1`。加载设置时，空的模型名和其他名字改成 `glm-5.3-flash`；`deepseek*`（例如 `deepseek-v4.1-flash`、`deepseek-v4.1-flash-1017`）改成 `deepseek-flash`。不要改用户已保存的基地址。
 - 视觉请求只在 user 消息里放 `image_url.url` 的 data URL，不要带 `detail`。`glm-5.3-flash` 的 `thinking.type` 只能是 `enabled`，传 `disabled` 会 400。思考开关关闭时带 `reasoning_effort: low` 和 `max_tokens: 2048`；打开时用 `high` 和 `4096`。不要省略 `reasoning_effort`，上游默认是 `max`。使用 `response_format: json_object`；若 400 且错误提到 `response_format`，去掉该字段重试一次。408/409/429/500/502/503/504 和网络超时可重试。401/403 表示密钥无效。请求里不要带 temperature。低细节只把抽帧长边压到不超过 640，不传给模型。
 - 服务只监听 `127.0.0.1` 或 `localhost`。不要改成对外网卡。
 - 密钥只放在 gitignore 的 `.env` 和 `data/app.db`。不要写进任务记录、日志、测试、提交或聊天回复。`GET /api/settings` 只返回打码后的密钥。PUT 时空的密钥字段表示「不修改」。`clear_api_key` / `clear_tencent_secret` 只清本机保存的值。
@@ -43,24 +43,26 @@
 
 1. `POST /api/jobs` 或 `POST /api/jobs/batch` 把文件放到 `data/videos/{job_id}/`。
 2. 同一时间只跑一个任务。其余保持 `queued`，最多 20 个。`EVC_INLINE_JOBS=1` 时在请求里同步跑完，测试靠这个。
-3. 画面：FFmpeg 按 FPS（0.5–2）抽 JPEG，边抽边发给 `glm-5.3-flash`。口播：抽出 16 kHz 单声道，走腾讯云「录音文件识别」（`CreateRecTask` / `DescribeTaskStatus`，SourceType 1）。缺腾讯云密钥时跳过口播，任务仍然成功，`asr_error` 写明已跳过。
+3. 画面：FFmpeg 按 FPS（0.5–2）抽 JPEG，边抽边发给当前选中的画面模型。口播：抽出 16 kHz 单声道，走腾讯云「录音文件识别」（`CreateRecTask` / `DescribeTaskStatus`，SourceType 1）。缺腾讯云密钥时跳过口播，任务仍然成功，`asr_error` 写明已跳过。
 4. 两边并行。总进度大约是画面 70% + 口播 30%，完成前不超过 99。画面先结束时提示「画面已完成，正在等待口播结果」。
 5. `aggregate()` 收成 `Finding`。口播命中额外带 `sentence_start`、`sentence_end`、`next_start`，只给剪辑用，不进导出。
 6. 临时帧在 `data/frames/{job_id}`，临时音频在 `data/audio/{job_id}`。任务结束就删，除非 `EVC_KEEP_FRAMES=1`。
 7. `POST /api/jobs/{id}/cut` 生成 `clean.mp4`。预览在原片和剪辑结果之间切换。
 
-进度用约 700 ms 轮询 `GET /api/jobs/{id}`，也有 SSE `/events`。取消要停掉抽帧进程、音频进程，并关掉画面模型和 ASR 客户端。
+进度用约 700 ms 轮询 `GET /api/jobs/{id}`，也有 SSE `/events`。取消要停掉抽帧进程、音频进程，并关掉画面模型和 ASR 客户端。画面识别失败的帧号记在任务的 `failed_frames_json`。全部帧都失败时任务失败；只有一部分失败时任务完成，并写明失败帧数和最后一次错误。`POST /api/jobs/{id}/retry-frames` 重试这些帧：记下了帧号就只重抽这些帧，并和已有画面命中合在一起；没记下帧号就重跑全部画面。口播已经成功就保留，口播也失败则一起重跑。前面还有任务时排到队尾。
+
+程序重新打开时，正在跑或暂停的任务记为失败；还在排队的任务会留在队列里。如果退出前队列是暂停的（存在暂停中的任务），重新打开后仍然暂停。
 
 ## 审核规则
 
 保存在设置 JSON 的 `rules` 里，创建任务时抄进该任务的 options，中途改设置不影响已经排队的任务。
 
 - `categories`：启用的预设类别。至少要有一个类别，或一条额外命中词。
-- `extra_phrases`：`{text, category}`。口播里原样出现就在本地补一条命中。画面没有本地 OCR，只写进提示词，仍要模型在这一帧里看见。
+- `extra_phrases`：`{text, category, source}`。`source` 是「口播」或「画面」，缺省为口播。口播词在原句里连续出现就在本地补一条命中；词里的 `X` 表示数字（`X折` 命中「5折」「五折」，`X.X贵` 命中「3.5贵」「三点五贵」），原文记实际说出的那一段。画面词只写进画面提示，仍要模型在这一帧里看见，不在本地给口播补命中。同一条按来源、类别、原文去重。最多 300 条，单条 1 到 40 字。
 - `ignore_phrases`：命中原文与忽略词完全一致，或原文只是忽略词里的一段时丢掉。更长的句子里夹着忽略词，不因此整句丢掉。
 - `note`：最多 400 字，追加在系统提示末尾。提示词最后仍写明禁止推测优先。
 
-默认三类全开，没有额外词和忽略词。
+默认三类全开，并带一套内置词：口播的价格、规格、品牌，以及画面品牌（logo、商标等）。忽略词和补充说明默认是空的。已经保存过的额外词不会被盖掉。额外词还是空、且没有 `rules_initialized` 时，加载设置会补上这套词并写下这个标记；之后再把词清空，就会保持清空。
 
 ## 自动剪辑
 
@@ -87,8 +89,10 @@
 - `POST /jobs` 单文件字段名 `file`。`POST /jobs/batch` 字段名 `files`，一次最多 20 个。非法文件记在 `errors` 里，不要因此丢掉同批里的合法文件。
 - `GET /jobs`，`GET /jobs/{id}`，`GET /jobs/{id}/events`
 - `POST /jobs/{id}/cancel`，`DELETE /jobs/{id}`
+- `POST /jobs/{id}/retry-frames` 重试这个任务里识别失败的画面帧。任务还在排队、运行或暂停时返回 409。原视频不在了返回 404。
 - `GET /jobs/{id}/media`，`GET /jobs/{id}/output`，`GET /jobs/{id}/strip/{index}`（时间轴缩略图 JPEG）
 - `GET /jobs/{id}/export?fmt=json|xlsx`
+- `POST /jobs/export`，正文 `{ids}`，至少 2 个、最多 20 个。已完成的视频合成一个 Excel：结果表在原来的 8 列前加「视频」，未完成的只记在「任务信息」里。单视频导出的 8 列不变
 - `POST /jobs/{id}/cut`，正文 `{padding_sec}`
 - `POST /system/open-dir`，打开 `exports` 或 `data`
 

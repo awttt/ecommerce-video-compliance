@@ -11,7 +11,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 from fastapi.responses import FileResponse, StreamingResponse
 
@@ -55,6 +55,16 @@ class BatchFileError(BaseModel):
 class BatchCreated(BaseModel):
     jobs: list[JobPublic]
     errors: list[BatchFileError]
+
+
+class BatchExportRequest(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=20)
+
+
+class QueueState(BaseModel):
+    paused: bool
+
+
 _MEDIA_TYPES = {
     ".mp4": "video/mp4",
     ".m4v": "video/mp4",
@@ -119,12 +129,13 @@ def open_in_file_manager(path: Path) -> None:
 
 
 @router.get("/health")
-async def health() -> dict:
+async def health(request: Request) -> dict:
     payload: dict = {
         "ok": True,
         "version": __version__,
         "data_dir": str(data_dir()),
         "ffmpeg": ffmpeg_available(),
+        "mcp": bool(getattr(request.app.state, "mcp_ready", False)),
     }
     if payload["ffmpeg"]:
         payload["ffmpeg_path"] = resolve_bin("ffmpeg")
@@ -320,6 +331,33 @@ async def _accept_upload(file: UploadFile, fps: float | None, concurrency: int |
     return state.to_public()
 
 
+@router.get("/queue", response_model=QueueState, dependencies=[Depends(require_login)])
+async def read_queue() -> QueueState:
+    return QueueState(paused=get_manager().queue_paused)
+
+
+@router.post("/queue/pause", response_model=QueueState, dependencies=[Depends(require_login)])
+async def pause_queue() -> QueueState:
+    return QueueState(paused=await get_manager().pause_queue())
+
+
+@router.post("/queue/resume", response_model=QueueState, dependencies=[Depends(require_login)])
+async def resume_queue() -> QueueState:
+    return QueueState(paused=await get_manager().resume_queue())
+
+
+@router.delete("/queue", dependencies=[Depends(require_login)])
+async def clear_queue() -> dict:
+    deleted = await get_manager().clear_queue()
+    return {"ok": True, "deleted": deleted}
+
+
+@router.delete("/jobs", dependencies=[Depends(require_login)])
+async def delete_all_jobs() -> dict:
+    deleted = await get_manager().delete_all()
+    return {"ok": True, "deleted": deleted}
+
+
 @router.get("/jobs", response_model=list[JobPublic], response_model_by_alias=True, dependencies=[Depends(require_login)])
 async def list_jobs() -> list[JobPublic]:
     return await get_manager().list_jobs()
@@ -343,6 +381,20 @@ async def job_events(job_id: str) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.post("/jobs/{job_id}/retry-frames", response_model=JobPublic, response_model_by_alias=True, dependencies=[Depends(require_login)])
+async def retry_failed_frames(job_id: str) -> JobPublic:
+    _check_id(job_id)
+    try:
+        state = await get_manager().retry_failed_frames(job_id)
+    except JobNotFound as exc:
+        raise HTTPException(status_code=404, detail="任务不存在") from exc
+    except BusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="视频文件不存在") from exc
+    return state.to_public()
 
 
 @router.post("/jobs/{job_id}/cancel", response_model=JobPublic, response_model_by_alias=True, dependencies=[Depends(require_login)])
@@ -418,6 +470,27 @@ async def export_job(job_id: str, fmt: str = "json") -> FileResponse:
         else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     return FileResponse(path, media_type=media, filename=path.name)
+
+
+@router.post("/jobs/export", dependencies=[Depends(require_login)])
+async def export_jobs(body: BatchExportRequest) -> FileResponse:
+    seen: set[str] = set()
+    for job_id in body.ids:
+        _check_id(job_id)
+        seen.add(job_id)
+    if len(seen) < 2:
+        raise HTTPException(status_code=400, detail="批量导出至少需要 2 个视频")
+    try:
+        path = await get_manager().export_batch(body.ids)
+    except JobNotFound as exc:
+        raise HTTPException(status_code=404, detail="任务不存在") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return FileResponse(
+        path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=path.name,
+    )
 
 
 async def _edit_public(job_id: str, action):

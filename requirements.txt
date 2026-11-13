@@ -6,3 +6,4 @@ aiosqlite>=0.20.0
 openpyxl>=3.1.5
 pywebview>=5.3.2
 python-multipart>=0.0.12
+mcp>=2.3,<3

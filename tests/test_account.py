@@ -4,7 +4,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from app.core.deepseek import chat_url
-from app.core.relay import CHAT_BASE, PICTURE_MODEL, RelayClient, explain_error, usable_api_key
+from app.core.relay import CHAT_BASE, DEEPSEEK_FLASH_MODEL, RelayClient, explain_error, usable_api_key
 from app.factory import create_app
 from app.logging_setup import redact
 from app.services.manager import JobState, get_manager
@@ -310,7 +310,7 @@ def test_login_pins_picture_calls_to_the_account_key(monkeypatch):
             },
         )
         assert saved.status_code == 200
-        assert saved.json()["model"] == PICTURE_MODEL
+        assert saved.json()["model"] == DEEPSEEK_FLASH_MODEL
         assert saved.json()["base_url"] == "https://api.deepseek.com"
         body = login(client)
         settings = body["settings"]
@@ -323,7 +323,7 @@ def test_login_pins_picture_calls_to_the_account_key(monkeypatch):
         assert settings["api_key_source"] == "account"
         assert settings["api_key_masked"].endswith("4242")
         assert settings["base_url"] == "https://api.deepseek.com"
-        assert settings["model"] == PICTURE_MODEL
+        assert settings["model"] == DEEPSEEK_FLASH_MODEL
         assert settings["has_api_key"] is True
         text = json.dumps(body, ensure_ascii=False)
         for secret in (PASSWORD, ACCESS, REFRESH, RELAY_KEY, SAVED_KEY):
@@ -336,8 +336,8 @@ def test_login_pins_picture_calls_to_the_account_key(monkeypatch):
         assert config.api_key == RELAY_KEY
         assert config.base_url == CHAT_BASE
         assert chat_url(config.base_url) == "https://token4u.cc/v1/chat/completions"
-        assert config.model == PICTURE_MODEL
-        assert settings["model"] == PICTURE_MODEL
+        assert config.model == DEEPSEEK_FLASH_MODEL
+        assert settings["model"] == DEEPSEEK_FLASH_MODEL
         kept = client.put("/api/settings", json={"fps": 1.5})
         assert kept.json()["account_logged_in"] is True
         assert kept.json()["api_key_source"] == "account"
@@ -355,7 +355,7 @@ def test_login_pins_picture_calls_to_the_account_key(monkeypatch):
         logged_out_settings = logged_out.json()["settings"]
         assert logged_out_settings["account_logged_in"] is False
         assert logged_out_settings["api_key_source"] == "none"
-        assert logged_out_settings["model"] == PICTURE_MODEL
+        assert logged_out_settings["model"] == DEEPSEEK_FLASH_MODEL
         stored = json.dumps(get_manager()._settings, ensure_ascii=False)
         assert ACCESS not in stored
         assert RELAY_KEY not in stored
@@ -363,7 +363,7 @@ def test_login_pins_picture_calls_to_the_account_key(monkeypatch):
         fallback = get_manager()._config_for(queued_state())
         assert fallback.api_key == ""
         assert fallback.base_url == "https://api.deepseek.com"
-        assert fallback.model == PICTURE_MODEL
+        assert fallback.model == DEEPSEEK_FLASH_MODEL
 
 
 def test_existing_named_key_is_reused_without_a_whitelist():

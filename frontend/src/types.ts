@@ -46,12 +46,17 @@ export interface Job {
   created_at: string;
   updated_at: string;
   finished_at: string | null;
+  started_at: string | null;
+  paused_total_sec?: number;
+  hold_sec?: number;
+  paused_at?: string | null;
   findings: Finding[];
 }
 
 export interface PhraseRule {
   text: string;
   category: string;
+  source?: "口播" | "画面";
 }
 
 export interface DetectionRules {
@@ -75,6 +80,7 @@ export interface Settings {
   thinking: boolean;
   timeout_sec: number;
   mock_mode: boolean;
+  mcp_enabled: boolean;
   asr_enabled: boolean;
   has_tencent_secret: boolean;
   tencent_secret_id_masked: string;

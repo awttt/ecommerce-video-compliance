@@ -36,6 +36,10 @@ export function getSettings(): Promise<Settings> {
   return request<Settings>("/api/settings");
 }
 
+export function getHealth(): Promise<{ ok: boolean; mcp?: boolean }> {
+  return request<{ ok: boolean; mcp?: boolean }>("/api/health");
+}
+
 export function saveSettings(body: Record<string, unknown>): Promise<Settings> {
   return request<Settings>("/api/settings", {
     method: "PUT",
@@ -116,12 +120,36 @@ export function listJobs(): Promise<Job[]> {
   return request<Job[]>("/api/jobs");
 }
 
+export function getQueue(): Promise<{ paused: boolean }> {
+  return request<{ paused: boolean }>("/api/queue");
+}
+
+export function pauseQueue(): Promise<{ paused: boolean }> {
+  return request<{ paused: boolean }>("/api/queue/pause", { method: "POST" });
+}
+
+export function resumeQueue(): Promise<{ paused: boolean }> {
+  return request<{ paused: boolean }>("/api/queue/resume", { method: "POST" });
+}
+
+export function clearQueue(): Promise<{ ok: boolean; deleted: number }> {
+  return request<{ ok: boolean; deleted: number }>("/api/queue", { method: "DELETE" });
+}
+
+export function deleteAllJobs(): Promise<{ ok: boolean; deleted: number }> {
+  return request<{ ok: boolean; deleted: number }>("/api/jobs", { method: "DELETE" });
+}
+
 export function getJob(id: string): Promise<Job> {
   return request<Job>(`/api/jobs/${id}`);
 }
 
 export function cancelJob(id: string): Promise<Job> {
   return request<Job>(`/api/jobs/${id}/cancel`, { method: "POST" });
+}
+
+export function retryFailedFrames(id: string): Promise<Job> {
+  return request<Job>(`/api/jobs/${id}/retry-frames`, { method: "POST" });
 }
 
 export function deleteJob(id: string): Promise<void> {
@@ -159,10 +187,24 @@ export function openDir(target: "exports" | "data"): Promise<{ path: string }> {
 export async function downloadExport(id: string, fmt: "json" | "xlsx"): Promise<void> {
   const response = await fetch(`/api/jobs/${id}/export?fmt=${fmt}`);
   if (!response.ok) throw new Error(await readError(response));
+  await saveDownload(response, `合规结果.${fmt}`);
+}
+
+export async function downloadBatchExport(ids: string[]): Promise<void> {
+  const response = await fetch("/api/jobs/export", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids }),
+  });
+  if (!response.ok) throw new Error(await readError(response));
+  await saveDownload(response, "批量合规结果.xlsx");
+}
+
+async function saveDownload(response: Response, fallback: string): Promise<void> {
   const blob = await response.blob();
   const disposition = response.headers.get("Content-Disposition") || "";
   const matched = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
-  const filename = matched ? decodeURIComponent(matched[1]) : `合规结果.${fmt}`;
+  const filename = matched ? decodeURIComponent(matched[1]) : fallback;
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;

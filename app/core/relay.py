@@ -15,16 +15,20 @@ CHAT_BASE = "https://token4u.cc/v1"
 KEY_NAME = "电商视频合规"
 # 用户可见分组「国产模型-bot创建」。Key 不绑这个分组时，中转站不会给它分配渠道。
 KEY_GROUP_ID = 14
-# 登录后的画面和口播文本请求固定用这个名字。glm-5.3-flash 支持 OpenAI 兼容的视觉输入，峰值价格大约是 DeepSeek 的四分之一。
+# 画面模型只有这两个。DeepSeek 4.1 Flash 的接口名是 deepseek-flash。
 PICTURE_MODEL = "glm-5.3-flash"
+DEEPSEEK_FLASH_MODEL = "deepseek-flash"
+PICTURE_MODELS = (PICTURE_MODEL, DEEPSEEK_FLASH_MODEL)
 
 
 def configured_model(value: object) -> str:
-    """把空值和旧的 DeepSeek 模型名换成当前画面模型。其它已保存的名字保留。"""
-    text = str(value or "").strip()
-    if not text or text.lower().startswith("deepseek"):
+    """空值和其他名字用 GLM。DeepSeek 的旧名字都归到 4.1 Flash。"""
+    text = str(value or "").strip().lower()
+    if text.startswith("deepseek"):
+        return DEEPSEEK_FLASH_MODEL
+    if text == PICTURE_MODEL:
         return PICTURE_MODEL
-    return text
+    return PICTURE_MODEL
 
 
 _REASON = {

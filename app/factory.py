@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -40,15 +41,39 @@ async def lifespan(app: FastAPI):
     setup_logging()
     manager = get_manager()
     await manager.init()
+    mcp_session = getattr(app.state, "mcp_session", None)
+    mcp_started = False
+    if mcp_session is not None:
+        try:
+            await mcp_session.__aenter__()
+            mcp_started = True
+        except Exception:
+            logging.getLogger("app.mcp").exception("MCP 会话没有启动，界面和现有接口不受影响")
+    app.state.mcp_ready = mcp_started
     try:
         yield
     finally:
+        if mcp_started:
+            try:
+                await mcp_session.__aexit__(None, None, None)
+            except Exception:
+                logging.getLogger("app.mcp").exception("MCP 会话关闭时出错")
         await manager.shutdown()
 
 
 def create_app() -> FastAPI:
     app = FastAPI(title="电商视频素材合规检测", version=__version__, lifespan=lifespan)
+    app.state.mcp_session = None
+    app.state.mcp_ready = False
     app.include_router(router)
+    try:
+        from app.mcp_server import attach_mcp, mcp_enabled
+
+        if mcp_enabled():
+            attach_mcp(app)
+    except Exception:
+        logging.getLogger("app.mcp").exception("MCP 未加载，界面和现有接口不受影响")
+        app.state.mcp_session = None
     dist = bundle_root() / "frontend" / "dist"
     if (dist / "index.html").is_file():
         app.mount("/", StaticFiles(directory=dist, html=True), name="ui")

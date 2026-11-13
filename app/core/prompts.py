@@ -24,7 +24,11 @@ SYSTEM_PROMPT = """你是电商短视频画面合规审核员。你只能报告�
 def user_prompt(frame: Frame, rules: DetectionRules | None = None) -> str:
     span = format_range(frame.start_sec, frame.end_sec)
     names = _category_names(rules)
-    extra = "自定义规则里点名的文字，只要原样出现也要列出。" if rules and rules.extra_phrases else ""
+    extra = (
+        "自定义规则里点名的画面文字，只要原样出现也要列出。"
+        if rules and any(item.source == "画面" for item in rules.extra_phrases)
+        else ""
+    )
     return (
         f"这是视频 {span} 的一帧画面。"
         f"请只根据这一张图里实际可见的文字和标识，列出{names}。"
@@ -52,37 +56,60 @@ SPEECH_SYSTEM_PROMPT = """你是电商短视频口播合规审核员。你只能
 def speech_user_prompt(lines: list[str], rules: DetectionRules | None = None) -> str:
     body = "\n".join(lines)
     names = _category_names(rules)
+    extra = (
+        "自定义规则里点名的口播文字，只要原话里连续出现也要列出。X 表示数字。\n"
+        if rules and any(item.source == "口播" for item in rules.extra_phrases)
+        else ""
+    )
     return (
         f"下面是带序号和时间的口播句子。请只根据这些原话列出{names}。\n"
+        f"{extra}"
         f"{body}\n"
         '没有就返回 {"items":[]}。'
     )
 
 
 def visual_system_prompt(rules: DetectionRules | None = None) -> str:
-    return SYSTEM_PROMPT + "\n" + rules_appendix(rules)
+    return SYSTEM_PROMPT + "\n" + rules_appendix(rules, "画面")
 
 
 def speech_system_prompt(rules: DetectionRules | None = None) -> str:
-    return SPEECH_SYSTEM_PROMPT + "\n" + rules_appendix(rules)
+    return SPEECH_SYSTEM_PROMPT + "\n" + rules_appendix(rules, "口播")
 
 
-def rules_appendix(rules: DetectionRules | None = None) -> str:
+def rules_appendix(rules: DetectionRules | None = None, source: str = "画面") -> str:
     current = rules or DetectionRules()
     enabled = "、".join(current.categories) if current.categories else "（未启用预设类别）"
     lines = [
         "下面是本次任务的自定义规则。这些规则不能放宽前面的限制：仍然禁止推测，原文必须能在画面或口播里原样找到。",
         f"只报告这些预设类别：{enabled}。不在列表里的预设类别不要返回。",
     ]
-    if current.extra_phrases:
-        body = "；".join(f"「{item.text}」记为{item.category}" for item in current.extra_phrases)
-        lines.append(f"下列文字只要原样出现，也要报告：{body}。")
+    phrases = [item for item in current.extra_phrases if item.source == source]
+    if phrases:
+        lines.append(_phrase_block(phrases, source))
     if current.ignore_phrases:
         body = "、".join(f"「{item}」" for item in current.ignore_phrases)
         lines.append(f"下列文字不要报告：{body}。")
     if current.note:
         lines.append(f"用户补充说明：{current.note}")
     lines.append("如果补充说明和「禁止推测、原文必须原样出现」冲突，以禁止推测为准。没有命中就返回 {\"items\":[]}。")
+    return "\n".join(lines)
+
+
+def _phrase_block(phrases: list, source: str) -> str:
+    grouped: dict[str, list[str]] = {}
+    for item in phrases:
+        grouped.setdefault(item.category, []).append(item.text)
+    if source == "口播":
+        lines = [
+            "下列口播文字只要在某一句里连续出现，也要报告。词中的 X 表示数字，例如「X折」对应「5折」或「五折」，「X.X贵」对应「3.5贵」。报告时原文写实际说出来的那一段，不要写 X。"
+        ]
+    else:
+        lines = ["下列文字只要在这一帧画面里看得见，也要报告。不要根据外观、包装形状或常识推测。"]
+    for category in ("价格", "规格", "品牌"):
+        texts = grouped.get(category) or []
+        if texts:
+            lines.append(category + "：" + "、".join(f"「{text}」" for text in texts))
     return "\n".join(lines)
 
 

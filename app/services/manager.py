@@ -8,9 +8,11 @@ import logging
 import os
 import re
 import shutil
+import signal
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.core.aggregate import aggregate, refold_findings
@@ -19,7 +21,6 @@ from app.core.relay import (
     CHAT_BASE,
     KEY_GROUP_ID,
     KEY_NAME,
-    PICTURE_MODEL,
     RelayClient,
     RelayError,
     configured_model,
@@ -28,12 +29,12 @@ from app.core.relay import (
 from app.logging_setup import redact
 from app.core.editor import detect_silences, draft_cuts, normalize_cuts, render_clean_video
 from app.core.ffmpeg import FFmpegError, extract_strip, probe_video
-from app.core.pipeline import JobCancelled, Progress, run_pipeline
+from app.core.pipeline import JobCancelled, Progress, run_pipeline, run_selected_frames
 from app.core.speech import NoAudio, SpeechProgress, run_speech
 from app.core.tencent_asr import MockAsrClient, TencentAsrClient
 from app.core.timeutil import utcnow
 from app.db import Database
-from app.exporting import export_file, write_json, write_xlsx
+from app.exporting import BatchExportJob, batch_export_file, export_file, write_batch_xlsx, write_json, write_xlsx
 from app.paths import audio_dir, data_dir, exports_dir, frames_dir, video_dir
 from app.schemas import (
     DEFAULT_SETTINGS,
@@ -192,6 +193,10 @@ class JobState:
     created_at: str
     updated_at: str
     finished_at: str | None
+    started_at: str | None = None
+    paused_total_sec: float = 0
+    hold_sec: float = 0
+    paused_at: str | None = None
     findings: list[Finding] = field(default_factory=list)
     edit_plan: dict | None = None
     visual_findings: list[Finding] = field(default_factory=list)
@@ -202,6 +207,10 @@ class JobState:
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     holder: dict | None = None
     last_save: float = 0.0
+    failed_indexes: list[int] = field(default_factory=list)
+    last_frame_error: str = ""
+    retry_failed: bool = False
+    queue_at: str = ""
 
     def touch(self) -> None:
         self.updated_at = utcnow()
@@ -222,6 +231,7 @@ class JobState:
             "frames_extracted": self.frames_extracted,
             "frames_recognized": self.frames_recognized,
             "failed_frames": self.failed_frames,
+            "failed_frames_json": json.dumps(self.failed_indexes, ensure_ascii=False),
             "hit_count": self.hit_count,
             "error": self.error,
             "speech_stage": self.speech_stage,
@@ -233,6 +243,10 @@ class JobState:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "finished_at": self.finished_at,
+            "started_at": self.started_at,
+            "paused_total_sec": self.paused_total_sec,
+            "hold_sec": self.hold_sec,
+            "paused_at": self.paused_at,
         }
 
     def to_public(self, include_findings: bool = True) -> JobPublic:
@@ -265,6 +279,10 @@ class JobState:
             created_at=self.created_at,
             updated_at=self.updated_at,
             finished_at=self.finished_at,
+            started_at=self.started_at,
+            paused_total_sec=self.paused_total_sec,
+            hold_sec=self.hold_sec,
+            paused_at=self.paused_at,
             findings=list(self.findings) if include_findings else [],
         )
 
@@ -273,6 +291,36 @@ def _cell(row, name: str, default):
     if name not in row.keys():
         return default
     return row[name]
+
+
+def _failed_indexes(raw) -> list[int]:
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    indexes: list[int] = []
+    for item in data:
+        if isinstance(item, bool):
+            continue
+        if isinstance(item, int) and item > 0:
+            indexes.append(item)
+        elif isinstance(item, float) and item.is_integer() and item > 0:
+            indexes.append(int(item))
+    return indexes
+
+
+def _partial_frame_note(count: int, detail: str) -> str:
+    if count <= 0:
+        return ""
+    note = f"，部分帧识别失败（{count} 帧）"
+    cleaned = " ".join(str(detail or "").split())
+    if cleaned:
+        note = f"{note}。{cleaned[:180]}"
+    return note
 
 
 def _state_from_row(row, findings: list[Finding]) -> JobState:
@@ -308,8 +356,54 @@ def _state_from_row(row, findings: list[Finding]) -> JobState:
         edit_plan=_load_edit_plan(_cell(row, "edit_plan", None)),
         updated_at=row["updated_at"],
         finished_at=row["finished_at"],
+        started_at=_cell(row, "started_at", None),
+        paused_total_sec=float(_cell(row, "paused_total_sec", 0) or 0),
+        hold_sec=float(_cell(row, "hold_sec", 0) or 0),
+        paused_at=_cell(row, "paused_at", None) or None,
         findings=findings,
+        failed_indexes=_failed_indexes(_cell(row, "failed_frames_json", "[]")),
     )
+
+
+def _precise_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def _parse_stamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _seconds_between(start: str, end: str) -> float:
+    opened = _parse_stamp(start)
+    closed = _parse_stamp(end)
+    if opened is None or closed is None:
+        return 0
+    return max(0.0, (closed - opened).total_seconds())
+
+
+def _fold_pause(state: JobState, at: str, *, terminal: bool = False) -> None:
+    """把一段暂停折进耗时。已经开始的任务从自己的计时里扣掉；还没开始的只记在整批墙上。"""
+    if not state.paused_at:
+        return
+    gap = _seconds_between(state.paused_at, at)
+    state.hold_sec = round(state.hold_sec + gap, 3)
+    if state.started_at:
+        started = _parse_stamp(state.started_at)
+        opened = _parse_stamp(state.paused_at)
+        closed = _parse_stamp(at)
+        if started is not None and opened is not None and closed is not None:
+            state.paused_total_sec = round(
+                state.paused_total_sec + max(0.0, (closed - max(started, opened)).total_seconds()),
+                3,
+            )
+    elif terminal:
+        state.paused_total_sec = round(state.paused_total_sec + gap, 3)
+    state.paused_at = None
 
 
 def _apply_refold(state: JobState) -> None:
@@ -326,6 +420,10 @@ class JobManager:
         self._jobs: dict[str, JobState] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self._gate = asyncio.Lock()
+        self._queue_paused = False
+        self._pause_mark: str | None = None
+        self._resume = asyncio.Event()
+        self._resume.set()
         self._account_lock = asyncio.Lock()
         self.relay = RelayClient()
         self._pending_2fa: dict[str, str] | None = None
@@ -334,8 +432,27 @@ class JobManager:
     async def init(self) -> None:
         self.db = Database(data_dir() / "app.db")
         await self.db.connect()
+        was_paused = await self.db.has_status("paused")
         await self.db.fail_interrupted(utcnow())
         self._settings = await self.db.load_settings()
+        if was_paused or bool(self._settings.get("queue_paused")):
+            self._queue_paused = True
+            self._resume.clear()
+            self._pause_mark = _precise_now()
+        await self._restore_queued()
+        if not self._queue_paused:
+            async with self._gate:
+                self._kick_locked()
+
+    async def _restore_queued(self) -> None:
+        rows = await self.db.list_jobs()
+        for row in rows:
+            if row["status"] != "queued" or row["id"] in self._jobs:
+                continue
+            findings = await self.db.get_findings(row["id"])
+            state = _state_from_row(row, findings)
+            _apply_refold(state)
+            self._jobs[state.id] = state
 
     async def shutdown(self) -> None:
         self._stopping = True
@@ -365,6 +482,7 @@ class JobManager:
             thinking=bool(self._settings["thinking"]),
             timeout_sec=float(self._settings["timeout_sec"]),
             mock_mode=bool(self._settings["mock_mode"]),
+            mcp_enabled=bool(self._settings.get("mcp_enabled", False)),
             asr_enabled=bool(self._settings.get("asr_enabled", True)),
             has_tencent_secret=bool(secret_id and secret_key),
             tencent_secret_id_masked=mask_key(secret_id),
@@ -408,6 +526,8 @@ class JobManager:
             "thinking",
             "timeout_sec",
             "mock_mode",
+            "mcp_enabled",
+            "model",
             "asr_enabled",
             "tencent_region",
             "asr_engine",
@@ -537,10 +657,12 @@ class JobManager:
             finished_at=None,
         )
         async with self._gate:
-            pending = sum(1 for job in self._jobs.values() if job.status in {"queued", "running"})
+            pending = sum(1 for job in self._jobs.values() if job.status in {"queued", "running", "paused"})
             if pending >= _MAX_QUEUE:
                 raise BusyError("排队已满（最多 20 个），请等一部分完成后再上传")
             state.message = "排队中" if pending == 0 else f"排队中，前面还有 {pending} 个"
+            if self._queue_paused:
+                state.paused_at = self._pause_mark or _precise_now()
             self._jobs[state.id] = state
             await self.db.upsert_job(state.to_row())
             inline = os.environ.get("EVC_INLINE_JOBS") == "1"
@@ -550,8 +672,47 @@ class JobManager:
             await self.run(state.id)
         return state
 
+    async def retry_failed_frames(self, job_id: str) -> JobState:
+        state = await self.get(job_id)
+        if state.status in {"queued", "running", "paused"}:
+            raise BusyError("任务还在进行，结束后再重试失败的帧")
+        if state.status not in {"done", "failed"}:
+            raise BusyError("这个任务不能重试失败的帧")
+        if state.failed_frames <= 0:
+            raise BusyError("没有失败的帧")
+        if not Path(state.source_path).is_file():
+            raise FileNotFoundError("视频文件不存在")
+        async with self._gate:
+            if state.status in {"queued", "running", "paused"}:
+                raise BusyError("任务还在进行，结束后再重试失败的帧")
+            others = [
+                job
+                for job in self._jobs.values()
+                if job.id != state.id and job.status in {"queued", "running", "paused"}
+            ]
+            if len(others) >= _MAX_QUEUE:
+                raise BusyError("排队已满（最多 20 个），请等一部分完成后再重试")
+            ahead = sum(1 for job in self._jobs.values() if job.status in {"queued", "running", "paused"})
+            state.retry_failed = True
+            state.queue_at = utcnow()
+            state.cancel_event = asyncio.Event()
+            state.status = "queued"
+            state.stage = "queued"
+            state.finished_at = None
+            state.error = None
+            state.message = "排队重试失败的帧" if ahead == 0 else f"排队重试失败的帧，前面还有 {ahead} 个"
+            if self._queue_paused and state.paused_at is None:
+                state.paused_at = self._pause_mark or _precise_now()
+            state.touch()
+            await self.db.upsert_job(state.to_row())
+            self._publish(state)
+            self._kick_locked()
+        return state
+
     def _kick_locked(self) -> None:
-        if any(job.status == "running" for job in self._jobs.values()):
+        if self._queue_paused:
+            return
+        if any(job.status in {"running", "paused"} for job in self._jobs.values()):
             return
         if any(not task.done() for task in self._tasks.values()):
             return
@@ -561,7 +722,7 @@ class JobManager:
                 for job in self._jobs.values()
                 if job.status == "queued" and not job.cancel_event.is_set()
             ),
-            key=lambda job: (job.created_at, job.id),
+            key=lambda job: (job.queue_at or job.created_at, job.id),
         )
         if not queued:
             return
@@ -578,14 +739,166 @@ class JobManager:
             async with self._gate:
                 self._kick_locked()
 
+    @property
+    def queue_paused(self) -> bool:
+        return self._queue_paused
+
+    async def pause_queue(self) -> bool:
+        async with self._gate:
+            self._queue_paused = True
+            self._resume.clear()
+            if self._pause_mark is None:
+                self._pause_mark = _precise_now()
+            mark = self._pause_mark
+            running = [job for job in self._jobs.values() if job.status == "running"]
+            holders = [job.holder for job in running if job.holder]
+            touched: list[JobState] = []
+            for state in self._jobs.values():
+                if state.status in TERMINAL:
+                    continue
+                if state.paused_at is None:
+                    state.paused_at = mark
+                if state.status == "running":
+                    state.status = "paused"
+                    state.message = "已暂停"
+                state.touch()
+                touched.append(state)
+            for holder in holders:
+                _signal_processes(holder, getattr(signal, "SIGSTOP", None))
+        for state in touched:
+            await self.db.upsert_job(state.to_row())
+            self._publish(state)
+        await self._remember_queue_paused()
+        return True
+
+    async def resume_queue(self) -> bool:
+        now = _precise_now()
+        async with self._gate:
+            self._queue_paused = False
+            self._pause_mark = None
+            touched: list[JobState] = []
+            for state in self._jobs.values():
+                if state.status in TERMINAL:
+                    continue
+                if state.paused_at:
+                    _fold_pause(state, now)
+                if state.status == "paused":
+                    state.status = "running"
+                    state.message = "继续识别"
+                state.touch()
+                touched.append(state)
+            holders = [job.holder for job in touched if job.holder and job.status == "running"]
+            for holder in holders:
+                _signal_processes(holder, getattr(signal, "SIGCONT", None))
+            self._resume.set()
+            self._kick_locked()
+        for state in touched:
+            await self.db.upsert_job(state.to_row())
+            self._publish(state)
+        await self._remember_queue_paused()
+        return False
+
+    async def _remember_queue_paused(self) -> None:
+        self._settings["queue_paused"] = self._queue_paused
+        try:
+            await self.db.save_settings(self._settings)
+        except Exception:
+            log.exception("保存队列暂停状态失败")
+
+    async def clear_queue(self) -> int:
+        """停掉并删除还在排队、正在识别、已暂停的视频。已结束的记录保留。"""
+        rows = await self.db.list_jobs()
+        ids = [row["id"] for row in rows if row["status"] in {"queued", "running", "paused"}]
+        known = set(ids)
+        for job_id, state in list(self._jobs.items()):
+            if state.status in {"queued", "running", "paused"} and job_id not in known:
+                ids.append(job_id)
+        async with self._gate:
+            was_paused = self._queue_paused
+            self._queue_paused = True
+            self._resume.clear()
+        removed = 0
+        try:
+            for job_id in ids:
+                try:
+                    state = await self.get(job_id)
+                except JobNotFound:
+                    continue
+                if state.status not in {"queued", "running", "paused"}:
+                    continue
+                await self.delete(job_id)
+                removed += 1
+        finally:
+            async with self._gate:
+                self._queue_paused = was_paused
+                if was_paused:
+                    self._resume.clear()
+                else:
+                    self._resume.set()
+                    self._pause_mark = None
+                    self._kick_locked()
+        return removed
+
+    async def delete_all(self) -> int:
+        rows = await self.db.list_jobs()
+        ids = [row["id"] for row in rows]
+        extra = [job_id for job_id in list(self._jobs) if job_id not in set(ids)]
+        for job_id in [*ids, *extra]:
+            await self.delete(job_id)
+        return len(ids) + len(extra)
+
     async def run(self, job_id: str) -> None:
         state = self._jobs[job_id]
-        if state.cancel_event.is_set() or state.status in TERMINAL:
-            return
-        state.status = "running"
-        state.stage = "extracting"
-        state.message = "准备处理"
-        state.touch()
+        selective: list[int] = []
+        keep_speech = False
+        kept_visual: list[Finding] = []
+        recognized_base = 0
+        async with self._gate:
+            if self._queue_paused or state.cancel_event.is_set() or state.status in TERMINAL:
+                return
+            retrying = state.retry_failed
+            state.retry_failed = False
+            if retrying:
+                selective = sorted({index for index in state.failed_indexes if isinstance(index, int) and index > 0})
+                keep_speech = state.speech_stage == "done"
+                state.failed_frames = 0
+                state.failed_indexes = []
+                state.last_frame_error = ""
+                state.error = None
+                if keep_speech:
+                    state.speech_hits = [finding_as_hit(item) for item in state.findings if item.source == "口播"]
+                    state.speech_ratio = 1.0
+                else:
+                    state.speech_stage = ""
+                    state.speech_message = ""
+                    state.speech_hits = []
+                    state.speech_ratio = 0.0
+                    state.asr_error = None
+                if selective:
+                    kept_visual = [item for item in state.findings if item.source != "口播"]
+                    recognized_base = max(0, state.frames_recognized - len(selective))
+                    state.frames_recognized = recognized_base
+                    state.visual_findings = list(kept_visual)
+                else:
+                    state.frames_recognized = 0
+                    state.frames_extracted = 0
+                    state.frames_estimated = 0
+                    state.progress = 0
+                    state.visual_findings = []
+                state.findings = combine_findings(state.visual_findings, state.speech_hits)
+                state.hit_count = len(state.findings)
+                if selective:
+                    self._apply_ratio(state)
+            state.status = "running"
+            state.stage = "extracting"
+            if selective:
+                state.message = "正在重试失败的帧"
+            elif retrying:
+                state.message = "正在重试全部画面"
+            else:
+                state.message = "准备处理"
+            state.started_at = state.started_at or utcnow()
+            state.touch()
         await self.db.upsert_job(state.to_row())
         self._publish(state)
         holder: dict = {"proc": None, "audio_proc": None, "recognizer": None, "asr": None}
@@ -596,27 +909,55 @@ class JobManager:
             holder["recognizer"] = recognizer
 
             async def on_progress(progress: Progress) -> None:
+                if selective:
+                    progress.findings = refold_findings([*kept_visual, *progress.findings])
                 await self._on_visual(state, progress)
 
             async def on_speech(progress: SpeechProgress) -> None:
                 await self._on_speech(state, progress)
 
             async with recognizer:
-                visual_task = asyncio.create_task(
-                    run_pipeline(
-                        Path(state.source_path),
-                        frames_dir(state.id),
-                        config,
-                        recognizer,
-                        state.cancel_event,
-                        on_progress,
-                        lambda proc: holder.__setitem__("proc", proc),
-                    ),
-                    name=f"visual-{state.id}",
-                )
-                speech_task = self._start_speech(state, config, recognizer, holder, on_speech)
+                if selective:
+                    visual_task = asyncio.create_task(
+                        run_selected_frames(
+                            Path(state.source_path),
+                            frames_dir(state.id),
+                            config,
+                            recognizer,
+                            state.cancel_event,
+                            on_progress,
+                            lambda proc: holder.__setitem__("proc", proc),
+                            selective,
+                            recognized_base=recognized_base,
+                            frames_estimated=state.frames_estimated,
+                            frames_extracted=state.frames_extracted,
+                            resume=self._resume,
+                        ),
+                        name=f"visual-{state.id}",
+                    )
+                else:
+                    visual_task = asyncio.create_task(
+                        run_pipeline(
+                            Path(state.source_path),
+                            frames_dir(state.id),
+                            config,
+                            recognizer,
+                            state.cancel_event,
+                            on_progress,
+                            lambda proc: holder.__setitem__("proc", proc),
+                            self._resume,
+                        ),
+                        name=f"visual-{state.id}",
+                    )
+                speech_task = None if keep_speech else self._start_speech(state, config, recognizer, holder, on_speech)
+                still_failed: list[int] | None = None
+                frame_error = ""
                 try:
-                    findings = await visual_task
+                    if selective:
+                        findings, still_failed, frame_error = await visual_task
+                        findings = refold_findings([*kept_visual, *findings])
+                    else:
+                        findings = await visual_task
                 except BaseException:
                     state.cancel_event.set()
                     _kill_processes(holder)
@@ -635,9 +976,15 @@ class JobManager:
                                 state.touch()
                         self._publish(state)
                     speech_hits, speech_error = await speech_task
+                else:
+                    speech_hits = list(state.speech_hits)
                 if state.cancel_event.is_set():
                     raise JobCancelled()
             async with state.progress_lock:
+                if still_failed is not None:
+                    state.failed_indexes = list(still_failed)
+                    state.failed_frames = len(still_failed)
+                    state.last_frame_error = frame_error
                 state.visual_findings = findings
                 state.speech_hits = speech_hits
                 if speech_error:
@@ -650,7 +997,7 @@ class JobManager:
                 state.stage = "done"
                 state.progress = 100
                 state.error = None
-                extra = f"，{state.failed_frames} 帧识别失败" if state.failed_frames else ""
+                extra = _partial_frame_note(state.failed_frames, state.last_frame_error)
                 if config.asr_enabled:
                     visual_count = sum(1 for item in state.findings if item.source != "口播")
                     oral_count = state.hit_count - visual_count
@@ -678,7 +1025,10 @@ class JobManager:
             state.error = str(exc)[:500]
             state.message = state.error or "处理失败"
         finally:
-            state.finished_at = state.finished_at or utcnow()
+            stamp = utcnow()
+            if state.status in TERMINAL:
+                _fold_pause(state, stamp, terminal=True)
+            state.finished_at = state.finished_at or stamp
             state.touch()
             state.holder = None
             try:
@@ -697,7 +1047,6 @@ class JobManager:
         model = configured_model(options.get("model") or self._settings["model"])
         if source == "account":
             base_url = CHAT_BASE
-            model = PICTURE_MODEL
         return RunConfig(
             fps=float(options.get("fps", state.fps)),
             concurrency=int(options.get("concurrency", state.concurrency)),
@@ -765,6 +1114,7 @@ class JobManager:
                     state.cancel_event,
                     on_speech,
                     lambda proc: holder.__setitem__("audio_proc", proc),
+                    resume=self._resume,
                 )
             return hits, ""
         except asyncio.CancelledError:
@@ -791,10 +1141,13 @@ class JobManager:
             state.frames_extracted = progress.frames_extracted
             state.frames_recognized = progress.frames_recognized
             state.failed_frames = progress.failed_frames
+            state.failed_indexes = list(progress.failed_indexes)
+            state.last_frame_error = progress.last_error
             state.visual_findings = progress.findings
             state.findings = combine_findings(progress.findings, state.speech_hits)
             state.hit_count = len(state.findings)
             self._apply_ratio(state)
+            self._keep_paused(state)
             state.touch()
             self._publish(state)
             await self._maybe_save(state)
@@ -810,9 +1163,15 @@ class JobManager:
             state.findings = combine_findings(state.visual_findings, progress.hits)
             state.hit_count = len(state.findings)
             self._apply_ratio(state)
+            self._keep_paused(state)
             state.touch()
             self._publish(state)
             await self._maybe_save(state)
+
+    def _keep_paused(self, state: JobState) -> None:
+        if self._queue_paused and state.status in {"running", "paused"}:
+            state.status = "paused"
+            state.message = "已暂停"
 
     def _apply_ratio(self, state: JobState) -> None:
         denom = max(state.frames_estimated, 1)
@@ -892,10 +1251,12 @@ class JobManager:
         if state.status == "queued":
             async with self._gate:
                 if state.status == "queued":
+                    stamp = utcnow()
+                    _fold_pause(state, stamp, terminal=True)
                     state.status = "cancelled"
                     state.stage = "cancelled"
                     state.message = "已取消"
-                    state.finished_at = state.finished_at or utcnow()
+                    state.finished_at = state.finished_at or stamp
                     state.touch()
                     await self.db.upsert_job(state.to_row())
                     self._publish(state)
@@ -943,6 +1304,31 @@ class JobManager:
             write_json(path, state.filename, state.duration_sec, state.fps, state.findings)
         else:
             write_xlsx(path, state.filename, state.duration_sec, state.fps, state.findings)
+        return path
+
+    async def export_batch(self, job_ids: list[str]) -> Path:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for job_id in job_ids:
+            if job_id in seen:
+                continue
+            seen.add(job_id)
+            ordered.append(job_id)
+        jobs = [await self.get(job_id) for job_id in ordered]
+        ready = [job for job in jobs if job.status == "done"]
+        if not ready:
+            raise RuntimeError("这批视频还没有检测完成，不能导出")
+        path = batch_export_file(len(ready))
+        write_batch_xlsx(path, [
+            BatchExportJob(
+                filename=job.filename,
+                duration_sec=job.duration_sec,
+                fps=job.fps,
+                status=job.status,
+                findings=list(job.findings) if job.status == "done" else [],
+            )
+            for job in jobs
+        ])
         return path
 
     async def _editable(self, job_id: str) -> tuple[JobState, Path]:
@@ -1593,6 +1979,23 @@ def _recharge_order(data: dict) -> RechargeOrder:
     )
 
 
+def finding_as_hit(item: Finding) -> RawHit:
+    return RawHit(
+        start_sec=item.start_sec,
+        end_sec=item.end_sec,
+        category=item.category,
+        text=item.text,
+        position=item.position,
+        confidence=item.confidence,
+        reason=item.reason,
+        note=item.note,
+        source=item.source or "口播",
+        sentence_start=item.sentence_start,
+        sentence_end=item.sentence_end,
+        next_start=item.next_start,
+    )
+
+
 def combine_findings(visual: list[Finding], speech_hits: list[RawHit]) -> list[Finding]:
     merged = list(visual) + aggregate(speech_hits)
     merged.sort(key=lambda item: (item.start_sec, item.source, item.category, item.text))
@@ -1605,7 +2008,22 @@ def _strip_ready(directory: Path) -> bool:
     return any(path.is_file() and path.stat().st_size > 0 for path in directory.glob("strip_*.jpg"))
 
 
+def _signal_processes(holder: dict, sig: int | None) -> None:
+    """暂停时停住抽帧和抽音频。Windows 没有 SIGSTOP，只靠识别循环里等待。"""
+    if sig is None:
+        return
+    for name in ("proc", "audio_proc"):
+        proc = holder.get(name)
+        if proc is None or proc.returncode is not None:
+            continue
+        try:
+            proc.send_signal(sig)
+        except (ProcessLookupError, OSError):
+            pass
+
+
 def _kill_processes(holder: dict) -> None:
+    _signal_processes(holder, getattr(signal, "SIGCONT", None))
     for name in ("proc", "audio_proc"):
         proc = holder.get(name)
         if proc is not None and proc.returncode is None:

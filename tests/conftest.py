@@ -11,17 +11,21 @@ def isolate_env(tmp_path, monkeypatch):
     monkeypatch.delenv("EVC_MOCK", raising=False)
     monkeypatch.delenv("EVC_INLINE_JOBS", raising=False)
     monkeypatch.delenv("EVC_KEEP_FRAMES", raising=False)
+    monkeypatch.delenv("EVC_MCP", raising=False)
     import app.factory as factory
     from app.logging_setup import reset_logging
     from app.paths import reset_paths_cache
+    from app.mcp_server import reset_batches
     from app.services.manager import reset_manager
 
+    reset_batches()
     monkeypatch.setattr(factory, "load_project_dotenv", lambda: None)
     monkeypatch.setattr("app.paths.load_project_dotenv", lambda: None)
     reset_logging()
     reset_paths_cache()
     reset_manager()
     yield
+    reset_batches()
     reset_logging()
     reset_paths_cache()
     reset_manager()

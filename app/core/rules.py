@@ -1,7 +1,7 @@
 """把用户自定义规则用到已经解析好的命中上。
 
-画面命中只做过滤：模型必须自己看见文字。口播可以按原句做精确匹配，
-额外命中词不在口播里连续出现就不会被加上。
+画面命中只做过滤：模型必须自己看见文字。口播可以按原句做匹配，
+额外命中词不在口播里连续出现就不会被加上。词里的 X 表示数字。
 """
 
 from __future__ import annotations
@@ -13,6 +13,8 @@ from app.core.transcript import SpeechSentence
 from app.schemas import DetectionRules, PhraseRule, RawHit
 
 _CATEGORIES = {"价格", "规格", "品牌"}
+_PLAIN_NUMBER = r"(?:\d+|[零〇一二三四五六七八九十百千万两]+)"
+_NUMBER = rf"(?:{_PLAIN_NUMBER}(?:(?:\.|点){_PLAIN_NUMBER})?)"
 
 
 def apply_rules(
@@ -32,8 +34,10 @@ def _keep(hit: RawHit, rules: DetectionRules) -> bool:
         return False
     if hit.category in rules.categories:
         return True
+    source = hit.source if hit.source in {"口播", "画面"} else "画面"
     return any(
-        hit.category == item.category and _same(hit.text, item.text) for item in rules.extra_phrases
+        item.source == source and hit.category == item.category and _covers(hit.text, item.text)
+        for item in rules.extra_phrases
     )
 
 
@@ -59,43 +63,114 @@ def _extra_speech(
     for index, sentence in enumerate(ordered):
         next_start = _following(ordered, index)
         for phrase in rules.extra_phrases:
-            hit = _phrase_hit(sentence, phrase, next_start, rules)
-            if hit is None:
-                continue
-            key = (hit.category, _norm(hit.text), round(hit.start_sec, 2))
-            if key in seen:
-                continue
-            seen.add(key)
-            found.append(hit)
+            for hit in _phrase_hits(sentence, phrase, next_start, rules):
+                key = (hit.category, _norm(hit.text), round(hit.start_sec, 2))
+                if key in seen:
+                    continue
+                seen.add(key)
+                found.append(hit)
     return found
 
 
-def _phrase_hit(
+def _phrase_hits(
     sentence: SpeechSentence,
     phrase: PhraseRule,
     next_start: float | None,
     rules: DetectionRules,
-) -> RawHit | None:
-    if phrase.category not in _CATEGORIES:
+) -> list[RawHit]:
+    if phrase.source != "口播" or phrase.category not in _CATEGORIES:
+        return []
+    found: list[RawHit] = []
+    for located in locate_rule_quotes(sentence.text, phrase.text):
+        if _ignored(located, rules):
+            continue
+        start, end = tighten_span(sentence, located)
+        found.append(
+            RawHit(
+                start_sec=start,
+                end_sec=end,
+                category=phrase.category,
+                text=located,
+                position="口播内容",
+                confidence="确定",
+                reason=f"命中自定义规则「{phrase.text}」",
+                note="",
+                source="口播",
+                sentence_start=sentence.start_sec,
+                sentence_end=sentence.end_sec,
+                next_start=next_start,
+            )
+        )
+    return found
+
+
+def locate_rule_quotes(sentence: str, phrase: str) -> list[str]:
+    """返回原句里命中的连续片段。没有 X 时必须原样出现；X 表示一段数字。"""
+    phrase = re.sub(r"\s+", "", phrase.strip())
+    if not phrase or not sentence:
+        return []
+    pattern = _wildcard_pattern(phrase)
+    if pattern is None:
+        located = locate_quote(sentence, phrase)
+        if located:
+            return [located]
+        if re.search(r"[A-Za-z]", phrase):
+            found = _search_all(sentence, re.escape(phrase))
+            return found[:1]
+        return []
+    return _search_all(sentence, pattern)
+
+
+def _wildcard_pattern(phrase: str) -> str | None:
+    if "X" not in phrase and "x" not in phrase:
         return None
-    located = locate_quote(sentence.text, phrase.text)
-    if not located or _ignored(located, rules):
+    chunks: list[str] = []
+    index = 0
+    while index < len(phrase):
+        char = phrase[index]
+        if char in "Xx":
+            if index + 2 < len(phrase) and phrase[index + 1] == "." and phrase[index + 2] in "Xx":
+                chunks.append(_PLAIN_NUMBER)
+                chunks.append(r"(?:\.|点)")
+                chunks.append(_PLAIN_NUMBER)
+                index += 3
+                continue
+            chunks.append(_NUMBER)
+            index += 1
+            continue
+        end = index + 1
+        while end < len(phrase) and phrase[end] not in "Xx":
+            end += 1
+        chunks.append(re.escape(phrase[index:end]))
+        index = end
+    if not chunks:
         return None
-    start, end = tighten_span(sentence, located)
-    return RawHit(
-        start_sec=start,
-        end_sec=end,
-        category=phrase.category,
-        text=located,
-        position="口播内容",
-        confidence="确定",
-        reason=f"命中自定义规则「{phrase.text}」",
-        note="",
-        source="口播",
-        sentence_start=sentence.start_sec,
-        sentence_end=sentence.end_sec,
-        next_start=next_start,
-    )
+    return "".join(chunks)
+
+
+def _search_all(sentence: str, pattern: str) -> list[str]:
+    hay, indexes = _compact(sentence)
+    if not hay:
+        return []
+    found: list[str] = []
+    for match in re.finditer(pattern, hay, flags=re.IGNORECASE):
+        if match.end() <= match.start():
+            continue
+        start = indexes[match.start()]
+        end = indexes[match.end() - 1] + 1
+        found.append(sentence[start:end])
+    return found
+
+
+def _compact(sentence: str) -> tuple[str, list[int]]:
+    chars: list[str] = []
+    indexes: list[int] = []
+    for index, char in enumerate(sentence):
+        if char.isspace():
+            continue
+        chars.append(char)
+        indexes.append(index)
+    return "".join(chars), indexes
 
 
 def _following(ordered: list[SpeechSentence], index: int) -> float | None:
@@ -107,8 +182,8 @@ def _following(ordered: list[SpeechSentence], index: int) -> float | None:
     return nxt
 
 
-def _same(left: str, right: str) -> bool:
-    return _norm(left) == _norm(right)
+def _covers(hit_text: str, phrase: str) -> bool:
+    return any(_norm(quote) == _norm(hit_text) for quote in locate_rule_quotes(hit_text, phrase))
 
 
 def _norm(text: str) -> str:

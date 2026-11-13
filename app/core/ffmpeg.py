@@ -143,6 +143,21 @@ def _frame_indexes(directory: Path) -> list[tuple[int, Path]]:
     return found
 
 
+def frame_bounds(index: int, fps: float, duration: float) -> tuple[float, float] | None:
+    """第 index 帧（从 1 开始）在视频里的起止秒。超出时长则没有这一帧。"""
+    if index < 1 or fps <= 0:
+        return None
+    start = (index - 1) / fps
+    if duration > 0 and start >= duration - 1e-3:
+        return None
+    end = index / fps
+    if duration > 0:
+        end = min(end, duration)
+    if end <= start:
+        end = start + (1 / fps)
+    return round(start, 3), round(end, 3)
+
+
 def ready_frames(
     directory: Path,
     *,
@@ -159,15 +174,11 @@ def ready_frames(
     for index, path in items[:limit]:
         if index in yielded or path.stat().st_size <= 0:
             continue
-        start = (index - 1) / fps
-        if duration > 0 and start >= duration - 1e-3:
+        bounds = frame_bounds(index, fps, duration)
+        if bounds is None:
             continue
-        end = index / fps
-        if duration > 0:
-            end = min(end, duration)
-        if end <= start:
-            end = start + (1 / fps)
-        frames.append(Frame(index=index, start_sec=round(start, 3), end_sec=round(end, 3), path=str(path)))
+        start, end = bounds
+        frames.append(Frame(index=index, start_sec=start, end_sec=end, path=str(path)))
     return frames
 
 
@@ -264,6 +275,81 @@ async def extract_frames(
         if on_process:
             on_process(None)
         await reader
+
+
+async def extract_one_frame(
+    video: Path,
+    dest: Path,
+    *,
+    index: int,
+    fps: float,
+    duration: float,
+    max_edge: int,
+    jpeg_q: int,
+    cancel: asyncio.Event,
+    on_process: Callable[[asyncio.subprocess.Process | None], None] | None = None,
+) -> Frame:
+    """按原来的帧号重抽一张。取消时删掉半成品。"""
+    bounds = frame_bounds(index, fps, duration)
+    if bounds is None:
+        raise FFmpegError("这一帧超出视频时长")
+    start, end = bounds
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        dest.unlink()
+    vf = await scale_filter(max_edge)
+    cmd = [
+        resolve_bin("ffmpeg"),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-ss",
+        f"{start:.3f}",
+        "-i",
+        str(video),
+        "-map",
+        "0:v:0",
+        "-an",
+        "-frames:v",
+        "1",
+        "-vf",
+        vf,
+        "-q:v",
+        str(int(jpeg_q)),
+        str(dest),
+    ]
+    if cancel.is_set():
+        raise FFmpegError("已取消")
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    if on_process:
+        on_process(proc)
+    try:
+        stderr = await proc.stderr.read() if proc.stderr is not None else b""
+        code = await proc.wait()
+        if cancel.is_set():
+            raise FFmpegError("已取消")
+        if code != 0 or not dest.is_file() or dest.stat().st_size <= 0:
+            detail = decode_bytes(stderr).strip()
+            raise FFmpegError(detail or f"ffmpeg 抽帧失败，退出码 {code}")
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            try:
+                await proc.wait()
+            except ProcessLookupError:
+                pass
+        if on_process:
+            on_process(None)
+        if cancel.is_set() and dest.exists():
+            dest.unlink(missing_ok=True)
+    return Frame(index=index, start_sec=start, end_sec=end, path=str(dest))
 
 
 async def extract_strip(video: Path, directory: Path) -> int:

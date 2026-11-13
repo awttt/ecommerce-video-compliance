@@ -1,10 +1,13 @@
+import asyncio
+
 from app.core.aggregate import aggregate
 from app.core.deepseek import chat_url
 import pytest
 
 from app.core.editor import EditorError, _parse_silences, draft_cuts, normalize_cuts, plan_cuts
 from app.core.parsing import parse_frame_result
-from app.core.prompts import SPEECH_SYSTEM_PROMPT, SYSTEM_PROMPT, visual_system_prompt
+from app.core.pipeline import wait_while_paused
+from app.core.prompts import SPEECH_SYSTEM_PROMPT, SYSTEM_PROMPT, speech_system_prompt, visual_system_prompt
 from app.core.rules import apply_rules
 from app.core.timeutil import format_clock, format_range
 from app.core.transcript import SpeechSentence
@@ -14,6 +17,27 @@ from app.schemas import DetectionRules, Finding, Frame, PhraseRule, RawHit
 
 def _frame() -> Frame:
     return Frame(index=1, start_sec=12, end_sec=13, path="frame.jpg")
+
+
+async def test_wait_while_paused_holds_until_resume_or_cancel():
+    resume = asyncio.Event()
+    cancel = asyncio.Event()
+    started = asyncio.Event()
+
+    async def hold():
+        started.set()
+        await wait_while_paused(cancel, resume)
+
+    task = asyncio.create_task(hold())
+    await started.wait()
+    await asyncio.sleep(0.05)
+    assert not task.done()
+    resume.set()
+    await asyncio.wait_for(task, timeout=1)
+
+    resume.clear()
+    cancel.set()
+    await asyncio.wait_for(wait_while_paused(cancel, resume), timeout=1)
 
 
 def test_format_range_matches_required_example():
@@ -364,10 +388,75 @@ def test_custom_rules_filter_hits_and_keep_the_guessing_ban():
     assert [(item.category, item.text) for item in result] == [("价格", "全网最低")]
     assert result[0].source == "口播"
     assert "推测" not in result[0].reason
-    prompt = visual_system_prompt(rules)
-    assert "只报告这些预设类别：规格" in prompt
-    assert "全网最低" in prompt
-    assert prompt.rfind("禁止推测") > prompt.rfind("可以推测")
+    visual = visual_system_prompt(rules)
+    speech = speech_system_prompt(rules)
+    assert "只报告这些预设类别：规格" in visual
+    assert "全网最低" not in visual
+    assert "全网最低" in speech
+    assert visual.rfind("禁止推测") > visual.rfind("可以推测")
+    assert speech.rfind("禁止推测") > speech.rfind("可以推测")
+
+
+def test_speech_rules_expand_x_and_skip_picture_phrases():
+    sentence = SpeechSentence("今天五折，拍1发3，只要3.5贵，售价 rmb，厂家直发", 1.0, 4.0)
+    rules = DetectionRules(
+        categories=["规格"],
+        extra_phrases=[
+            PhraseRule(text="X折", category="价格"),
+            PhraseRule(text="拍 1 发 X", category="规格"),
+            PhraseRule(text="X.X贵", category="价格"),
+            PhraseRule(text="RMB", category="价格"),
+            PhraseRule(text="厂家", category="品牌", source="口播"),
+            PhraseRule(text="logo", category="品牌", source="画面"),
+        ],
+    )
+    assert rules.extra_phrases[1].text == "拍1发X"
+    result = apply_rules([], rules, sentences=[sentence])
+    got = {(item.category, item.text, item.source) for item in result}
+    assert ("价格", "五折", "口播") in got
+    assert ("规格", "拍1发3", "口播") in got
+    assert ("价格", "3.5贵", "口播") in got
+    assert ("价格", "rmb", "口播") in got
+    assert ("品牌", "厂家", "口播") in got
+    assert all(item.text != "logo" for item in result)
+    assert all("X" not in item.text for item in result)
+    missed = apply_rules([], DetectionRules(extra_phrases=[PhraseRule(text="X折", category="价格")]), sentences=[SpeechSentence("正在打折", 0, 1)])
+    assert missed == []
+    decimal = apply_rules(
+        [],
+        DetectionRules(extra_phrases=[PhraseRule(text="X.X贵", category="价格")]),
+        sentences=[SpeechSentence("这件三点五贵", 0, 1)],
+    )
+    assert [item.text for item in decimal] == ["三点五贵"]
+
+
+def test_builtin_phrases_validate_and_split_prompts():
+    from app.core.rule_catalog import apply_builtin_rules, default_extra_phrases
+
+    raw = default_extra_phrases()
+    rules = DetectionRules(extra_phrases=[PhraseRule.model_validate(item) for item in raw])
+    assert len(rules.extra_phrases) == 111
+    assert sum(item.source == "口播" and item.category == "价格" for item in rules.extra_phrases) == 43
+    assert sum(item.source == "口播" and item.category == "规格" for item in rules.extra_phrases) == 48
+    assert sum(item.source == "口播" and item.category == "品牌" for item in rules.extra_phrases) == 6
+    assert sum(item.source == "画面" and item.category == "品牌" for item in rules.extra_phrases) == 14
+    speech = speech_system_prompt(rules)
+    visual = visual_system_prompt(rules)
+    assert "白菜价" in speech
+    assert "X 表示数字" in speech
+    assert "logo" not in speech
+    assert "口播违规字幕" not in speech
+    assert "logo" in visual
+    assert "口播违规字幕" in visual
+    assert "白菜价" not in visual
+    fresh = {"rules": {"categories": ["价格", "规格", "品牌"], "extra_phrases": [], "ignore_phrases": [], "note": "保留"}}
+    assert apply_builtin_rules(fresh) is True
+    assert fresh["rules_initialized"] is True
+    assert len(fresh["rules"]["extra_phrases"]) == 111
+    assert fresh["rules"]["note"] == "保留"
+    fresh["rules"]["extra_phrases"] = []
+    assert apply_builtin_rules(fresh) is False
+    assert fresh["rules"]["extra_phrases"] == []
 
 
 def test_chat_url_accepts_official_base():
@@ -380,15 +469,16 @@ def test_chat_url_accepts_official_base():
 def test_glm_request_enables_thinking_and_drops_image_detail():
     from app.core.deepseek import DeepSeekRecognizer, model_controls
     from app.core.pipeline import recognition_max_edge
-    from app.core.relay import PICTURE_MODEL, configured_model
+    from app.core.relay import DEEPSEEK_FLASH_MODEL, PICTURE_MODEL, configured_model
     from app.schemas import DEFAULT_SETTINGS, RunConfig
 
-    assert configured_model("deepseek-flash") == PICTURE_MODEL
-    assert configured_model("deepseek-v4.1-flash") == PICTURE_MODEL
-    assert configured_model("deepseek-v4.1-flash-1017") == PICTURE_MODEL
-    assert configured_model("DeepSeek-V4") == PICTURE_MODEL
+    assert configured_model("deepseek-flash") == DEEPSEEK_FLASH_MODEL
+    assert configured_model("deepseek-v4.1-flash") == DEEPSEEK_FLASH_MODEL
+    assert configured_model("deepseek-v4.1-flash-1017") == DEEPSEEK_FLASH_MODEL
+    assert configured_model("DeepSeek-V4") == DEEPSEEK_FLASH_MODEL
     assert configured_model("  ") == PICTURE_MODEL
-    assert configured_model("glm-4.5-air") == "glm-4.5-air"
+    assert configured_model("glm-5.3-flash") == PICTURE_MODEL
+    assert configured_model("glm-4.5-air") == PICTURE_MODEL
     assert RunConfig().model == PICTURE_MODEL
     assert DEFAULT_SETTINGS["model"] == PICTURE_MODEL
 
@@ -425,8 +515,8 @@ def test_glm_request_enables_thinking_and_drops_image_detail():
     assert recognition_max_edge(480, "low") == 480
 
 
-async def test_saved_deepseek_model_loads_as_glm(tmp_path):
-    from app.core.relay import PICTURE_MODEL
+async def test_saved_model_collapses_to_the_two_choices(tmp_path):
+    from app.core.relay import DEEPSEEK_FLASH_MODEL, PICTURE_MODEL
     from app.db import Database
     from app.schemas import DEFAULT_SETTINGS
 
@@ -437,10 +527,10 @@ async def test_saved_deepseek_model_loads_as_glm(tmp_path):
     stored["base_url"] = "https://example.invalid"
     await db.save_settings(stored)
     loaded = await db.load_settings()
-    assert loaded["model"] == PICTURE_MODEL
+    assert loaded["model"] == DEEPSEEK_FLASH_MODEL
     assert loaded["base_url"] == "https://example.invalid"
     custom = dict(DEFAULT_SETTINGS)
     custom["model"] = "glm-4.5-air"
     await db.save_settings(custom)
-    assert (await db.load_settings())["model"] == "glm-4.5-air"
+    assert (await db.load_settings())["model"] == PICTURE_MODEL
     await db.close()

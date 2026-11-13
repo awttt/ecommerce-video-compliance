@@ -10,6 +10,7 @@ from pathlib import Path
 import aiosqlite
 
 from app.core.relay import configured_model
+from app.core.rule_catalog import apply_builtin_rules
 from app.schemas import DEFAULT_SETTINGS, DetectionRules, Finding
 
 log = logging.getLogger(__name__)
@@ -39,6 +40,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     frames_extracted INTEGER NOT NULL DEFAULT 0,
     frames_recognized INTEGER NOT NULL DEFAULT 0,
     failed_frames INTEGER NOT NULL DEFAULT 0,
+    failed_frames_json TEXT NOT NULL DEFAULT '[]',
     hit_count INTEGER NOT NULL DEFAULT 0,
     error TEXT,
     speech_stage TEXT NOT NULL DEFAULT '',
@@ -49,7 +51,11 @@ CREATE TABLE IF NOT EXISTS jobs (
     edit_plan TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    finished_at TEXT
+    finished_at TEXT,
+    started_at TEXT,
+    paused_total_sec REAL NOT NULL DEFAULT 0,
+    hold_sec REAL NOT NULL DEFAULT 0,
+    paused_at TEXT
 );
 CREATE TABLE IF NOT EXISTS findings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,6 +94,7 @@ _JOB_FIELDS = (
     "frames_extracted",
     "frames_recognized",
     "failed_frames",
+    "failed_frames_json",
     "hit_count",
     "error",
     "speech_stage",
@@ -99,6 +106,10 @@ _JOB_FIELDS = (
     "created_at",
     "updated_at",
     "finished_at",
+    "started_at",
+    "paused_total_sec",
+    "hold_sec",
+    "paused_at",
 )
 
 
@@ -133,6 +144,11 @@ class Database:
         await self._add_column("findings", "sentence_end", "REAL")
         await self._add_column("findings", "next_start", "REAL")
         await self._add_column("jobs", "edit_plan", "TEXT")
+        await self._add_column("jobs", "started_at", "TEXT")
+        await self._add_column("jobs", "paused_total_sec", "REAL NOT NULL DEFAULT 0")
+        await self._add_column("jobs", "hold_sec", "REAL NOT NULL DEFAULT 0")
+        await self._add_column("jobs", "paused_at", "TEXT")
+        await self._add_column("jobs", "failed_frames_json", "TEXT NOT NULL DEFAULT '[]'")
 
     async def _add_column(self, table: str, name: str, declaration: str) -> None:
         cursor = await self.conn.execute(f"PRAGMA table_info({table})")
@@ -160,10 +176,14 @@ class Database:
             if isinstance(stored, dict):
                 merged.update(stored)
         merged["model"] = configured_model(merged.get("model"))
+        seeded = apply_builtin_rules(merged)
         try:
             merged["rules"] = DetectionRules.model_validate(merged.get("rules") or {}).model_dump()
         except Exception:
             merged["rules"] = DetectionRules().model_dump()
+            seeded = False
+        if seeded:
+            await self.save_settings(merged)
         return merged
 
     async def save_settings(self, settings: dict) -> None:
@@ -184,7 +204,7 @@ class Database:
                    SET status='failed', stage='failed',
                        message='程序退出时任务未完成', error='interrupted',
                        updated_at=?, finished_at=COALESCE(finished_at, ?)
-                 WHERE status IN ('queued', 'running')
+                 WHERE status IN ('running', 'paused')
                 """,
                 (updated_at, updated_at),
             )
@@ -237,6 +257,12 @@ class Database:
                     rows,
                 )
             await self.conn.commit()
+
+    async def has_status(self, status: str) -> bool:
+        async with self._lock:
+            cursor = await self.conn.execute("SELECT 1 FROM jobs WHERE status=? LIMIT 1", (status,))
+            row = await cursor.fetchone()
+        return row is not None
 
     async def list_jobs(self) -> list[aiosqlite.Row]:
         async with self._lock:
