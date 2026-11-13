@@ -63,7 +63,19 @@ export function VideoPane({
   }, [mediaUrl, mimeType]);
 
   if (!mediaUrl) {
-    return <div className="video-empty">{emptyText}</div>;
+    return (
+      <div className="video-empty">
+        <div className="empty-state">
+          <span className="empty-mark">
+            <svg width={22} height={22} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <rect x="3" y="5" width="18" height="14" rx="3" stroke="currentColor" strokeWidth="1.6" />
+              <path d="M10 9.5l5 2.5-5 2.5v-5z" fill="currentColor" />
+            </svg>
+          </span>
+          <span className="empty-title">{emptyText}</span>
+        </div>
+      </div>
+    );
   }
   return <div className="video-shell" ref={hostRef} />;
 }

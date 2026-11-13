@@ -28,7 +28,7 @@
 | 腾讯云录音文件识别、分片、时间戳 | `app/core/tencent_asr.py`，句子结构在 `app/core/transcript.py` |
 | 抽音频、口播进度、和画面并行 | `app/core/speech.py`，调度在 `app/services/manager.py` |
 | 抽帧、画面进度 | `app/core/pipeline.py`，`app/core/ffmpeg.py` |
-| 相邻命中收成一条 | `app/core/aggregate.py`。合并键是类别 + 去空白原文 + 来源。间隙超过 `MERGE_EPSILON`（0.08 秒）就断开 |
+| 相邻命中收成一条 | `app/core/aggregate.py`。合并键是类别 + 来源 + 原文。画面价格会把同一处的不同读法收成一档，例如「5.55元」和「5.55元3把」。画面间隙不超过 `PICTURE_GAP`（2 秒）就接上；口播间隙超过 `MERGE_EPSILON`（0.08 秒）就断开 |
 | 自动剪辑 | `app/core/editor.py` 的 `plan_cuts`，调用在 `manager.cut` |
 | 任务队列、设置、取消、导出 | `app/services/manager.py` |
 | HTTP 接口 | `app/api/routes.py`。字段定义在 `app/schemas.py` |

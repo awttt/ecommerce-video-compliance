@@ -200,8 +200,6 @@ class JobPublic(BaseModel):
 class SettingUpdate(BaseModel):
     api_key: str | None = None
     clear_api_key: bool = False
-    base_url: str | None = None
-    model: str | None = None
     fps: float | None = Field(default=None, ge=0.5, le=2)
     concurrency: int | None = Field(default=None, ge=1, le=12)
     max_width: int | None = Field(default=None, ge=480, le=1920)
@@ -217,26 +215,6 @@ class SettingUpdate(BaseModel):
     tencent_region: str | None = None
     asr_engine: str | None = None
     rules: DetectionRules | None = None
-
-    @field_validator("base_url")
-    @classmethod
-    def _base_url(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        cleaned = value.strip().rstrip("/")
-        if not cleaned.startswith(("http://", "https://")):
-            raise ValueError("接口地址必须以 http:// 或 https:// 开头")
-        return cleaned
-
-    @field_validator("model")
-    @classmethod
-    def _model(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        cleaned = value.strip()
-        if not cleaned or len(cleaned) > 80:
-            raise ValueError("模型名无效")
-        return cleaned
 
     @field_validator("api_key")
     @classmethod
@@ -298,6 +276,97 @@ class SettingPublic(BaseModel):
     tencent_region: str
     asr_engine: str
     rules: DetectionRules
+    account_logged_in: bool = False
+    account_email: str = ""
+    account_balance: float | None = None
+    account_frozen_balance: float | None = None
+    account_today_cost: float | None = None
+    account_total_cost: float | None = None
+
+
+class AccountCredentials(BaseModel):
+    email: str = Field(max_length=120)
+    password: str = Field(max_length=200)
+    verify_code: str = Field(default="", max_length=20)
+
+
+class AccountCodeRequest(BaseModel):
+    email: str = Field(max_length=120)
+
+
+class AccountTotpRequest(BaseModel):
+    totp_code: str = Field(max_length=12)
+
+
+class AccountOptions(BaseModel):
+    reachable: bool = True
+    registration_enabled: bool = True
+    email_verify_enabled: bool = False
+    captcha: str = "none"
+    message: str = ""
+
+
+class AccountAction(BaseModel):
+    settings: SettingPublic
+    requires_2fa: bool = False
+    email_masked: str = ""
+    message: str = ""
+
+
+class RechargeMethod(BaseModel):
+    payment_type: str
+    display_name: str
+    currency: str = ""
+    fee_rate: float = 0
+    daily_limit: float = 0
+    single_min: float = 0
+    single_max: float = 0
+
+
+class RechargeBonusTier(BaseModel):
+    min_amount: float
+    bonus_percent: float
+
+
+class RechargeInfo(BaseModel):
+    balance_disabled: bool = False
+    global_min: float = 0
+    global_max: float = 0
+    recharge_fee_rate: float = 0
+    balance_recharge_multiplier: float = 1
+    bonus_mode: str = "bonus"
+    bonus_notice: str = ""
+    bonus_tiers: list[RechargeBonusTier] = Field(default_factory=list)
+    help_text: str = ""
+    methods: list[RechargeMethod] = Field(default_factory=list)
+    message: str = ""
+
+
+class RechargeOrderRequest(BaseModel):
+    amount: float = Field(gt=0, le=1_000_000)
+    payment_type: str = Field(min_length=1, max_length=40)
+
+
+class RechargeOrder(BaseModel):
+    order_id: int
+    amount: float = 0
+    pay_amount: float = 0
+    fee_rate: float = 0
+    bonus_amount: float = 0
+    status: str = ""
+    result_type: str = ""
+    payment_type: str = ""
+    pay_url: str = ""
+    qr_code: str = ""
+    currency: str = ""
+    expires_at: str = ""
+    created_at: str = ""
+    message: str = ""
+    settings: SettingPublic | None = None
+
+
+class RechargeOrders(BaseModel):
+    orders: list[RechargeOrder] = Field(default_factory=list)
 
 
 class CutRequest(BaseModel):

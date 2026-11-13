@@ -91,6 +91,100 @@ def test_aggregate_merges_adjacent_frames_and_splits_gaps():
     assert findings[2].confidence == "确定"
 
 
+def test_aggregate_folds_a_price_sticker_that_stays_on_screen():
+    reason = "画面中上方黄色爆炸贴内可见价格"
+
+    def hit(start: float, end: float, text: str) -> RawHit:
+        return RawHit(
+            start_sec=start,
+            end_sec=end,
+            category="价格",
+            text=text,
+            position="画面中上方黄色爆炸贴内",
+            confidence="确定",
+            reason=reason,
+            source="画面",
+        )
+
+    findings = aggregate(
+        [
+            hit(0, 1, "5.55元"),
+            hit(1, 2, "5.55元3把"),
+            hit(2, 4, "5.55元"),
+            hit(4, 5, "5:55元3把"),
+            hit(5, 9, "5.55元"),
+            hit(7, 9, "4.9元"),
+            hit(12, 13, "200元"),
+        ]
+    )
+    prices = [item for item in findings if item.category == "价格"]
+    sticker = next(item for item in prices if item.text == "5.55元3把")
+    assert sticker.start_sec == 0
+    assert sticker.end_sec == 9
+    assert "多种读法" in sticker.note
+    assert {item.text for item in prices} == {"5.55元3把", "4.9元", "200元"}
+
+
+def test_aggregate_joins_one_missed_frame_and_keeps_a_later_flash():
+    def hit(start: float, end: float) -> RawHit:
+        return RawHit(
+            start_sec=start,
+            end_sec=end,
+            category="规格",
+            text="3把",
+            position="画面中上方",
+            confidence="确定",
+            reason="画面可见数量",
+            source="画面",
+        )
+
+    findings = aggregate([hit(0, 1), hit(2, 3), hit(12, 13)])
+    assert [(item.start_sec, item.end_sec) for item in findings] == [(0, 3), (12, 13)]
+
+
+def test_picture_price_fold_does_not_change_speech_wording():
+    findings = aggregate(
+        [
+            RawHit(
+                start_sec=0,
+                end_sec=1,
+                category="价格",
+                text="5.55元",
+                position="画面中可见",
+                confidence="确定",
+                reason="可见价格",
+                source="画面",
+            ),
+            RawHit(
+                start_sec=1,
+                end_sec=2,
+                category="价格",
+                text="5.55元3把",
+                position="画面中可见",
+                confidence="确定",
+                reason="可见价格",
+                source="画面",
+            ),
+            RawHit(
+                start_sec=0,
+                end_sec=2,
+                category="价格",
+                text="5.55元",
+                position="口播内容",
+                confidence="确定",
+                reason="口播中明确提及价格",
+                source="口播",
+            ),
+        ]
+    )
+    assert len(findings) == 2
+    picture = next(item for item in findings if item.source == "画面")
+    speech = next(item for item in findings if item.source == "口播")
+    assert picture.text == "5.55元3把"
+    assert picture.end_sec == 2
+    assert speech.text == "5.55元"
+
+
 def test_aggregate_keeps_picture_and_speech_apart():
     reason = "口播中明确提及价格"
     shared = dict(
@@ -280,3 +374,4 @@ def test_chat_url_accepts_official_base():
     assert chat_url("https://api.deepseek.com") == "https://api.deepseek.com/chat/completions"
     assert chat_url("https://api.deepseek.com/v1/") == "https://api.deepseek.com/v1/chat/completions"
     assert chat_url("https://api.deepseek.com/chat/completions") == "https://api.deepseek.com/chat/completions"
+    assert chat_url("https://token4u.cc/v1") == "https://token4u.cc/v1/chat/completions"

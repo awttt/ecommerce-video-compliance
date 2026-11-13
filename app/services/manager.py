@@ -6,14 +6,17 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from app.core.aggregate import aggregate
+from app.core.aggregate import aggregate, refold_findings
 from app.core.deepseek import build_recognizer
+from app.core.relay import CHAT_BASE, KEY_GROUP_ID, KEY_NAME, PICTURE_MODEL, RelayClient, RelayError, usable_api_key
+from app.logging_setup import redact
 from app.core.editor import detect_silences, draft_cuts, normalize_cuts, render_clean_video
 from app.core.ffmpeg import FFmpegError, extract_strip, probe_video
 from app.core.pipeline import JobCancelled, Progress, run_pipeline
@@ -23,7 +26,23 @@ from app.core.timeutil import utcnow
 from app.db import Database
 from app.exporting import export_file, write_json, write_xlsx
 from app.paths import audio_dir, data_dir, exports_dir, frames_dir, video_dir
-from app.schemas import DEFAULT_SETTINGS, CutSpan, DetectionRules, Finding, JobPublic, RawHit, RunConfig, SettingPublic, SettingUpdate
+from app.schemas import (
+    DEFAULT_SETTINGS,
+    AccountAction,
+    AccountOptions,
+    CutSpan,
+    RechargeBonusTier,
+    RechargeInfo,
+    RechargeMethod,
+    RechargeOrder,
+    DetectionRules,
+    Finding,
+    JobPublic,
+    RawHit,
+    RunConfig,
+    SettingPublic,
+    SettingUpdate,
+)
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +56,10 @@ class JobNotFound(Exception):
     pass
 
 
+class AuthRequired(Exception):
+    pass
+
+
 class BusyError(Exception):
     pass
 
@@ -45,6 +68,43 @@ def mask_key(key: str) -> str:
     if not key:
         return ""
     return f"***{key[-4:]}"
+
+
+def _number(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+        if number != number:
+            return None
+        return number
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+_RELAY_FIELDS = (
+    "relay_email",
+    "relay_access_token",
+    "relay_refresh_token",
+    "relay_expires_at",
+    "relay_api_key",
+    "relay_api_key_id",
+    "relay_balance",
+    "relay_frozen_balance",
+    "relay_today_cost",
+    "relay_total_cost",
+)
+
+
+def _email_ok(value: str) -> str:
+    cleaned = value.strip()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", cleaned):
+        raise RelayError("邮箱格式不正确", 400)
+    return cleaned
 
 
 def _preview_hint(path: str) -> str:
@@ -243,6 +303,13 @@ def _state_from_row(row, findings: list[Finding]) -> JobState:
     )
 
 
+def _apply_refold(state: JobState) -> None:
+    folded = refold_findings(state.findings)
+    state.findings = folded
+    if folded:
+        state.hit_count = len(folded)
+
+
 class JobManager:
     def __init__(self) -> None:
         self.db = Database(data_dir() / "app.db")
@@ -250,6 +317,9 @@ class JobManager:
         self._jobs: dict[str, JobState] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self._gate = asyncio.Lock()
+        self._account_lock = asyncio.Lock()
+        self.relay = RelayClient()
+        self._pending_2fa: dict[str, str] | None = None
         self._stopping = False
 
     async def init(self) -> None:
@@ -294,9 +364,19 @@ class JobManager:
             tencent_region=region,
             asr_engine=str(self._settings.get("asr_engine") or "16k_zh"),
             rules=self._rules(),
+            account_logged_in=self._relay_logged_in(),
+            account_email=self._account_email(),
+            account_balance=self._account_number("relay_balance"),
+            account_frozen_balance=self._account_number("relay_frozen_balance"),
+            account_today_cost=self._account_number("relay_today_cost"),
+            account_total_cost=self._account_number("relay_total_cost"),
         )
 
     async def update_settings(self, patch: SettingUpdate) -> SettingPublic:
+        async with self._account_lock:
+            return await self._update_settings(patch)
+
+    async def _update_settings(self, patch: SettingUpdate) -> SettingPublic:
         data = dict(self._settings)
         raw = patch.model_dump(exclude_unset=True)
         if raw.get("clear_api_key"):
@@ -311,8 +391,6 @@ class JobManager:
         if raw.get("tencent_secret_key"):
             data["tencent_secret_key"] = raw["tencent_secret_key"]
         for name in (
-            "base_url",
-            "model",
             "fps",
             "concurrency",
             "max_width",
@@ -333,7 +411,30 @@ class JobManager:
         await self.db.save_settings(data)
         return self.public_settings()
 
+    def _relay_logged_in(self) -> bool:
+        token = str(self._settings.get("relay_access_token") or "").strip()
+        email = str(self._settings.get("relay_email") or "").strip()
+        return bool(token and email)
+
+    def ensure_logged_in(self) -> None:
+        if not self._relay_logged_in():
+            raise AuthRequired("请先登录")
+
+    def _account_email(self) -> str:
+        if not self._relay_logged_in():
+            return ""
+        return str(self._settings.get("relay_email") or "")
+
+    def _account_number(self, name: str) -> float | None:
+        if not self._relay_logged_in():
+            return None
+        return _number(self._settings.get(name))
+
     def _effective_key(self) -> tuple[str, str]:
+        if self._relay_logged_in():
+            relay = str(self._settings.get("relay_api_key") or "").strip()
+            if relay:
+                return relay, "account"
         saved = str(self._settings.get("api_key") or "").strip()
         if saved:
             return saved, "saved"
@@ -376,6 +477,7 @@ class JobManager:
         mock: bool | None = None,
         asr: bool | None = None,
     ) -> JobState:
+        self.ensure_logged_in()
         if not source.is_file():
             raise FileNotFoundError("视频文件不存在")
         now = utcnow()
@@ -579,17 +681,22 @@ class JobManager:
             self._publish(state)
 
     def _config_for(self, state: JobState) -> RunConfig:
-        key, _source = self._effective_key()
+        key, source = self._effective_key()
         secret_id, secret_key, region, _secret_source = self._effective_tencent()
         options = state.options
+        base_url = str(options.get("base_url") or self._settings["base_url"])
+        model = str(options.get("model") or self._settings["model"])
+        if source == "account":
+            base_url = CHAT_BASE
+            model = PICTURE_MODEL
         return RunConfig(
             fps=float(options.get("fps", state.fps)),
             concurrency=int(options.get("concurrency", state.concurrency)),
             max_width=int(options.get("max_width", 1280)),
             jpeg_q=int(options.get("jpeg_q", 5)),
             api_key=key,
-            base_url=str(options.get("base_url") or self._settings["base_url"]),
-            model=str(options.get("model") or self._settings["model"]),
+            base_url=base_url,
+            model=model,
             detail=str(options.get("detail") or "original"),
             thinking=bool(options.get("thinking", False)),
             timeout_sec=float(options.get("timeout_sec", 60)),
@@ -727,12 +834,14 @@ class JobManager:
     async def get(self, job_id: str) -> JobState:
         cached = self._jobs.get(job_id)
         if cached is not None:
+            _apply_refold(cached)
             return cached
         row = await self.db.get_job(job_id)
         if row is None:
             raise JobNotFound(job_id)
         state = _state_from_row(row, await self.db.get_findings(job_id))
         self._jobs[job_id] = state
+        _apply_refold(state)
         return state
 
     async def list_jobs(self) -> list[JobPublic]:
@@ -741,7 +850,12 @@ class JobManager:
         for row in rows:
             state = self._jobs.get(row["id"])
             if state is None:
+                findings = refold_findings(await self.db.get_findings(row["id"]))
                 state = _state_from_row(row, [])
+                if findings:
+                    state.hit_count = len(findings)
+            else:
+                _apply_refold(state)
             result.append(state.to_public(include_findings=False))
         return result
 
@@ -927,6 +1041,547 @@ class JobManager:
         if path.is_file() and path.stat().st_size > 0:
             return path
         raise FileNotFoundError
+
+    async def account_options(self) -> AccountOptions:
+        try:
+            data = await self.relay.public_settings()
+        except RelayError as exc:
+            return AccountOptions(reachable=False, message=str(exc))
+        return _options_from_public(data if isinstance(data, dict) else {})
+
+    async def account_send_code(self, email: str) -> AccountAction:
+        cleaned = _email_ok(email)
+        async with self._account_lock:
+            result = await self.relay.send_verify_code(cleaned)
+        countdown = result.get("countdown") if isinstance(result, dict) else None
+        message = "验证码已发送"
+        if isinstance(countdown, int) and countdown > 0:
+            message = f"验证码已发送，请等待 {countdown} 秒后再发"
+        return AccountAction(settings=self.public_settings(), message=message)
+
+    async def account_register(self, email: str, password: str, verify_code: str = "") -> AccountAction:
+        cleaned = _email_ok(email)
+        if len(password) < 6:
+            raise RelayError("密码至少 6 位", 400)
+        async with self._account_lock:
+            data = await self.relay.register(cleaned, password, verify_code.strip())
+            message = await self._accept_session(cleaned, data)
+            return AccountAction(settings=self.public_settings(), message=message)
+
+    async def account_login(self, email: str, password: str) -> AccountAction:
+        cleaned = _email_ok(email)
+        if not password:
+            raise RelayError("请填写密码", 400)
+        async with self._account_lock:
+            data = await self.relay.login(cleaned, password)
+            if data.get("requires_2fa"):
+                temp = str(data.get("temp_token") or "").strip()
+                if not temp:
+                    raise RelayError("这个账号开启了两步验证，请重新登录", 502)
+                self._pending_2fa = {"temp_token": temp, "email": cleaned}
+                return AccountAction(
+                    settings=self.public_settings(),
+                    requires_2fa=True,
+                    email_masked=str(data.get("user_email_masked") or ""),
+                    message="请输入身份验证器中的 6 位数字",
+                )
+            message = await self._accept_session(cleaned, data)
+            return AccountAction(settings=self.public_settings(), message=message)
+
+    async def account_login_2fa(self, totp_code: str) -> AccountAction:
+        code = totp_code.strip()
+        if not re.fullmatch(r"\d{6}", code):
+            raise RelayError("请输入 6 位数字验证码", 400)
+        async with self._account_lock:
+            pending = self._pending_2fa
+            if not pending:
+                raise RelayError("请先登录，再填写验证码", 400)
+            data = await self.relay.login_2fa(pending["temp_token"], code)
+            message = await self._accept_session(pending["email"], data)
+            return AccountAction(settings=self.public_settings(), message=message)
+
+    async def account_logout(self) -> AccountAction:
+        async with self._account_lock:
+            refresh = str(self._settings.get("relay_refresh_token") or "")
+            if refresh:
+                try:
+                    await self.relay.logout(refresh)
+                except RelayError:
+                    pass
+            await self._drop_session()
+            return AccountAction(settings=self.public_settings(), message="已退出登录")
+
+    async def account_refresh(self) -> AccountAction:
+        async with self._account_lock:
+            if not self._relay_logged_in():
+                raise RelayError("还没有登录", 400)
+            profile = await self._call_authed(self.relay.profile)
+            self._apply_profile(profile if isinstance(profile, dict) else {})
+            if not str(self._settings.get("relay_api_key") or "").strip():
+                await self._ensure_relay_key()
+            try:
+                stats = await self._call_authed(self.relay.usage)
+                self._apply_usage(stats if isinstance(stats, dict) else {})
+            except RelayError:
+                pass
+            await self.db.save_settings(self._settings)
+            return AccountAction(settings=self.public_settings(), message="已更新余额")
+
+    async def recharge_info(self) -> RechargeInfo:
+        self.ensure_logged_in()
+        async with self._account_lock:
+            data = await self._call_authed(self.relay.checkout_info)
+        return _recharge_info(data if isinstance(data, dict) else {})
+
+    async def list_recharges(self) -> list[RechargeOrder]:
+        self.ensure_logged_in()
+        async with self._account_lock:
+            rows = await self._call_authed(self.relay.list_balance_orders)
+        if not isinstance(rows, list):
+            return []
+        return [_recharge_order(item) for item in rows[:20]]
+
+    async def create_recharge(self, amount: float, payment_type: str) -> RechargeOrder:
+        self.ensure_logged_in()
+        kind = payment_type.strip()
+        if not _PAYMENT_TYPE.fullmatch(kind):
+            raise RelayError("请选择一种支付方式", 400)
+        cents = round(float(amount) * 100)
+        if cents <= 0 or cents > 100_000_000:
+            raise RelayError("请填写大于 0 的充值金额", 400)
+        money = cents / 100
+        async with self._account_lock:
+            info = await self._call_authed(self.relay.checkout_info)
+            view = _recharge_info(info if isinstance(info, dict) else {})
+            if view.balance_disabled:
+                raise RelayError("余额充值已关闭", 403)
+            chosen = next((item for item in view.methods if item.payment_type == kind), None)
+            if chosen is None:
+                raise RelayError("请选择页面上的一种支付方式", 400)
+            _check_recharge_amount(money, view, chosen)
+            created = await self._call_authed(lambda token: self.relay.create_balance_order(token, money, kind))
+        if not isinstance(created, dict):
+            created = {}
+        order = _recharge_order(created)
+        if order.order_id <= 0:
+            raise RelayError("中转站没有返回订单", 502)
+        return order
+
+    async def recharge_order(self, order_id: int) -> RechargeOrder:
+        self.ensure_logged_in()
+        if order_id <= 0:
+            raise RelayError("订单不存在", 404)
+        async with self._account_lock:
+            data = await self._call_authed(lambda token: self.relay.get_payment_order(token, order_id))
+            order = _recharge_order(data if isinstance(data, dict) else {})
+            if order.order_id <= 0:
+                raise RelayError("订单不存在", 404)
+            if order.status in {"PAID", "RECHARGING", "COMPLETED"}:
+                await self._refresh_account_numbers()
+                order = order.model_copy(update={"settings": self.public_settings()})
+            return order
+
+    async def cancel_recharge(self, order_id: int) -> RechargeOrder:
+        self.ensure_logged_in()
+        if order_id <= 0:
+            raise RelayError("订单不存在", 404)
+        async with self._account_lock:
+            await self._call_authed(lambda token: self.relay.cancel_payment_order(token, order_id))
+            data = await self._call_authed(lambda token: self.relay.get_payment_order(token, order_id))
+        order = _recharge_order(data if isinstance(data, dict) else {})
+        if order.order_id <= 0:
+            raise RelayError("订单不存在", 404)
+        return order
+
+    async def _refresh_account_numbers(self) -> None:
+        profile = await self._call_authed(self.relay.profile)
+        self._apply_profile(profile if isinstance(profile, dict) else {})
+        try:
+            stats = await self._call_authed(self.relay.usage)
+            self._apply_usage(stats if isinstance(stats, dict) else {})
+        except RelayError:
+            pass
+        await self.db.save_settings(self._settings)
+
+    async def _accept_session(self, fallback_email: str, data: dict) -> str:
+        if data.get("requires_2fa"):
+            raise RelayError("这个账号开启了两步验证，请重新登录", 400)
+        access = str(data.get("access_token") or "").strip()
+        refresh = str(data.get("refresh_token") or "").strip()
+        if not access:
+            raise RelayError("中转站没有返回登录凭证", 502)
+        user = data.get("user") if isinstance(data.get("user"), dict) else {}
+        email = str(user.get("email") or fallback_email).strip() or fallback_email
+        previous = str(self._settings.get("relay_email") or "")
+        if previous and previous.lower() != email.lower():
+            self._settings.pop("relay_api_key", None)
+            self._settings.pop("relay_api_key_id", None)
+        self._settings["relay_email"] = email
+        self._settings["relay_access_token"] = access
+        if refresh:
+            self._settings["relay_refresh_token"] = refresh
+        expires_in = _number(data.get("expires_in"))
+        if expires_in and expires_in > 0:
+            self._settings["relay_expires_at"] = time.time() + expires_in
+        else:
+            self._settings.pop("relay_expires_at", None)
+        self._apply_profile(user)
+        self._pending_2fa = None
+        await self.db.save_settings(self._settings)
+        try:
+            await self._ensure_relay_key()
+        except RelayError as exc:
+            await self.db.save_settings(self._settings)
+            return f"已登录，但还没有拿到画面识别密钥：{exc}"
+        try:
+            stats = await self._call_authed(self.relay.usage)
+            self._apply_usage(stats if isinstance(stats, dict) else {})
+        except RelayError:
+            pass
+        await self.db.save_settings(self._settings)
+        return "已登录"
+
+    def _apply_profile(self, profile: dict) -> None:
+        if "balance" in profile:
+            number = _number(profile.get("balance"))
+            if number is not None:
+                self._settings["relay_balance"] = number
+        if "frozen_balance" in profile:
+            number = _number(profile.get("frozen_balance"))
+            if number is not None:
+                self._settings["relay_frozen_balance"] = number
+        email = str(profile.get("email") or "").strip()
+        if email and "@" in email:
+            self._settings["relay_email"] = email
+
+    def _apply_usage(self, stats: dict) -> None:
+        today = _number(stats.get("today_actual_cost"))
+        total = _number(stats.get("total_actual_cost"))
+        if today is not None:
+            self._settings["relay_today_cost"] = today
+        if total is not None:
+            self._settings["relay_total_cost"] = total
+
+    async def _ensure_relay_key(self) -> None:
+        listed = await self._call_authed(self.relay.list_keys)
+        if not isinstance(listed, list):
+            listed = []
+        chosen = self._pick_key(listed)
+        if chosen is None:
+            created = await self._call_authed(self.relay.create_key)
+            if not isinstance(created, dict):
+                created = {}
+            secret = str(created.get("key") or "")
+            if not usable_api_key(secret):
+                raise RelayError("中转站没有返回可用的调用密钥", 502)
+            if created.get("ip_whitelist"):
+                raise RelayError("新密钥带了 IP 限制，家庭网络会变动，不能用来识别", 502)
+            if created.get("id") is not None and not _same_id(created.get("group_id"), KEY_GROUP_ID):
+                await self._call_authed(lambda token: self.relay.update_key_group(token, int(created["id"])))
+            self._settings["relay_api_key"] = secret.strip()
+            if created.get("id") is not None:
+                self._settings["relay_api_key_id"] = created.get("id")
+            return
+        if not _same_id(chosen.get("group_id"), KEY_GROUP_ID):
+            await self._call_authed(lambda token: self.relay.update_key_group(token, int(chosen["id"])))
+        self._settings["relay_api_key"] = chosen["key"]
+        self._settings["relay_api_key_id"] = chosen["id"]
+
+    def _pick_key(self, listed: list[dict]) -> dict | None:
+        local_key = str(self._settings.get("relay_api_key") or "").strip()
+        local_id = self._settings.get("relay_api_key_id")
+        fallback: dict | None = None
+        for item in listed:
+            if str(item.get("name") or "").strip() != KEY_NAME:
+                continue
+            if str(item.get("status") or "active") != "active":
+                continue
+            if item.get("ip_whitelist"):
+                continue
+            secret = str(item.get("key") or "")
+            if usable_api_key(secret):
+                return {"key": secret.strip(), "id": item.get("id"), "group_id": item.get("group_id")}
+            if usable_api_key(local_key) and _same_id(item.get("id"), local_id):
+                fallback = {"key": local_key, "id": local_id, "group_id": item.get("group_id")}
+        return fallback
+
+    async def _token(self) -> str:
+        token = str(self._settings.get("relay_access_token") or "").strip()
+        if not token:
+            raise RelayError("还没有登录", 400)
+        expires = _number(self._settings.get("relay_expires_at"))
+        if expires is not None and expires <= time.time() + 60:
+            return await self._refresh_tokens()
+        return token
+
+    async def _call_authed(self, method):
+        token = await self._token()
+        try:
+            return await method(token)
+        except RelayError as exc:
+            if exc.status != 401:
+                raise
+            token = await self._refresh_tokens()
+            return await method(token)
+
+    async def _refresh_tokens(self) -> str:
+        refresh = str(self._settings.get("relay_refresh_token") or "").strip()
+        if not refresh:
+            await self._drop_session()
+            raise RelayError("登录已过期，请重新登录", 401)
+        try:
+            pair = await self.relay.refresh(refresh)
+        except RelayError:
+            await self._drop_session()
+            raise RelayError("登录已过期，请重新登录", 401) from None
+        access = str(pair.get("access_token") or "").strip()
+        if not access:
+            await self._drop_session()
+            raise RelayError("登录已过期，请重新登录", 401)
+        self._settings["relay_access_token"] = access
+        rotated = str(pair.get("refresh_token") or "").strip()
+        if rotated:
+            self._settings["relay_refresh_token"] = rotated
+        expires_in = _number(pair.get("expires_in"))
+        if expires_in and expires_in > 0:
+            self._settings["relay_expires_at"] = time.time() + expires_in
+        await self.db.save_settings(self._settings)
+        return access
+
+    async def _drop_session(self) -> None:
+        for name in _RELAY_FIELDS:
+            self._settings.pop(name, None)
+        self._pending_2fa = None
+        await self.db.save_settings(self._settings)
+
+
+def _same_id(left: object, right: object) -> bool:
+    if left is None or right is None:
+        return False
+    return str(left) == str(right)
+
+
+def _options_from_public(data: dict) -> AccountOptions:
+    if data.get("turnstile_enabled"):
+        captcha = "turnstile"
+    elif data.get("tencent_captcha_enabled"):
+        captcha = "tencent"
+    elif data.get("aliyun_captcha_enabled"):
+        captcha = "aliyun"
+    else:
+        captcha = "none"
+    notes: list[str] = []
+    if data.get("backend_mode_enabled"):
+        notes.append("中转站处于后台模式，普通用户不能登录。")
+    if captcha != "none":
+        notes.append("站点开启了人机验证。请先在中转站关闭验证码，再在这里登录。")
+    return AccountOptions(
+        reachable=True,
+        registration_enabled=bool(data.get("registration_enabled", True)),
+        email_verify_enabled=bool(data.get("email_verify_enabled")),
+        captcha=captcha,
+        message="".join(notes),
+    )
+
+
+_PAYMENT_TYPE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+_ORDER_STATUS = re.compile(r"^[A-Z_]{1,40}$")
+_CURRENCY = re.compile(r"^[A-Z]{3}$")
+_QR_PREFIXES = ("https://", "http://", "weixin://", "wxp://", "alipay://", "alipays://")
+_METHOD_LABELS = {
+    "alipay": "支付宝",
+    "alipay_direct": "支付宝",
+    "wxpay": "微信支付",
+    "wxpay_direct": "微信支付",
+    "stripe": "银行卡",
+    "easypay": "易支付",
+    "airwallex": "Airwallex",
+}
+
+
+def _money(value: object, cap: float = 1_000_000_000) -> float:
+    number = _number(value)
+    if number is None or number < 0 or number > cap:
+        return 0
+    return round(number, 4)
+
+
+def _plain(value: object, limit: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = redact(value.strip())
+    if "***" in text or len(text) > limit:
+        return ""
+    return text
+
+
+def _http_url(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    lowered = text.lower()
+    if len(text) > 2000 or not (lowered.startswith("https://") or lowered.startswith("http://")):
+        return ""
+    return text
+
+
+def _qr_text(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    lowered = text.lower()
+    if len(text) > 2000 or not lowered.startswith(_QR_PREFIXES):
+        return ""
+    return text
+
+
+def _stamp(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not re.fullmatch(r"[0-9T:\-+.Zz ]{1,40}", text):
+        return ""
+    return text
+
+
+def _pay_targets(data: dict) -> tuple[str, str, str]:
+    pay_url = _http_url(data.get("pay_url"))
+    qr_code = _qr_text(data.get("qr_code"))
+    if not qr_code:
+        raw_pay = data.get("pay_url")
+        if isinstance(raw_pay, str) and raw_pay.strip() and not pay_url:
+            qr_code = _qr_text(raw_pay)
+    if pay_url or qr_code:
+        return pay_url, qr_code, ""
+    result_type = str(data.get("result_type") or "")
+    if result_type in {"oauth_required", "jsapi_ready"}:
+        return "", "", "这个方式要在微信里打开中转站网页才能付款。请换一个支持扫码的方式。"
+    if result_type == "order_created" or "client_secret" in data or "pay_url" in data or "qr_code" in data:
+        return "", "", "中转站没有返回可打开的支付链接或二维码。请换一种方式，或稍后再试。"
+    return "", "", ""
+
+
+def _unit(currency: str) -> str:
+    if currency in {"", "CNY"}:
+        return "元"
+    return currency
+
+
+def _check_recharge_amount(money: float, view: RechargeInfo, method: RechargeMethod) -> None:
+    unit = _unit(method.currency or "")
+    if method.single_min > 0 and money < method.single_min:
+        raise RelayError(f"单笔最少 {method.single_min:g} {unit}", 400)
+    if method.single_max > 0 and money > method.single_max:
+        raise RelayError(f"单笔最多 {method.single_max:g} {unit}", 400)
+    if view.global_min > 0 and money < view.global_min:
+        raise RelayError(f"单笔最少 {view.global_min:g} {unit}", 400)
+    if view.global_max > 0 and money > view.global_max:
+        raise RelayError(f"单笔最多 {view.global_max:g} {unit}", 400)
+
+
+def _recharge_info(data: dict) -> RechargeInfo:
+    methods: list[RechargeMethod] = []
+    raw_methods = data.get("methods")
+    if isinstance(raw_methods, dict):
+        for key, value in raw_methods.items():
+            kind = str(key).strip()
+            if not _PAYMENT_TYPE.fullmatch(kind):
+                continue
+            item = value if isinstance(value, dict) else {}
+            label = str(item.get("display_name") or item.get("displayName") or "").strip()
+            if not label:
+                label = _METHOD_LABELS.get(kind, kind)
+            currency = str(item.get("currency") or "").strip().upper()
+            if not _CURRENCY.fullmatch(currency):
+                currency = ""
+            methods.append(
+                RechargeMethod(
+                    payment_type=kind,
+                    display_name=label[:40],
+                    currency=currency,
+                    fee_rate=min(_money(item.get("fee_rate"), 100), 100),
+                    daily_limit=_money(item.get("daily_limit")),
+                    single_min=_money(item.get("single_min")),
+                    single_max=_money(item.get("single_max")),
+                )
+            )
+    tiers: list[RechargeBonusTier] = []
+    raw_tiers = data.get("recharge_bonus_tiers")
+    if isinstance(raw_tiers, list):
+        for item in raw_tiers[:20]:
+            if not isinstance(item, dict):
+                continue
+            minimum = _number(item.get("min_amount"))
+            percent = _number(item.get("bonus_percent"))
+            if minimum is None or percent is None or minimum < 0 or percent <= 0 or percent > 1000:
+                continue
+            tiers.append(RechargeBonusTier(min_amount=round(minimum, 2), bonus_percent=round(percent, 2)))
+    tiers.sort(key=lambda item: item.min_amount)
+    mode = str(data.get("recharge_bonus_mode") or "").strip().lower()
+    if mode not in {"bonus", "discount"}:
+        mode = "bonus"
+    disabled = bool(data.get("balance_disabled"))
+    multiplier = _number(data.get("balance_recharge_multiplier"))
+    if multiplier is None or multiplier <= 0:
+        multiplier = 1
+    if disabled:
+        message = "余额充值已关闭"
+    elif not methods:
+        message = "中转站还没有打开支付方式。"
+    else:
+        message = ""
+    return RechargeInfo(
+        balance_disabled=disabled,
+        global_min=_money(data.get("global_min")),
+        global_max=_money(data.get("global_max")),
+        recharge_fee_rate=min(_money(data.get("recharge_fee_rate"), 100), 100),
+        balance_recharge_multiplier=round(multiplier, 4),
+        bonus_mode=mode,
+        bonus_notice=_plain(data.get("recharge_bonus_notice"), 500),
+        bonus_tiers=tiers,
+        help_text=_plain(data.get("help_text"), 2000),
+        methods=methods,
+        message=message,
+    )
+
+
+def _recharge_order(data: dict) -> RechargeOrder:
+    raw_id = data.get("order_id", data.get("id"))
+    try:
+        order_id = int(raw_id)
+    except (TypeError, ValueError):
+        order_id = 0
+    if order_id <= 0 or order_id > 2_000_000_000:
+        order_id = 0
+    status = str(data.get("status") or "").strip().upper()
+    if not _ORDER_STATUS.fullmatch(status):
+        status = ""
+    kind = str(data.get("payment_type") or "").strip()
+    if not _PAYMENT_TYPE.fullmatch(kind):
+        kind = ""
+    result_type = str(data.get("result_type") or "").strip()
+    if result_type not in {"", "order_created", "oauth_required", "jsapi_ready"}:
+        result_type = ""
+    currency = str(data.get("currency") or "").strip().upper()
+    if not _CURRENCY.fullmatch(currency):
+        currency = ""
+    pay_url, qr_code, message = _pay_targets(data)
+    return RechargeOrder(
+        order_id=order_id,
+        amount=_money(data.get("amount")),
+        pay_amount=_money(data.get("pay_amount")),
+        fee_rate=min(_money(data.get("fee_rate"), 100), 100),
+        bonus_amount=_money(data.get("bonus_amount")),
+        status=status,
+        result_type=result_type,
+        payment_type=kind,
+        pay_url=pay_url,
+        qr_code=qr_code,
+        currency=currency,
+        expires_at=_stamp(data.get("expires_at")),
+        created_at=_stamp(data.get("created_at")),
+        message=message,
+    )
 
 
 def combine_findings(visual: list[Finding], speech_hits: list[RawHit]) -> list[Finding]:

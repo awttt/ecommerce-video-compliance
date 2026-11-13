@@ -1,4 +1,14 @@
-import type { BatchResult, CutSpan, Job, Settings } from "./types";
+import type {
+  AccountAction,
+  AccountOptions,
+  BatchResult,
+  CutSpan,
+  Job,
+  RechargeInfo,
+  RechargeOrder,
+  RechargeOrders,
+  Settings,
+} from "./types";
 
 async function readError(response: Response): Promise<string> {
   try {
@@ -32,6 +42,66 @@ export function saveSettings(body: Record<string, unknown>): Promise<Settings> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+export function accountOptions(): Promise<AccountOptions> {
+  return request<AccountOptions>("/api/account/options");
+}
+
+function accountPost(path: string, body?: Record<string, unknown>): Promise<AccountAction> {
+  return request<AccountAction>(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+}
+
+export function accountSendCode(email: string): Promise<AccountAction> {
+  return accountPost("/api/account/send-code", { email });
+}
+
+export function accountRegister(email: string, password: string, verifyCode: string): Promise<AccountAction> {
+  return accountPost("/api/account/register", { email, password, verify_code: verifyCode });
+}
+
+export function accountLogin(email: string, password: string): Promise<AccountAction> {
+  return accountPost("/api/account/login", { email, password });
+}
+
+export function accountLogin2fa(totpCode: string): Promise<AccountAction> {
+  return accountPost("/api/account/login/2fa", { totp_code: totpCode });
+}
+
+export function accountLogout(): Promise<AccountAction> {
+  return accountPost("/api/account/logout");
+}
+
+export function accountRefresh(): Promise<AccountAction> {
+  return accountPost("/api/account/refresh");
+}
+
+export function rechargeInfo(): Promise<RechargeInfo> {
+  return request<RechargeInfo>("/api/account/recharge");
+}
+
+export function listRechargeOrders(): Promise<RechargeOrders> {
+  return request<RechargeOrders>("/api/account/recharge/orders");
+}
+
+export function createRecharge(amount: number, paymentType: string): Promise<RechargeOrder> {
+  return request<RechargeOrder>("/api/account/recharge/orders", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ amount, payment_type: paymentType }),
+  });
+}
+
+export function getRechargeOrder(orderId: number): Promise<RechargeOrder> {
+  return request<RechargeOrder>(`/api/account/recharge/orders/${orderId}`);
+}
+
+export function cancelRechargeOrder(orderId: number): Promise<RechargeOrder> {
+  return request<RechargeOrder>(`/api/account/recharge/orders/${orderId}/cancel`, { method: "POST" });
 }
 
 export function createJob(form: FormData): Promise<Job> {

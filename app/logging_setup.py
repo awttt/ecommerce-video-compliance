@@ -10,7 +10,7 @@ from logging.handlers import RotatingFileHandler
 from app.paths import logs_dir
 
 _SECRET = re.compile(
-    r"(sk-[A-Za-z0-9_\-]{4,}|Bearer\s+\S+|AKID[0-9A-Za-z]{8,}|Credential=[^,\s]+|Signature=[0-9a-fA-F]+)",
+    r"(sk-[A-Za-z0-9_\-]{4,}|Bearer\s+\S+|eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}|AKID[0-9A-Za-z]{8,}|Credential=[^,\s]+|Signature=[0-9a-fA-F]+)",
     re.IGNORECASE,
 )
 _configured = False

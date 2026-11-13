@@ -83,6 +83,78 @@ export interface Settings {
   tencent_region: string;
   asr_engine: string;
   rules: DetectionRules;
+  account_logged_in: boolean;
+  account_email: string;
+  account_balance: number | null;
+  account_frozen_balance: number | null;
+  account_today_cost: number | null;
+  account_total_cost: number | null;
+}
+
+export interface AccountOptions {
+  reachable: boolean;
+  registration_enabled: boolean;
+  email_verify_enabled: boolean;
+  captcha: string;
+  message: string;
+}
+
+export interface AccountAction {
+  settings: Settings;
+  requires_2fa: boolean;
+  email_masked: string;
+  message: string;
+}
+
+export interface RechargeMethod {
+  payment_type: string;
+  display_name: string;
+  currency: string;
+  fee_rate: number;
+  daily_limit: number;
+  single_min: number;
+  single_max: number;
+}
+
+export interface RechargeBonusTier {
+  min_amount: number;
+  bonus_percent: number;
+}
+
+export interface RechargeInfo {
+  balance_disabled: boolean;
+  global_min: number;
+  global_max: number;
+  recharge_fee_rate: number;
+  balance_recharge_multiplier: number;
+  bonus_mode: string;
+  bonus_notice: string;
+  bonus_tiers: RechargeBonusTier[];
+  help_text: string;
+  methods: RechargeMethod[];
+  message: string;
+}
+
+export interface RechargeOrder {
+  order_id: number;
+  amount: number;
+  pay_amount: number;
+  fee_rate: number;
+  bonus_amount: number;
+  status: string;
+  result_type: string;
+  payment_type: string;
+  pay_url: string;
+  qr_code: string;
+  currency: string;
+  expires_at: string;
+  created_at: string;
+  message: string;
+  settings?: Settings | null;
+}
+
+export interface RechargeOrders {
+  orders: RechargeOrder[];
 }
 
 export interface BatchResult {
@@ -92,8 +164,9 @@ export interface BatchResult {
 
 export const TERMINAL = ["done", "failed", "cancelled"];
 
+/** 时间轴与图例色块：低饱和、同明度，避免三原色抢视觉。改动时同步 styles.css 的 --cat-* token */
 export const CATEGORY_COLOR: Record<string, string> = {
-  价格: "#cf1322",
-  规格: "#d46b08",
-  品牌: "#1677ff",
+  价格: "#c0604a",
+  规格: "#b5872f",
+  品牌: "#4b7fa6",
 };

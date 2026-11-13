@@ -6,6 +6,7 @@ import {
   HistoryOutlined,
   ScissorOutlined,
   SettingOutlined,
+  WalletOutlined,
 } from "@ant-design/icons";
 import {
   Alert,
@@ -27,8 +28,9 @@ import {
   Space,
   Steps,
   Switch,
+  Popover,
+  Spin,
   Table,
-  Tag,
   Tooltip,
   Typography,
   Upload,
@@ -37,6 +39,8 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import { useEffect, useRef, useState } from "react";
 import {
+  accountLogout,
+  accountRefresh,
   cancelJob,
   createJobs,
   deleteJob,
@@ -50,20 +54,43 @@ import {
   saveCuts,
   saveSettings,
 } from "./api";
+import { formatBalance, LoginPage, RegisterPage } from "./AuthPages";
 import { CutTimeline } from "./CutTimeline";
+import { RechargePage } from "./RechargePage";
 import { CATEGORY_COLOR, TERMINAL, type CutSpan, type Finding, type Job, type PhraseRule, type Settings } from "./types";
 import { VideoPane, type PlayerControls } from "./VideoPane";
 
 const { Dragger } = Upload;
 const { Text, Paragraph } = Typography;
 
+const CATEGORY_PILL: Record<string, string> = {
+  价格: "pill--price",
+  规格: "pill--spec",
+  品牌: "pill--brand",
+};
+
+/** 取景框 + 扫描线：品牌标记，用于顶栏与登录页 */
+export function BrandMark({ size = 21 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M4 9V7a3 3 0 0 1 3-3h2M15 4h2a3 3 0 0 1 3 3v2M20 15v2a3 3 0 0 1-3 3h-2M9 20H7a3 3 0 0 1-3-3v-2"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+      />
+      <path d="M7.5 12h9" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function statusTag(status: string) {
-  if (status === "done") return <Tag color="success">完成</Tag>;
-  if (status === "failed") return <Tag color="error">失败</Tag>;
-  if (status === "cancelled") return <Tag>已取消</Tag>;
-  if (status === "queued") return <Tag color="processing">排队</Tag>;
-  if (status === "running") return <Tag color="processing">识别中</Tag>;
-  return <Tag>{status}</Tag>;
+  if (status === "done") return <span className="pill pill--confirmed"><i className="status-dot" />完成</span>;
+  if (status === "failed") return <span className="pill pill--error"><i className="status-dot" />失败</span>;
+  if (status === "cancelled") return <span className="pill pill--neutral">已取消</span>;
+  if (status === "queued") return <span className="pill pill--active"><i className="status-dot" />排队</span>;
+  if (status === "running") return <span className="pill pill--active"><i className="status-dot" />识别中</span>;
+  return <span className="pill pill--neutral">{status}</span>;
 }
 
 function coversDuration(cuts: CutSpan[], duration: number | null): boolean {
@@ -100,7 +127,12 @@ function stepIndex(job: Job | null): number {
 export function Shell() {
   const { message } = AntApp.useApp();
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [authPage, setAuthPage] = useState<"login" | "register">("login");
+  const [refreshingAccount, setRefreshingAccount] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [bootError, setBootError] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [workspace, setWorkspace] = useState<"detect" | "recharge">("detect");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [history, setHistory] = useState<Job[]>([]);
   const [job, setJob] = useState<Job | null>(null);
@@ -124,7 +156,10 @@ export function Shell() {
   const [previewMode, setPreviewMode] = useState<"original" | "segment" | "keep">("keep");
   const [selectedCut, setSelectedCut] = useState<CutSpan | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
-  const [editBusy, setEditBusy] = useState(false);
+  const [editAction, setEditAction] = useState<"plan" | "render" | "reset" | null>(null);
+  const [fileAction, setFileAction] = useState<"json" | "xlsx" | "dir" | null>(null);
+  const [cancellingJob, setCancellingJob] = useState(false);
+  const editBusy = editAction !== null;
   const seekRef = useRef<PlayerControls["seek"]>(() => undefined);
   const defaultsApplied = useRef(false);
   const seenJob = useRef<string | null>(null);
@@ -156,9 +191,17 @@ export function Shell() {
   }
 
   useEffect(() => {
-    refreshSettings().catch((error: Error) => message.error(error.message));
-    refreshHistory().catch(() => undefined);
+    refreshSettings().catch((error: Error) => {
+      setBootError(error.message);
+      message.error(error.message);
+    });
   }, [message]);
+
+  const loggedIn = Boolean(settings?.account_logged_in);
+  useEffect(() => {
+    if (!loggedIn) return;
+    refreshHistory().catch(() => undefined);
+  }, [loggedIn]);
 
   useEffect(() => {
     if (!settings || defaultsApplied.current) return;
@@ -170,8 +213,6 @@ export function Shell() {
   useEffect(() => {
     if (!settings) return;
     form.setFieldsValue({
-      base_url: settings.base_url,
-      model: settings.model,
       fps: settings.fps,
       concurrency: settings.concurrency,
       max_width: settings.max_width,
@@ -223,7 +264,12 @@ export function Shell() {
         setJob(next);
         if (!TERMINAL.includes(next.status)) window.setTimeout(tick, 700);
         else refreshHistory().catch(() => undefined);
-      } catch {
+      } catch (error) {
+        const text = error instanceof Error ? error.message : "";
+        if (text.includes("请先登录") || text.includes("请重新登录")) {
+          refreshSettings().catch(() => undefined);
+          return;
+        }
         if (!stop) window.setTimeout(tick, 1500);
       }
     };
@@ -361,14 +407,14 @@ export function Shell() {
   }
 
   async function enterEditor() {
-    if (!job) return;
+    if (!job || editAction !== null) return;
     if (job.has_edit_plan) {
       setEditorOn(true);
       setCuts(job.cuts);
       setSource("media");
       return;
     }
-    setEditBusy(true);
+    setEditAction("plan");
     try {
       const next = await planEdit(job.id, padding);
       setJob(next);
@@ -378,15 +424,15 @@ export function Shell() {
     } catch (error) {
       message.error(error instanceof Error ? error.message : "生成剪辑方案失败");
     } finally {
-      setEditBusy(false);
+      setEditAction((prev) => (prev === "plan" ? null : prev));
     }
   }
 
   async function generateEdit() {
-    if (!job) return;
+    if (!job || editAction !== null) return;
     const token = ++saveToken.current;
     window.clearTimeout(saveTimer.current);
-    setEditBusy(true);
+    setEditAction("render");
     try {
       const saved = await saveCuts(job.id, cutsRef.current);
       if (saveToken.current !== token) return;
@@ -399,7 +445,19 @@ export function Shell() {
     } catch (error) {
       message.error(error instanceof Error ? error.message : "生成成片失败");
     } finally {
-      setEditBusy(false);
+      setEditAction((prev) => (prev === "render" ? null : prev));
+    }
+  }
+
+  async function runFileAction(action: "json" | "xlsx" | "dir", task: () => Promise<void>) {
+    if (fileAction !== null) return;
+    setFileAction(action);
+    try {
+      await task();
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "操作失败");
+    } finally {
+      setFileAction((prev) => (prev === action ? null : prev));
     }
   }
 
@@ -414,13 +472,13 @@ export function Shell() {
       title: "类别",
       dataIndex: "类别",
       width: 80,
-      render: (value: string) => <Tag color={CATEGORY_COLOR[value]}>{value}</Tag>,
+      render: (value: string) => <span className={`pill ${CATEGORY_PILL[value] ?? "pill--neutral"}`}>{value}</span>,
     },
     {
       title: "来源",
       dataIndex: "来源",
       width: 80,
-      render: (value: string) => <Tag color={value === "口播" ? "purple" : "default"}>{value || "画面"}</Tag>,
+      render: (value: string) => <span className={`pill ${value === "口播" ? "pill--speech" : "pill--neutral"}`}>{value || "画面"}</span>,
     },
     { title: "原文", dataIndex: "原文", width: 160 },
     { title: "位置", dataIndex: "位置", width: 180 },
@@ -428,7 +486,7 @@ export function Shell() {
       title: "置信度",
       dataIndex: "置信度",
       width: 90,
-      render: (value: string) => <Tag color={value === "确定" ? "green" : "gold"}>{value}</Tag>,
+      render: (value: string) => <span className={`pill ${value === "确定" ? "pill--confirmed" : "pill--pending"}`}>{value}</span>,
     },
     {
       title: "判定理由",
@@ -443,32 +501,132 @@ export function Shell() {
     { title: "备注", dataIndex: "备注", width: 160, ellipsis: true },
   ];
 
+  async function refreshAccount() {
+    if (refreshingAccount || loggingOut) return;
+    setRefreshingAccount(true);
+    try {
+      const result = await accountRefresh();
+      setSettings(result.settings);
+      message.success(result.message || "已更新余额");
+    } catch (error) {
+      const text = error instanceof Error ? error.message : "刷新失败";
+      message.error(text);
+      if (text.includes("请重新登录") || text.includes("请先登录") || text.includes("还没有登录")) {
+        refreshSettings().catch(() => undefined);
+      }
+    } finally {
+      setRefreshingAccount(false);
+    }
+  }
+
+  async function logout() {
+    if (refreshingAccount || loggingOut) return;
+    setLoggingOut(true);
+    try {
+      const result = await accountLogout();
+      setSettings(result.settings);
+      setJob(null);
+      setBatch([]);
+      setPicked([]);
+      setHistory([]);
+      setWorkspace("detect");
+      setAuthPage("login");
+      message.success(result.message || "已退出登录");
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "退出失败");
+    } finally {
+      setLoggingOut(false);
+    }
+  }
+
+  if (!settings) {
+    return (
+      <div className="auth-page">
+        <Card className="auth-card">
+          {bootError ? <Alert type="error" showIcon message={bootError} /> : <div style={{ textAlign: "center" }}><Spin /></div>}
+        </Card>
+      </div>
+    );
+  }
+
+  if (!settings.account_logged_in) {
+    return authPage === "register" ? (
+      <RegisterPage
+        onRegistered={(next) => {
+          setSettings(next);
+          setAuthPage("login");
+        }}
+        onGoLogin={() => setAuthPage("login")}
+      />
+    ) : (
+      <LoginPage onLoggedIn={setSettings} onGoRegister={() => setAuthPage("register")} />
+    );
+  }
+
   return (
-    <>
+    <div className="app-shell">
       <header className="app-header">
-        <div className="brand">
-          <strong>电商视频素材合规检测</strong>
-          <span>本地识别画面和口播中的价格、规格、品牌，并标出时间区间</span>
-        </div>
-        <Space>
-          <Button icon={<HistoryOutlined />} onClick={() => { setHistoryOpen(true); refreshHistory().catch(() => undefined); }}>
+        <button className="brand" type="button" onClick={() => setWorkspace("detect")}>
+          <span className="brand-mark"><BrandMark /></span>
+          <span className="brand-text">
+            <strong>电商视频素材合规检测</strong>
+            <span>本地识别画面和口播中的价格、规格、品牌，并标出时间区间</span>
+          </span>
+        </button>
+        <nav className="app-nav">
+          <Button type="text" icon={<HistoryOutlined />} onClick={() => { setHistoryOpen(true); refreshHistory().catch(() => undefined); }}>
             历史
           </Button>
-          <Button onClick={() => setRulesOpen(true)}>审核规则</Button>
-          <Button icon={<SettingOutlined />} onClick={() => setSettingsOpen(true)}>
-            设置
+          <Button type="text" onClick={() => setRulesOpen(true)}>审核规则</Button>
+          <Button type="text" icon={<SettingOutlined />} onClick={() => setSettingsOpen(true)}>设置</Button>
+          <Button
+            type="text"
+            icon={<WalletOutlined />}
+            className={workspace === "recharge" ? "is-active" : ""}
+            onClick={() => setWorkspace("recharge")}
+          >
+            充值
           </Button>
-        </Space>
+        </nav>
+        <div className="app-account">
+          <Popover
+            content={
+              <Space direction="vertical" size={4}>
+                <span>冻结 {formatBalance(settings.account_frozen_balance)}</span>
+                <span>今日消耗 {formatBalance(settings.account_today_cost)}</span>
+                <span>累计消耗 {formatBalance(settings.account_total_cost)}</span>
+              </Space>
+            }
+          >
+            <span className="account-chip">
+              {settings.account_email} · 余额 {formatBalance(settings.account_balance)}
+            </span>
+          </Popover>
+          <Button type="text" size="small" loading={refreshingAccount} disabled={loggingOut} onClick={() => void refreshAccount()}>
+            刷新余额
+          </Button>
+          <Button type="text" size="small" loading={loggingOut} disabled={refreshingAccount} onClick={() => void logout()}>
+            退出登录
+          </Button>
+        </div>
       </header>
       <div className="page">
+        {workspace === "recharge" ? (
+          <RechargePage settings={settings} onSettings={setSettings} />
+        ) : (
         <Row gutter={[16, 16]}>
           <Col xs={24} lg={8}>
             <Card title="上传视频">
               {settings?.mock_mode ? (
                 <Alert type="warning" showIcon style={{ marginBottom: 12 }} message="模拟识别已打开，不会调用 DeepSeek。" />
               ) : null}
-              {!settings?.has_api_key && !settings?.mock_mode ? (
-                <Alert type="info" showIcon style={{ marginBottom: 12 }} message="请先在设置里填写 DeepSeek API Key。" />
+              {!settings.has_api_key && !settings.mock_mode ? (
+                <Alert
+                  type="info"
+                  showIcon
+                  style={{ marginBottom: 12 }}
+                  message="账号已登录，还没有拿到画面识别密钥。请点右上角的刷新余额。"
+                />
               ) : null}
               <Dragger
                 multiple
@@ -485,16 +643,14 @@ export function Shell() {
                   return Upload.LIST_IGNORE;
                 }}
               >
-                <p>
-                  <CloudUploadOutlined style={{ fontSize: 28, color: "#1f6f5b" }} />
-                </p>
-                <p>拖拽一个或多个视频到这里，或点击选择</p>
-                <p className="hint">支持 mp4 / mov / mkv / avi / webm。一次最多 20 个，中文文件名可以直接用。</p>
+                <div className="upload-icon"><CloudUploadOutlined /></div>
+                <p className="upload-title">拖拽视频到这里，或点击选择</p>
+                <p className="upload-sub">支持 mp4 / mov / mkv / avi / webm · 可一次选多个，最多 20 个</p>
               </Dragger>
               {picked.length > 0 ? (
                 <div style={{ marginTop: 12 }}>
                   {picked.map((file) => (
-                    <div key={`${file.name}-${file.size}-${file.lastModified}`} style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                    <div className="file-row" key={`${file.name}-${file.size}-${file.lastModified}`}>
                       <Text ellipsis>{file.name}</Text>
                       <Button
                         size="small"
@@ -511,26 +667,26 @@ export function Shell() {
               <Button
                 type="primary"
                 block
-                style={{ marginTop: 12 }}
+                className="primary-action"
                 loading={uploading}
                 disabled={picked.length === 0}
                 onClick={() => startBatch().catch(() => undefined)}
               >
                 {picked.length > 1 ? `开始识别（${picked.length} 个）` : "开始识别"}
               </Button>
-              <div style={{ marginTop: 16 }}>
+              <div className="slider-row">
                 <Text>抽帧密度 {fps} FPS</Text>
                 <Slider min={0.5} max={2} step={0.1} value={fps} onChange={setFps} disabled={uploading} />
                 <Text>并发请求 {concurrency}</Text>
                 <Slider min={1} max={8} step={1} value={concurrency} onChange={setConcurrency} disabled={uploading} />
               </div>
               {batch.length > 0 ? (
-                <div style={{ marginTop: 16 }}>
-                  <Text type="secondary">本批队列</Text>
+                <div style={{ marginTop: 20 }}>
+                  <span className="section-label">本批队列</span>
                   {batch.map((item) => (
                     <div
+                      className="queue-row"
                       key={item.id}
-                      style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 8, cursor: "pointer" }}
                       onClick={() => {
                         if (item.id !== job?.id) setSource("media");
                         setJob(item);
@@ -546,7 +702,7 @@ export function Shell() {
                 </div>
               ) : null}
               <Paragraph className="hint">
-                多个视频会排队识别，同一时间只处理一个。只报告画面里看得见的文字，以及口播里明确说出的内容，不根据外观推测。结束后会删除中间图片和临时音频。
+                多个视频排队识别，同一时间只处理一个。只报告画面里看得见的文字和口播里明确说出的内容，不根据外观推测。结束后会删除中间图片和临时音频。
               </Paragraph>
             </Card>
           </Col>
@@ -563,17 +719,15 @@ export function Shell() {
                     items={[{ title: "抽帧" }, { title: "识别" }, { title: "汇总" }, { title: "完成" }]}
                   />
                   <Progress percent={Math.round(job.progress)} style={{ margin: "12px 0" }} />
-                  <Text>
+                  <div className="job-meta">
                     {job.message}
                     {job.frames_estimated
                       ? ` · 抽帧 ${job.frames_extracted}/${job.frames_estimated} · 已识别 ${job.frames_recognized}`
                       : ""}
                     {job.failed_frames ? ` · 失败 ${job.failed_frames} 帧` : ""}
-                  </Text>
+                  </div>
                   {job.speech_message && job.speech_message !== job.asr_error ? (
-                    <div>
-                      <Text type="secondary">口播：{job.speech_message}</Text>
-                    </div>
+                    <div className="job-meta is-muted">口播：{job.speech_message}</div>
                   ) : null}
                   {job.mock ? (
                     <Alert style={{ marginTop: 12 }} type="warning" showIcon message="这次是模拟识别，原文不是模型读出来的。" />
@@ -655,7 +809,7 @@ export function Shell() {
                               style={{
                                 left: `${(finding.start_sec / (job.duration_sec || 1)) * 100}%`,
                                 width: `${Math.max(((finding.end_sec - finding.start_sec) / (job.duration_sec || 1)) * 100, 0.8)}%`,
-                                background: CATEGORY_COLOR[finding.类别] || "#5c6b7a",
+                                background: CATEGORY_COLOR[finding.类别] || "#8b968f",
                               }}
                               onClick={(event) => {
                                 event.stopPropagation();
@@ -676,7 +830,7 @@ export function Shell() {
                         ))}
                         {editorOn ? (
                           <span>
-                            <i style={{ background: "#8d3d3d" }} />
+                            <i style={{ background: "var(--danger)" }} />
                             删除
                           </span>
                         ) : null}
@@ -692,18 +846,37 @@ export function Shell() {
                       onRow={(record) => ({ onClick: () => seekTo(record) })}
                       locale={{ emptyText: running ? "识别进行中，命中会陆续出现" : "没有发现画面或口播中的价格、规格或品牌" }}
                     />
-                    <Space wrap style={{ marginTop: 12 }}>
-                      <Button icon={<DownloadOutlined />} disabled={job.status !== "done"} onClick={() => downloadExport(job.id, "json").catch((error: Error) => message.error(error.message))}>
+                    <div className="toolbar">
+                      <Button
+                        icon={<DownloadOutlined />}
+                        loading={fileAction === "json"}
+                        disabled={job.status !== "done" || fileAction !== null}
+                        onClick={() => void runFileAction("json", async () => { await downloadExport(job.id, "json"); })}
+                      >
                         导出 JSON
                       </Button>
-                      <Button icon={<DownloadOutlined />} disabled={job.status !== "done"} onClick={() => downloadExport(job.id, "xlsx").catch((error: Error) => message.error(error.message))}>
+                      <Button
+                        icon={<DownloadOutlined />}
+                        loading={fileAction === "xlsx"}
+                        disabled={job.status !== "done" || fileAction !== null}
+                        onClick={() => void runFileAction("xlsx", async () => { await downloadExport(job.id, "xlsx"); })}
+                      >
                         导出 Excel
                       </Button>
-                      <Button icon={<FolderOpenOutlined />} onClick={() => openDir("exports").then((result) => message.success(`已打开 ${result.path}`)).catch((error: Error) => message.error(error.message))}>
+                      <Button
+                        icon={<FolderOpenOutlined />}
+                        loading={fileAction === "dir"}
+                        disabled={fileAction !== null}
+                        onClick={() => void runFileAction("dir", async () => {
+                          const result = await openDir("exports");
+                          message.success(`已打开 ${result.path}`);
+                        })}
+                      >
                         打开导出目录
                       </Button>
                       <Button
                         icon={<ScissorOutlined />}
+                        loading={editAction === "plan"}
                         disabled={editBusy || job.status !== "done" || job.findings.length === 0}
                         onClick={() => enterEditor().catch((error: Error) => message.error(error.message))}
                       >
@@ -714,12 +887,14 @@ export function Shell() {
                         <>
                           <Button
                             type={job.edit_rendered && sameCuts(cuts, job.cuts ?? []) ? "default" : "primary"}
+                            loading={editAction === "render"}
                             disabled={editBusy || cuts.length === 0}
                             onClick={() => generateEdit()}
                           >
                             {job.edit_rendered && sameCuts(cuts, job.cuts ?? []) ? "生成成片" : "生成成片（有未生成的修改）"}
                           </Button>
                           <Button
+                            loading={editAction === "reset"}
                             disabled={editBusy}
                             onClick={() => {
                               Modal.confirm({
@@ -728,14 +903,22 @@ export function Shell() {
                                 okText: "重置",
                                 cancelText: "取消",
                                 onOk: async () => {
+                                  if (editAction !== null) return;
+                                  setEditAction("reset");
                                   const token = ++saveToken.current;
                                   window.clearTimeout(saveTimer.current);
-                                  const next = await planEdit(job.id, padding);
-                                  if (saveToken.current !== token) return;
-                                  setJob(next);
-                                  setCuts(next.cuts);
-                                  setEditorOn(true);
-                                  setSource("media");
+                                  try {
+                                    const next = await planEdit(job.id, padding);
+                                    if (saveToken.current !== token) return;
+                                    setJob(next);
+                                    setCuts(next.cuts);
+                                    setEditorOn(true);
+                                    setSource("media");
+                                  } catch (error) {
+                                    message.error(error instanceof Error ? error.message : "重新生成删除段失败");
+                                  } finally {
+                                    setEditAction((prev) => (prev === "reset" ? null : prev));
+                                  }
                                 },
                               });
                             }}
@@ -759,24 +942,53 @@ export function Shell() {
                         </>
                       ) : null}
                       {running ? (
-                        <Button danger onClick={() => cancelJob(job.id).then(setJob).catch((error: Error) => message.error(error.message))}>
+                        <Button
+                          danger
+                          loading={cancellingJob}
+                          disabled={cancellingJob}
+                          onClick={() => {
+                            if (cancellingJob) return;
+                            setCancellingJob(true);
+                            cancelJob(job.id)
+                              .then(setJob)
+                              .catch((error: Error) => message.error(error.message))
+                              .finally(() => setCancellingJob(false));
+                          }}
+                        >
                           取消
                         </Button>
                       ) : null}
-                    </Space>
+                    </div>
                   </div>
                 </>
               ) : (
-                <div className="video-empty">上传视频后，这里会显示进度、时间轴和命中列表。</div>
+                <div className="video-empty">
+                  <div className="empty-state">
+                    <span className="empty-mark"><BrandMark size={24} /></span>
+                    <span className="empty-title">还没有检测结果</span>
+                    <span className="empty-sub">上传视频后，这里会显示进度、时间轴和命中列表</span>
+                  </div>
+                </div>
               )}
             </Card>
           </Col>
         </Row>
+        )}
       </div>
 
       <Drawer title="设置" open={settingsOpen} onClose={() => setSettingsOpen(false)} width={460}>
         <Paragraph type="secondary">
-          API Key 只保存在本机数据库。当前来源：{settings?.api_key_source === "saved" ? "本机已保存" : settings?.api_key_source === "env" ? "环境变量" : "未配置"}
+          当前账号 {settings.account_email}。画面识别使用这个账号的密钥，请求地址固定为 https://token4u.cc/v1，模型固定为 deepseek-v4.1-flash-1017。口播继续用腾讯云。
+        </Paragraph>
+        <Paragraph type="secondary">
+          API Key 只保存在本机数据库。当前来源：
+          {settings?.api_key_source === "account"
+            ? "登录账号"
+            : settings?.api_key_source === "saved"
+              ? "本机已保存"
+              : settings?.api_key_source === "env"
+                ? "环境变量"
+                : "未配置"}
           {settings?.api_key_masked ? `（${settings.api_key_masked}）` : ""}
         </Paragraph>
         <Form
@@ -784,7 +996,6 @@ export function Shell() {
           layout="vertical"
           onFinish={async (values: Record<string, unknown>) => {
             const payload = { ...values };
-            if (!payload.api_key) delete payload.api_key;
             if (!payload.tencent_secret_id) delete payload.tencent_secret_id;
             if (!payload.tencent_secret_key) delete payload.tencent_secret_key;
             try {
@@ -795,15 +1006,6 @@ export function Shell() {
             }
           }}
         >
-          <Form.Item label="DeepSeek API Key" name="api_key">
-            <Input.Password placeholder="留空表示不修改" autoComplete="off" />
-          </Form.Item>
-          <Form.Item label="接口地址" name="base_url" rules={[{ required: true }]}>
-            <Input />
-          </Form.Item>
-          <Form.Item label="模型" name="model" rules={[{ required: true }]}>
-            <Input />
-          </Form.Item>
           <Form.Item label="默认抽帧 FPS" name="fps" rules={[{ required: true }]}>
             <InputNumber min={0.5} max={2} step={0.1} style={{ width: "100%" }} />
           </Form.Item>
@@ -931,11 +1133,11 @@ export function Shell() {
           </Button>
         </Space.Compact>
         {extraPhrases.map((item) => (
-          <div key={`${item.category}-${item.text}`} style={{ display: "flex", justifyContent: "space-between", marginTop: 8 }}>
-            <Text>
-              <Tag color={CATEGORY_COLOR[item.category]}>{item.category}</Tag>
-              {item.text}
-            </Text>
+          <div className="file-row" key={`${item.category}-${item.text}`}>
+            <span className="phrase-item">
+              <span className={`pill ${CATEGORY_PILL[item.category] ?? "pill--neutral"}`}>{item.category}</span>
+              <span>{item.text}</span>
+            </span>
             <Button size="small" type="text" onClick={() => setExtraPhrases((current) => current.filter((phrase) => phrase !== item))}>
               移除
             </Button>
@@ -999,7 +1201,7 @@ export function Shell() {
           <Card
             key={item.id}
             size="small"
-            style={{ marginBottom: 8, cursor: "pointer" }}
+            className="history-card"
             onClick={async () => {
               setJob(await getJob(item.id));
               setSource("media");
@@ -1032,6 +1234,6 @@ export function Shell() {
           </Card>
         ))}
       </Drawer>
-    </>
+    </div>
   );
 }

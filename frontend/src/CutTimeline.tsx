@@ -491,7 +491,7 @@ export function CutTimeline({
                   style={{
                     left: `${(finding.start_sec / duration) * 100}%`,
                     width: `${Math.max(((finding.end_sec - finding.start_sec) / duration) * 100, 0.4)}%`,
-                    background: CATEGORY_COLOR[finding.类别] || "#5c6b7a",
+                    background: CATEGORY_COLOR[finding.类别] || "#8b968f",
                   }}
                   title={`${finding.时间点} ${finding.来源} ${finding.类别} ${finding.原文}`}
                   onPointerDown={(event) => event.stopPropagation()}

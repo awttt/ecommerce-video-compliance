@@ -11,17 +11,33 @@ import sys
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from fastapi.responses import FileResponse, StreamingResponse
 
 from app import __version__
 from app.core.editor import EditorError
 from app.core.ffmpeg import FFmpegError, ffmpeg_available, resolve_bin
+from app.core.relay import RelayError
 from app.paths import data_dir, exports_dir, video_dir
 from app.paths import safe_filename
-from app.schemas import CutRequest, CutsUpdate, JobPublic, SettingPublic, SettingUpdate
-from app.services.manager import BusyError, JobNotFound, get_manager
+from app.schemas import (
+    AccountAction,
+    AccountCodeRequest,
+    AccountCredentials,
+    AccountOptions,
+    AccountTotpRequest,
+    CutRequest,
+    RechargeInfo,
+    RechargeOrder,
+    RechargeOrderRequest,
+    RechargeOrders,
+    CutsUpdate,
+    JobPublic,
+    SettingPublic,
+    SettingUpdate,
+)
+from app.services.manager import AuthRequired, BusyError, JobNotFound, get_manager
 
 router = APIRouter(prefix="/api")
 
@@ -47,6 +63,13 @@ _MEDIA_TYPES = {
     ".mkv": "video/x-matroska",
     ".avi": "video/x-msvideo",
 }
+
+
+def require_login() -> None:
+    try:
+        get_manager().ensure_logged_in()
+    except AuthRequired as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
 
 
 def _check_id(job_id: str) -> str:
@@ -120,7 +143,116 @@ async def write_settings(patch: SettingUpdate) -> SettingPublic:
     return await get_manager().update_settings(patch)
 
 
-@router.post("/jobs", response_model=JobPublic, response_model_by_alias=True)
+def _account_call(exc: RelayError) -> HTTPException:
+    status = exc.status if 400 <= exc.status <= 599 else 502
+    return HTTPException(status_code=status, detail=str(exc))
+
+
+def _account_email(value: str) -> str:
+    cleaned = value.strip()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", cleaned):
+        raise HTTPException(status_code=400, detail="邮箱格式不正确")
+    return cleaned
+
+
+@router.get("/account/options", response_model=AccountOptions)
+async def account_options() -> AccountOptions:
+    return await get_manager().account_options()
+
+
+@router.post("/account/send-code", response_model=AccountAction)
+async def account_send_code(body: AccountCodeRequest) -> AccountAction:
+    try:
+        return await get_manager().account_send_code(_account_email(body.email))
+    except RelayError as exc:
+        raise _account_call(exc) from exc
+
+
+@router.post("/account/register", response_model=AccountAction)
+async def account_register(body: AccountCredentials) -> AccountAction:
+    try:
+        return await get_manager().account_register(_account_email(body.email), body.password, body.verify_code.strip())
+    except RelayError as exc:
+        raise _account_call(exc) from exc
+
+
+@router.post("/account/login", response_model=AccountAction)
+async def account_login(body: AccountCredentials) -> AccountAction:
+    try:
+        return await get_manager().account_login(_account_email(body.email), body.password)
+    except RelayError as exc:
+        raise _account_call(exc) from exc
+
+
+@router.post("/account/login/2fa", response_model=AccountAction)
+async def account_login_2fa(body: AccountTotpRequest) -> AccountAction:
+    try:
+        return await get_manager().account_login_2fa(body.totp_code)
+    except RelayError as exc:
+        raise _account_call(exc) from exc
+
+
+@router.post("/account/logout", response_model=AccountAction)
+async def account_logout() -> AccountAction:
+    try:
+        return await get_manager().account_logout()
+    except RelayError as exc:
+        raise _account_call(exc) from exc
+
+
+@router.post("/account/refresh", response_model=AccountAction)
+async def account_refresh() -> AccountAction:
+    try:
+        return await get_manager().account_refresh()
+    except RelayError as exc:
+        raise _account_call(exc) from exc
+
+
+@router.get("/account/recharge", response_model=RechargeInfo, dependencies=[Depends(require_login)])
+async def recharge_info() -> RechargeInfo:
+    try:
+        return await get_manager().recharge_info()
+    except RelayError as exc:
+        raise _account_call(exc) from exc
+
+
+@router.get("/account/recharge/orders", response_model=RechargeOrders, dependencies=[Depends(require_login)])
+async def list_recharge_orders() -> RechargeOrders:
+    try:
+        return RechargeOrders(orders=await get_manager().list_recharges())
+    except RelayError as exc:
+        raise _account_call(exc) from exc
+
+
+@router.post("/account/recharge/orders", response_model=RechargeOrder, dependencies=[Depends(require_login)])
+async def create_recharge_order(body: RechargeOrderRequest) -> RechargeOrder:
+    try:
+        return await get_manager().create_recharge(body.amount, body.payment_type)
+    except RelayError as exc:
+        raise _account_call(exc) from exc
+
+
+@router.get("/account/recharge/orders/{order_id}", response_model=RechargeOrder, dependencies=[Depends(require_login)])
+async def read_recharge_order(order_id: int) -> RechargeOrder:
+    try:
+        return await get_manager().recharge_order(order_id)
+    except RelayError as exc:
+        raise _account_call(exc) from exc
+
+
+@router.post(
+    "/account/recharge/orders/{order_id}/cancel",
+    response_model=RechargeOrder,
+    dependencies=[Depends(require_login)],
+)
+async def cancel_recharge_order(order_id: int) -> RechargeOrder:
+    try:
+        return await get_manager().cancel_recharge(order_id)
+    except RelayError as exc:
+        raise _account_call(exc) from exc
+
+
+@router.post("/jobs", response_model=JobPublic, response_model_by_alias=True, dependencies=[Depends(require_login)])
 async def create_job(
     file: UploadFile = File(...),
     fps: float | None = Form(default=None),
@@ -129,7 +261,7 @@ async def create_job(
     return await _accept_upload(file, fps, concurrency)
 
 
-@router.post("/jobs/batch", response_model=BatchCreated, response_model_by_alias=True)
+@router.post("/jobs/batch", response_model=BatchCreated, response_model_by_alias=True, dependencies=[Depends(require_login)])
 async def create_jobs(
     files: list[UploadFile] = File(...),
     fps: float | None = Form(default=None),
@@ -176,6 +308,9 @@ async def _accept_upload(file: UploadFile, fps: float | None, concurrency: int |
     except BusyError as exc:
         shutil.rmtree(directory, ignore_errors=True)
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except AuthRequired as exc:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
     except HTTPException:
         shutil.rmtree(directory, ignore_errors=True)
         raise
@@ -185,17 +320,17 @@ async def _accept_upload(file: UploadFile, fps: float | None, concurrency: int |
     return state.to_public()
 
 
-@router.get("/jobs", response_model=list[JobPublic], response_model_by_alias=True)
+@router.get("/jobs", response_model=list[JobPublic], response_model_by_alias=True, dependencies=[Depends(require_login)])
 async def list_jobs() -> list[JobPublic]:
     return await get_manager().list_jobs()
 
 
-@router.get("/jobs/{job_id}", response_model=JobPublic, response_model_by_alias=True)
+@router.get("/jobs/{job_id}", response_model=JobPublic, response_model_by_alias=True, dependencies=[Depends(require_login)])
 async def read_job(job_id: str) -> JobPublic:
     return (await _state(job_id)).to_public()
 
 
-@router.get("/jobs/{job_id}/events")
+@router.get("/jobs/{job_id}/events", dependencies=[Depends(require_login)])
 async def job_events(job_id: str) -> StreamingResponse:
     await _state(job_id)
 
@@ -210,7 +345,7 @@ async def job_events(job_id: str) -> StreamingResponse:
     )
 
 
-@router.post("/jobs/{job_id}/cancel", response_model=JobPublic, response_model_by_alias=True)
+@router.post("/jobs/{job_id}/cancel", response_model=JobPublic, response_model_by_alias=True, dependencies=[Depends(require_login)])
 async def cancel_job(job_id: str) -> JobPublic:
     _check_id(job_id)
     try:
@@ -220,14 +355,14 @@ async def cancel_job(job_id: str) -> JobPublic:
     return state.to_public()
 
 
-@router.delete("/jobs/{job_id}")
+@router.delete("/jobs/{job_id}", dependencies=[Depends(require_login)])
 async def delete_job(job_id: str) -> dict:
     _check_id(job_id)
     await get_manager().delete(job_id)
     return {"ok": True}
 
 
-@router.get("/jobs/{job_id}/media")
+@router.get("/jobs/{job_id}/media", dependencies=[Depends(require_login)])
 async def job_media(job_id: str) -> FileResponse:
     state = await _state(job_id)
     path = Path(state.source_path)
@@ -241,7 +376,7 @@ async def job_media(job_id: str) -> FileResponse:
     )
 
 
-@router.get("/jobs/{job_id}/strip/{index}")
+@router.get("/jobs/{job_id}/strip/{index}", dependencies=[Depends(require_login)])
 async def job_strip(job_id: str, index: int) -> FileResponse:
     _check_id(job_id)
     try:
@@ -255,7 +390,7 @@ async def job_strip(job_id: str, index: int) -> FileResponse:
     return FileResponse(path, media_type="image/jpeg")
 
 
-@router.get("/jobs/{job_id}/output")
+@router.get("/jobs/{job_id}/output", dependencies=[Depends(require_login)])
 async def job_output(job_id: str) -> FileResponse:
     state = await _state(job_id)
     if not state.output_path:
@@ -266,7 +401,7 @@ async def job_output(job_id: str) -> FileResponse:
     return FileResponse(path, media_type="video/mp4", filename=path.name, content_disposition_type="inline")
 
 
-@router.get("/jobs/{job_id}/export")
+@router.get("/jobs/{job_id}/export", dependencies=[Depends(require_login)])
 async def export_job(job_id: str, fmt: str = "json") -> FileResponse:
     if fmt not in {"json", "xlsx"}:
         raise HTTPException(status_code=400, detail="只支持 json 或 xlsx")
@@ -298,22 +433,22 @@ async def _edit_public(job_id: str, action):
     return state.to_public()
 
 
-@router.post("/jobs/{job_id}/edit/plan", response_model=JobPublic, response_model_by_alias=True)
+@router.post("/jobs/{job_id}/edit/plan", response_model=JobPublic, response_model_by_alias=True, dependencies=[Depends(require_login)])
 async def plan_edit(job_id: str, body: CutRequest) -> JobPublic:
     return await _edit_public(job_id, lambda: get_manager().plan_edit(job_id, body.padding_sec))
 
 
-@router.put("/jobs/{job_id}/cuts", response_model=JobPublic, response_model_by_alias=True)
+@router.put("/jobs/{job_id}/cuts", response_model=JobPublic, response_model_by_alias=True, dependencies=[Depends(require_login)])
 async def update_cuts(job_id: str, body: CutsUpdate) -> JobPublic:
     return await _edit_public(job_id, lambda: get_manager().save_cuts(job_id, body.cuts))
 
 
-@router.post("/jobs/{job_id}/cut/render", response_model=JobPublic, response_model_by_alias=True)
+@router.post("/jobs/{job_id}/cut/render", response_model=JobPublic, response_model_by_alias=True, dependencies=[Depends(require_login)])
 async def render_edit(job_id: str) -> JobPublic:
     return await _edit_public(job_id, lambda: get_manager().render_edit(job_id))
 
 
-@router.post("/jobs/{job_id}/cut", response_model=JobPublic, response_model_by_alias=True)
+@router.post("/jobs/{job_id}/cut", response_model=JobPublic, response_model_by_alias=True, dependencies=[Depends(require_login)])
 async def cut_job(job_id: str, body: CutRequest) -> JobPublic:
     return await _edit_public(job_id, lambda: get_manager().cut(job_id, body.padding_sec))
 
@@ -322,7 +457,7 @@ class OpenDirRequest(BaseModel):
     target: str = Field(default="exports", pattern="^(exports|data)$")
 
 
-@router.post("/system/open-dir")
+@router.post("/system/open-dir", dependencies=[Depends(require_login)])
 async def open_dir(body: OpenDirRequest) -> dict:
     path = data_dir() if body.target == "data" else exports_dir()
     try:

@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from app.paths import load_project_dotenv
-from app.services.manager import get_manager
+from app.services.manager import AuthRequired, get_manager
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -40,6 +40,11 @@ async def _scan(args: argparse.Namespace) -> int:
     manager = get_manager()
     await manager.init()
     try:
+        try:
+            manager.ensure_logged_in()
+        except AuthRequired as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
         state = await manager.create_job(
             video,
             video.name,

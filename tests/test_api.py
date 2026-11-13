@@ -6,7 +6,14 @@ from fastapi.testclient import TestClient
 
 from app.factory import create_app
 from app.paths import audio_dir, frames_dir, video_dir
+from app.services.manager import get_manager
 from tests.media import ffmpeg_bin, has_encoder, make_video, probe_duration
+
+
+def sign_in() -> None:
+    manager = get_manager()
+    manager._settings["relay_email"] = "user@example.com"
+    manager._settings["relay_access_token"] = "access-token-for-tests"
 
 
 def test_health_and_settings_do_not_leak_the_key(monkeypatch):
@@ -85,6 +92,7 @@ def test_custom_rules_roundtrip_and_reject_an_empty_rule(monkeypatch):
 def test_batch_upload_accepts_several_files(monkeypatch):
     monkeypatch.setenv("EVC_INLINE_JOBS", "1")
     with TestClient(create_app()) as client:
+        sign_in()
         response = client.post(
             "/api/jobs/batch",
             files=[
@@ -108,6 +116,7 @@ def test_batch_upload_accepts_several_files(monkeypatch):
 def test_missing_api_key_fails_before_calling_ffmpeg(monkeypatch):
     monkeypatch.setenv("EVC_INLINE_JOBS", "1")
     with TestClient(create_app()) as client:
+        sign_in()
         response = client.post(
             "/api/jobs",
             files={"file": ("空视频.mp4", b"not a video", "video/mp4")},
@@ -127,6 +136,7 @@ def test_upload_mock_pipeline_export_and_cleanup(tmp_path: Path, monkeypatch):
     video = tmp_path / "素材 库" / "价格 演示.mp4"
     make_video(video, 2)
     with TestClient(create_app()) as client:
+        sign_in()
         with video.open("rb") as handle:
             response = client.post(
                 "/api/jobs",
@@ -217,3 +227,29 @@ def test_upload_mock_pipeline_export_and_cleanup(tmp_path: Path, monkeypatch):
         output = video_dir(body["id"]) / "clean.mp4"
         assert output.is_file()
         assert 0.3 < probe_duration(output) < 2.2
+
+
+def test_feature_routes_require_login():
+    with TestClient(create_app()) as client:
+        assert client.get("/api/health").status_code == 200
+        assert client.get("/api/settings").status_code == 200
+        listed = client.get("/api/jobs")
+        assert listed.status_code == 401
+        assert listed.json()["detail"] == "请先登录"
+        created = client.post(
+            "/api/jobs",
+            files={"file": ("空视频.mp4", b"not a video", "video/mp4")},
+        )
+        assert created.status_code == 401
+        assert created.json()["detail"] == "请先登录"
+        batch = client.post(
+            "/api/jobs/batch",
+            files=[("files", ("第一段.mp4", b"not a video", "video/mp4"))],
+        )
+        assert batch.status_code == 401
+        assert batch.json()["detail"] == "请先登录"
+        opened = client.post("/api/system/open-dir", json={"target": "exports"})
+        assert opened.status_code == 401
+        assert opened.json()["detail"] == "请先登录"
+        sign_in()
+        assert client.get("/api/jobs").status_code == 200
