@@ -12,7 +12,7 @@ from app.core.parsing import locate_quote, tighten_span
 from app.core.transcript import SpeechSentence
 from app.schemas import DetectionRules, PhraseRule, RawHit
 
-_CATEGORIES = {"价格", "规格", "品牌"}
+_CATEGORIES = {"价格", "规格", "品牌", "夸大宣传"}
 _PLAIN_NUMBER = r"(?:\d+|[零〇一二三四五六七八九十百千万两]+)"
 _NUMBER = rf"(?:{_PLAIN_NUMBER}(?:(?:\.|点){_PLAIN_NUMBER})?)"
 

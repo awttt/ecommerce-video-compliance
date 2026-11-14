@@ -10,8 +10,8 @@ from pathlib import Path
 import aiosqlite
 
 from app.core.relay import configured_model
-from app.core.rule_catalog import apply_builtin_rules
-from app.schemas import DEFAULT_SETTINGS, DetectionRules, Finding
+from app.core.rule_catalog import apply_builtin_rules, enable_exaggeration
+from app.schemas import DEFAULT_SETTINGS, DetectionRules, Finding, clamp_concurrency
 
 log = logging.getLogger(__name__)
 
@@ -176,13 +176,17 @@ class Database:
             if isinstance(stored, dict):
                 merged.update(stored)
         merged["model"] = configured_model(merged.get("model"))
+        bounded = clamp_concurrency(merged.get("concurrency"))
+        concurrency_changed = merged.get("concurrency") != bounded
+        merged["concurrency"] = bounded
         seeded = apply_builtin_rules(merged)
+        exaggeration_changed = enable_exaggeration(merged)
         try:
             merged["rules"] = DetectionRules.model_validate(merged.get("rules") or {}).model_dump()
         except Exception:
             merged["rules"] = DetectionRules().model_dump()
             seeded = False
-        if seeded:
+        if seeded or concurrency_changed or exaggeration_changed:
             await self.save_settings(merged)
         return merged
 

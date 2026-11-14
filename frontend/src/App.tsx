@@ -86,6 +86,14 @@ import { VideoPane, type PlayerControls } from "./VideoPane";
 const { Dragger } = Upload;
 const { Text, Paragraph } = Typography;
 
+const DEFAULT_CONCURRENCY = 4;
+const MAX_CONCURRENCY = 8;
+
+function boundedConcurrency(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_CONCURRENCY;
+  return Math.min(MAX_CONCURRENCY, Math.max(1, Math.round(value)));
+}
+
 const MODEL_OPTIONS = [
   { value: "glm-5.3-flash", label: "GLM 5.3 Flash" },
   { value: "deepseek-flash", label: "DeepSeek 4.1 Flash" },
@@ -95,6 +103,7 @@ const CATEGORY_PILL: Record<string, string> = {
   价格: "pill--price",
   规格: "pill--spec",
   品牌: "pill--brand",
+  夸大宣传: "pill--hype",
 };
 
 /** 取景框 + 扫描线：品牌标记，用于顶栏与登录页 */
@@ -250,7 +259,7 @@ export function Shell() {
   const [mcpOpen, setMcpOpen] = useState(false);
   const [mcpSaving, setMcpSaving] = useState(false);
   const [mcpLive, setMcpLive] = useState<boolean | null>(null);
-  const [ruleCategories, setRuleCategories] = useState<string[]>(["价格", "规格", "品牌"]);
+  const [ruleCategories, setRuleCategories] = useState<string[]>(["价格", "规格", "品牌", "夸大宣传"]);
   const [phraseDrafts, setPhraseDrafts] = useState<Record<string, string>>({});
   const [ignoreText, setIgnoreText] = useState("");
   const [ruleNote, setRuleNote] = useState("");
@@ -351,14 +360,14 @@ export function Shell() {
     if (!settings || defaultsApplied.current) return;
     defaultsApplied.current = true;
     setFps(settings.fps);
-    setConcurrency(settings.concurrency);
+    setConcurrency(boundedConcurrency(settings.concurrency));
   }, [settings]);
 
   useEffect(() => {
     if (!settings) return;
     form.setFieldsValue({
       fps: settings.fps,
-      concurrency: settings.concurrency,
+      concurrency: boundedConcurrency(settings.concurrency),
       max_width: settings.max_width,
       jpeg_q: settings.jpeg_q,
       detail: settings.detail,
@@ -872,7 +881,7 @@ export function Shell() {
           <span className="brand-mark"><BrandMark /></span>
           <span className="brand-text">
             <strong>电商视频素材合规检测</strong>
-            <span>本地识别画面和口播中的价格、规格、品牌，并标出时间区间</span>
+            <span>本地识别画面和口播中的价格、规格、品牌，口播里的夸大宣传也会标出时间区间</span>
           </span>
         </button>
         <nav className="app-nav">
@@ -1044,7 +1053,14 @@ export function Shell() {
                 <Text>抽帧密度 {fps} FPS</Text>
                 <Slider min={0.5} max={2} step={0.1} value={fps} onChange={setFps} disabled={uploading} />
                 <Text>并发请求 {concurrency}</Text>
-                <Slider min={1} max={8} step={1} value={concurrency} onChange={setConcurrency} disabled={uploading} />
+                <Slider
+                  min={1}
+                  max={MAX_CONCURRENCY}
+                  step={1}
+                  value={boundedConcurrency(concurrency)}
+                  onChange={setConcurrency}
+                  disabled={uploading}
+                />
               </div>
               {batch.length > 0 ? (
                 <div style={{ marginTop: 20 }}>
@@ -1244,7 +1260,7 @@ export function Shell() {
                       pagination={{ pageSize: 8, hideOnSinglePage: true }}
                       rowClassName="click-row"
                       onRow={(record) => ({ onClick: () => seekTo(record) })}
-                      locale={{ emptyText: running ? "识别进行中，命中会陆续出现" : "没有发现画面或口播中的价格、规格或品牌" }}
+                      locale={{ emptyText: running ? "识别进行中，命中会陆续出现" : "没有发现画面或口播中的价格、规格、品牌或夸大宣传" }}
                     />
                     <div className="toolbar">
                       <Button
@@ -1453,7 +1469,7 @@ export function Shell() {
             <InputNumber min={0.5} max={2} step={0.1} style={{ width: "100%" }} />
           </Form.Item>
           <Form.Item label="默认并发" name="concurrency" rules={[{ required: true }]}>
-            <InputNumber min={1} max={12} style={{ width: "100%" }} />
+            <InputNumber min={1} max={MAX_CONCURRENCY} style={{ width: "100%" }} />
           </Form.Item>
           <Form.Item label="画面长边像素" name="max_width" rules={[{ required: true }]}>
             <InputNumber min={480} max={1920} style={{ width: "100%" }} />
@@ -1530,13 +1546,13 @@ export function Shell() {
 
       <Drawer title="审核规则" open={rulesOpen} onClose={() => setRulesOpen(false)} width={560}>
         <Paragraph type="secondary">
-          规则只保存在本机。口播词按原话匹配，X 表示数字。画面词只写进画面提示，必须在这一帧里看得见。短词只要原话里连续出现就会命中。忽略词和原文完全一致，或原文只是忽略词里的一段时不报告。补充说明不能放宽「禁止推测」。
+          规则只保存在本机。口播词按原话匹配，X 表示数字。画面词只写进画面提示，必须在这一帧里看得见。短词只要原话里连续出现就会命中。忽略词和原文完全一致，或原文只是忽略词里的一段时不报告。补充说明不能放宽「禁止推测」。夸大宣传只看口播转写，原话里出现绝对化用语或疗效承诺才标，不判断真假。
         </Paragraph>
         <div style={{ marginBottom: 12 }}>
           <Text>启用类别</Text>
           <div>
             <Checkbox.Group
-              options={["价格", "规格", "品牌"]}
+              options={["价格", "规格", "品牌", "夸大宣传"]}
               value={ruleCategories}
               onChange={(values) => setRuleCategories(values.map(String))}
             />

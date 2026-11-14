@@ -9,14 +9,15 @@ import sys
 from pathlib import Path
 
 from app.paths import load_project_dotenv
+from app.schemas import MAX_CONCURRENCY
 from app.services.manager import AuthRequired, get_manager
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="检测一个本地视频里的价格、规格、品牌")
+    parser = argparse.ArgumentParser(description="检测一个本地视频里的价格、规格、品牌和口播夸大宣传")
     parser.add_argument("video", type=Path, help="视频文件路径")
     parser.add_argument("--fps", type=float, default=None, help="抽帧 FPS，0.5 到 2")
-    parser.add_argument("--concurrency", type=int, default=None, help="同时请求模型的数量")
+    parser.add_argument("--concurrency", type=int, default=None, help=f"同时请求模型的数量，1 到 {MAX_CONCURRENCY}")
     parser.add_argument("--mock", action="store_true", help="不调用模型，返回固定样例命中")
     parser.add_argument("--no-asr", action="store_true", help="关闭这一次的口播检测")
     parser.add_argument("--json", dest="json_path", type=Path, default=None, help="把结果写入这个 JSON 文件")
@@ -30,6 +31,9 @@ async def _scan(args: argparse.Namespace) -> int:
         return 2
     if args.fps is not None and not 0.5 <= args.fps <= 2:
         print("抽帧 FPS 需要在 0.5 到 2 之间", file=sys.stderr)
+        return 2
+    if args.concurrency is not None and not 1 <= args.concurrency <= MAX_CONCURRENCY:
+        print(f"并发数需要在 1 到 {MAX_CONCURRENCY} 之间", file=sys.stderr)
         return 2
     load_project_dotenv()
     if sys.platform == "win32":

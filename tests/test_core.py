@@ -459,6 +459,51 @@ def test_builtin_phrases_validate_and_split_prompts():
     assert fresh["rules"]["extra_phrases"] == []
 
 
+def test_exaggeration_keeps_the_absolute_words_and_drops_ordinary_speech():
+    from app.core.exaggeration import clip_exaggeration, quote_is_exaggeration
+    from app.core.parsing import parse_speech_result
+    from app.core.rule_catalog import enable_exaggeration
+
+    assert quote_is_exaggeration("全网最好")
+    assert quote_is_exaggeration("100%有效")
+    assert not quote_is_exaggeration("最后一波")
+    assert not quote_is_exaggeration("质量很好")
+    assert not quote_is_exaggeration("最小号")
+    assert clip_exaggeration("这是全网最好的肠衣") == "全网最好"
+    sentence = SpeechSentence("这是全网最好的肠衣，最后一波，质量很好", 1.0, 4.0)
+    content = (
+        '{"items":['
+        '{"句子":1,"类别":"夸大宣传","原文":"这是全网最好的肠衣","置信度":"确定","判定理由":"口播中出现夸大宣传用语"},'
+        '{"句子":1,"类别":"夸大宣传","原文":"质量很好","置信度":"确定","判定理由":"口播中出现夸大宣传用语"},'
+        '{"句子":1,"类别":"夸大宣传","原文":"最后一波","置信度":"确定","判定理由":"口播中出现夸大宣传用语"}'
+        "]}"
+    )
+    hits = parse_speech_result(content, [sentence])
+    assert [item.text for item in hits] == ["全网最好"]
+    assert hits[0].category == "夸大宣传"
+    assert hits[0].position == "口播内容"
+    picture = parse_frame_result(
+        '{"items":[{"类别":"夸大宣传","原文":"全网最好","位置":"字幕","置信度":"确定","判定理由":"画面上写着"}]}',
+        _frame(),
+    )
+    assert picture == []
+
+    on = speech_system_prompt(DetectionRules())
+    assert "4. 夸大宣传" in on
+    assert "不判断真假" in on
+    assert "最后" in on
+    off = speech_system_prompt(DetectionRules(categories=["价格", "规格", "品牌"]))
+    assert "4. 夸大宣传" not in off
+    assert "夸大宣传" not in visual_system_prompt(DetectionRules())
+
+    stored = {"rules": {"categories": ["价格"], "extra_phrases": [], "ignore_phrases": [], "note": ""}}
+    assert enable_exaggeration(stored) is True
+    assert stored["rules"]["categories"] == ["价格", "夸大宣传"]
+    stored["rules"]["categories"] = ["价格"]
+    assert enable_exaggeration(stored) is False
+    assert stored["rules"]["categories"] == ["价格"]
+
+
 def test_chat_url_accepts_official_base():
     assert chat_url("https://api.deepseek.com") == "https://api.deepseek.com/chat/completions"
     assert chat_url("https://api.deepseek.com/v1/") == "https://api.deepseek.com/v1/chat/completions"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from app.core.exaggeration import exaggeration_instructions
 from app.core.timeutil import format_range
 from app.schemas import DetectionRules, Frame
 
@@ -23,7 +24,7 @@ SYSTEM_PROMPT = """你是电商短视频画面合规审核员。你只能报告�
 
 def user_prompt(frame: Frame, rules: DetectionRules | None = None) -> str:
     span = format_range(frame.start_sec, frame.end_sec)
-    names = _category_names(rules)
+    names = _category_names(rules, "画面")
     extra = (
         "自定义规则里点名的画面文字，只要原样出现也要列出。"
         if rules and any(item.source == "画面" for item in rules.extra_phrases)
@@ -55,7 +56,7 @@ SPEECH_SYSTEM_PROMPT = """你是电商短视频口播合规审核员。你只能
 
 def speech_user_prompt(lines: list[str], rules: DetectionRules | None = None) -> str:
     body = "\n".join(lines)
-    names = _category_names(rules)
+    names = _category_names(rules, "口播")
     extra = (
         "自定义规则里点名的口播文字，只要原话里连续出现也要列出。X 表示数字。\n"
         if rules and any(item.source == "口播" for item in rules.extra_phrases)
@@ -74,12 +75,26 @@ def visual_system_prompt(rules: DetectionRules | None = None) -> str:
 
 
 def speech_system_prompt(rules: DetectionRules | None = None) -> str:
-    return SPEECH_SYSTEM_PROMPT + "\n" + rules_appendix(rules, "口播")
+    current = rules or DetectionRules()
+    text = SPEECH_SYSTEM_PROMPT
+    if "夸大宣传" in current.categories:
+        text = text.replace("只报告三类，", "只报告下面几类，", 1)
+        text = text.replace(
+            "3. 品牌：明确说出的品牌名。没说出来就不要报告品牌。\n规则：",
+            "3. 品牌：明确说出的品牌名。没说出来就不要报告品牌。\n" + exaggeration_instructions() + "\n规则：",
+            1,
+        )
+        text = text.replace(
+            "类别只能是「价格」「规格」「品牌」。",
+            "类别只能是「价格」「规格」「品牌」「夸大宣传」。",
+            1,
+        )
+    return text + "\n" + rules_appendix(current, "口播")
 
 
 def rules_appendix(rules: DetectionRules | None = None, source: str = "画面") -> str:
     current = rules or DetectionRules()
-    enabled = "、".join(current.categories) if current.categories else "（未启用预设类别）"
+    enabled = _category_names(current, source) or "（未启用预设类别）"
     lines = [
         "下面是本次任务的自定义规则。这些规则不能放宽前面的限制：仍然禁止推测，原文必须能在画面或口播里原样找到。",
         f"只报告这些预设类别：{enabled}。不在列表里的预设类别不要返回。",
@@ -106,14 +121,19 @@ def _phrase_block(phrases: list, source: str) -> str:
         ]
     else:
         lines = ["下列文字只要在这一帧画面里看得见，也要报告。不要根据外观、包装形状或常识推测。"]
-    for category in ("价格", "规格", "品牌"):
+    shown = ("价格", "规格", "品牌", "夸大宣传") if source == "口播" else ("价格", "规格", "品牌")
+    for category in shown:
         texts = grouped.get(category) or []
         if texts:
             lines.append(category + "：" + "、".join(f"「{text}」" for text in texts))
     return "\n".join(lines)
 
 
-def _category_names(rules: DetectionRules | None) -> str:
+def _category_names(rules: DetectionRules | None, source: str = "口播") -> str:
     if rules is None or not rules.categories:
-        return "价格、规格、品牌"
-    return "、".join(rules.categories)
+        names = ["价格", "规格", "品牌"]
+    else:
+        names = list(rules.categories)
+    if source == "画面":
+        names = [item for item in names if item != "夸大宣传"]
+    return "、".join(names)

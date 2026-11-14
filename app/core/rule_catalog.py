@@ -135,6 +135,23 @@ def default_extra_phrases() -> list[dict[str, str]]:
     return items
 
 
+def enable_exaggeration(merged: dict) -> bool:
+    """已有设置里补上口播「夸大宣传」，只补一次。用户后来关掉就保持关掉。"""
+    if merged.get("exaggeration_initialized"):
+        return False
+    rules = merged.get("rules")
+    if not isinstance(rules, dict):
+        return False
+    categories = list(rules.get("categories") or [])
+    if "夸大宣传" not in categories:
+        categories.append("夸大宣传")
+        rules = dict(rules)
+        rules["categories"] = categories
+        merged["rules"] = rules
+    merged["exaggeration_initialized"] = True
+    return True
+
+
 def apply_builtin_rules(merged: dict) -> bool:
     """额外词还是空、且没有初始化标记时，补上内置词。返回是否要写回数据库。"""
     rules = merged.get("rules")

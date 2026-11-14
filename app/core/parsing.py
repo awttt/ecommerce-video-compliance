@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 
+from app.core.exaggeration import clip_exaggeration
 from app.core.transcript import SpeechSentence
 from app.schemas import Frame, RawHit
 
@@ -17,6 +18,7 @@ _CATEGORY = {
     "specification": "规格",
     "品牌": "品牌",
     "brand": "品牌",
+    "夸大宣传": "夸大宣传",
 }
 _CONFIDENCE = {
     "确定": "确定",
@@ -148,6 +150,12 @@ def _speech_one(
     )
     if hit is None:
         return None
+    if hit.category == "夸大宣传":
+        clipped = clip_exaggeration(hit.text)
+        if not clipped:
+            return None
+        hit.text = locate_quote(sentence.text, clipped) or clipped
+        hit.start_sec, hit.end_sec = tighten_span(sentence, hit.text)
     hit.sentence_start = sentence.start_sec
     hit.sentence_end = sentence.end_sec
     hit.next_start = _next_sentence_start(sentence, corpus)
@@ -266,6 +274,8 @@ def _one(
         category = _CATEGORY.get(_pick(item, "类别", "category").strip(), "")
     confidence = _CONFIDENCE.get(_pick(item, "置信度", "confidence").strip(), "")
     text = text_override if text_override is not None else _clean_text(_pick(item, "原文", "text", "原文内容"))
+    if source == "画面" and category == "夸大宣传":
+        return None
     if not category or not confidence or not text:
         return None
     if text.casefold() in _EMPTY_TEXT or len(text) > _MAX_TEXT:

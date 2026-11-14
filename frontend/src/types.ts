@@ -175,4 +175,5 @@ export const CATEGORY_COLOR: Record<string, string> = {
   价格: "#c0604a",
   规格: "#b5872f",
   品牌: "#4b7fa6",
+  夸大宣传: "#7a4e78",
 };

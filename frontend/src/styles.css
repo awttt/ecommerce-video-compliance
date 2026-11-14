@@ -719,6 +719,11 @@ body {
   background: #ebf2f7;
 }
 
+.pill--hype {
+  color: #7a4e78;
+  background: #f6eef5;
+}
+
 .pill--speech {
   color: #6b5a8c;
   background: #f1edf8;

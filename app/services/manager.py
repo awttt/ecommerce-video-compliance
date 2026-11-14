@@ -52,6 +52,7 @@ from app.schemas import (
     RunConfig,
     SettingPublic,
     SettingUpdate,
+    clamp_concurrency,
 )
 
 log = logging.getLogger(__name__)
@@ -475,7 +476,7 @@ class JobManager:
             base_url=str(self._settings["base_url"]),
             model=str(self._settings["model"]),
             fps=float(self._settings["fps"]),
-            concurrency=int(self._settings["concurrency"]),
+            concurrency=clamp_concurrency(self._settings.get("concurrency")),
             max_width=int(self._settings["max_width"]),
             jpeg_q=int(self._settings["jpeg_q"]),
             detail=str(self._settings["detail"]),
@@ -611,7 +612,9 @@ class JobManager:
             raise FileNotFoundError("视频文件不存在")
         now = utcnow()
         chosen_fps = float(self._settings["fps"] if fps is None else fps)
-        chosen_concurrency = int(self._settings["concurrency"] if concurrency is None else concurrency)
+        chosen_concurrency = clamp_concurrency(
+            self._settings["concurrency"] if concurrency is None else concurrency
+        )
         use_mock = self._mock_enabled() if mock is None else mock
         use_asr = bool(self._settings.get("asr_enabled", True)) if asr is None else asr
         options = {
@@ -1049,7 +1052,7 @@ class JobManager:
             base_url = CHAT_BASE
         return RunConfig(
             fps=float(options.get("fps", state.fps)),
-            concurrency=int(options.get("concurrency", state.concurrency)),
+            concurrency=clamp_concurrency(options.get("concurrency", state.concurrency)),
             max_width=int(options.get("max_width", 1280)),
             jpeg_q=int(options.get("jpeg_q", 5)),
             api_key=key,

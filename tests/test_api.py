@@ -61,6 +61,27 @@ def test_health_and_settings_do_not_leak_the_key(monkeypatch):
         assert cleared.json()["api_key_source"] == "env"
 
 
+def test_concurrency_defaults_to_four_and_caps_at_eight(monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-env-example-9876")
+    with TestClient(create_app()) as client:
+        assert client.get("/api/settings").json()["concurrency"] == 4
+        kept = client.put("/api/settings", json={"concurrency": 8})
+        assert kept.status_code == 200
+        assert kept.json()["concurrency"] == 8
+        rejected = client.put("/api/settings", json={"concurrency": 9})
+        assert rejected.status_code == 422
+        assert "并发数需要在 1 到 8 之间" in rejected.text
+        assert client.get("/api/settings").json()["concurrency"] == 8
+        sign_in()
+        upload = client.post(
+            "/api/jobs",
+            files={"file": ("clip.mp4", b"not-a-video", "video/mp4")},
+            data={"concurrency": "9"},
+        )
+        assert upload.status_code == 400
+        assert upload.json()["detail"] == "并发数需要在 1 到 8 之间"
+
+
 def test_custom_rules_roundtrip_and_reject_an_empty_rule(monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-env-example-9876")
     with TestClient(create_app()) as client:

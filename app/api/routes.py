@@ -34,6 +34,7 @@ from app.schemas import (
     RechargeOrders,
     CutsUpdate,
     JobPublic,
+    MAX_CONCURRENCY,
     SettingPublic,
     SettingUpdate,
 )
@@ -301,8 +302,8 @@ async def _accept_upload(file: UploadFile, fps: float | None, concurrency: int |
         raise HTTPException(status_code=400, detail=f"不支持的视频格式：{filename}")
     if fps is not None and not 0.5 <= fps <= 2:
         raise HTTPException(status_code=400, detail="抽帧 FPS 需要在 0.5 到 2 之间")
-    if concurrency is not None and not 1 <= concurrency <= 12:
-        raise HTTPException(status_code=400, detail="并发数需要在 1 到 12 之间")
+    if concurrency is not None and not 1 <= concurrency <= MAX_CONCURRENCY:
+        raise HTTPException(status_code=400, detail=f"并发数需要在 1 到 {MAX_CONCURRENCY} 之间")
     job_id = uuid.uuid4().hex
     directory = video_dir(job_id)
     dest = directory / filename

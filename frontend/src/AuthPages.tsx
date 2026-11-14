@@ -65,7 +65,7 @@ function AuthFrame({
         <div className="auth-brand">
           <span className="auth-logo"><AuthLogo /></span>
           <strong>电商视频素材合规检测</strong>
-          <span>识别画面与口播中的价格、规格、品牌</span>
+          <span>识别画面与口播中的价格、规格、品牌，以及口播里的夸大宣传</span>
         </div>
         <div className="auth-title">{title}</div>
         {children}

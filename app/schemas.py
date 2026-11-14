@@ -65,12 +65,12 @@ class Finding(BaseModel):
         }
 
 
-_RULE_CATEGORIES = ("价格", "规格", "品牌")
+_RULE_CATEGORIES = ("价格", "规格", "品牌", "夸大宣传")
 
 
 class PhraseRule(BaseModel):
     text: str
-    category: Literal["价格", "规格", "品牌"]
+    category: Literal["价格", "规格", "品牌", "夸大宣传"]
     source: Literal["口播", "画面"] = "口播"
 
     @field_validator("text")
@@ -92,8 +92,8 @@ class PhraseRule(BaseModel):
 class DetectionRules(BaseModel):
     """用户自定义的审核规则。不能放宽「禁止推测、原文必须原样出现」。"""
 
-    categories: list[Literal["价格", "规格", "品牌"]] = Field(
-        default_factory=lambda: ["价格", "规格", "品牌"]
+    categories: list[Literal["价格", "规格", "品牌", "夸大宣传"]] = Field(
+        default_factory=lambda: ["价格", "规格", "品牌", "夸大宣传"]
     )
     extra_phrases: list[PhraseRule] = Field(default_factory=list, max_length=300)
     ignore_phrases: list[str] = Field(default_factory=list, max_length=30)
@@ -105,7 +105,7 @@ class DetectionRules(BaseModel):
         unique: list[str] = []
         for item in value:
             if item not in _RULE_CATEGORIES:
-                raise ValueError("类别只能是价格、规格、品牌")
+                raise ValueError("类别只能是价格、规格、品牌、夸大宣传")
             if item not in unique:
                 unique.append(item)
         return unique
@@ -152,9 +152,21 @@ class DetectionRules(BaseModel):
         return self
 
 
+MAX_CONCURRENCY = 8
+DEFAULT_CONCURRENCY = 4
+
+
+def clamp_concurrency(value: object, default: int = DEFAULT_CONCURRENCY) -> int:
+    try:
+        number = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    return min(MAX_CONCURRENCY, max(1, number))
+
+
 class RunConfig(BaseModel):
     fps: float = 1
-    concurrency: int = 4
+    concurrency: int = DEFAULT_CONCURRENCY
     max_width: int = 1280
     jpeg_q: int = 5
     api_key: str = ""
@@ -216,7 +228,7 @@ class SettingUpdate(BaseModel):
     api_key: str | None = None
     clear_api_key: bool = False
     fps: float | None = Field(default=None, ge=0.5, le=2)
-    concurrency: int | None = Field(default=None, ge=1, le=12)
+    concurrency: int | None = None
     max_width: int | None = Field(default=None, ge=480, le=1920)
     jpeg_q: int | None = Field(default=None, ge=2, le=15)
     detail: Literal["original", "high", "low"] | None = None
@@ -232,6 +244,15 @@ class SettingUpdate(BaseModel):
     tencent_region: str | None = None
     asr_engine: str | None = None
     rules: DetectionRules | None = None
+
+    @field_validator("concurrency")
+    @classmethod
+    def _concurrency(cls, value: int | None) -> int | None:
+        if value is None:
+            return None
+        if not 1 <= value <= MAX_CONCURRENCY:
+            raise ValueError(f"并发数需要在 1 到 {MAX_CONCURRENCY} 之间")
+        return value
 
     @field_validator("model")
     @classmethod
@@ -407,7 +428,7 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "base_url": "https://api.deepseek.com",
     "model": "glm-5.3-flash",
     "fps": 1.0,
-    "concurrency": 4,
+    "concurrency": DEFAULT_CONCURRENCY,
     "max_width": 1280,
     "jpeg_q": 5,
     "detail": "original",
@@ -421,7 +442,7 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "tencent_region": "ap-shanghai",
     "asr_engine": "16k_zh",
     "rules": {
-        "categories": ["价格", "规格", "品牌"],
+        "categories": ["价格", "规格", "品牌", "夸大宣传"],
         "extra_phrases": default_extra_phrases(),
         "ignore_phrases": [],
         "note": "",
