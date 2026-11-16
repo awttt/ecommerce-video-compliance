@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sys
 from logging.handlers import RotatingFileHandler
 
 from app.paths import logs_dir
@@ -27,6 +28,17 @@ class _RedactFilter(logging.Filter):
         if record.args:
             record.args = tuple(redact(arg) if isinstance(arg, str) else arg for arg in record.args)
         return True
+
+
+def ensure_stdio() -> None:
+    """打包成无控制台窗口时，sys.stdout 和 sys.stderr 是 None。"""
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    stream = open(logs_dir() / "startup.log", "a", encoding="utf-8", errors="replace")
+    if sys.stdout is None:
+        sys.stdout = stream
+    if sys.stderr is None:
+        sys.stderr = stream
 
 
 def setup_logging() -> None:

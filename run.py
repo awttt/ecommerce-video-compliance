@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import sys
 
+from app.logging_setup import ensure_stdio
+
+ensure_stdio()
+
 from app.desktop import main
 
 if __name__ == "__main__":

@@ -45,6 +45,36 @@ jobs:
           if (-not (Test-Path $ffprobe)) { throw "ffprobe.exe was not next to ffmpeg.exe" }
           Copy-Item $ffmpeg.FullName, $ffprobe -Destination "dist\VideoCompliance\"
 
+      - name: Start the package and check health
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:EVC_DATA_DIR = Join-Path $env:RUNNER_TEMP "evc-data"
+          $exe = Join-Path (Get-Location) "dist\VideoCompliance\VideoCompliance.exe"
+          $proc = Start-Process -FilePath $exe -ArgumentList @("--no-window", "--port", "8765") -PassThru -WorkingDirectory (Split-Path $exe)
+          try {
+            $ok = $false
+            for ($i = 0; $i -lt 40; $i++) {
+              if ($proc.HasExited) { throw "package exited early with code $($proc.ExitCode)" }
+              try {
+                $resp = Invoke-WebRequest -Uri "http://127.0.0.1:8765/api/health" -UseBasicParsing -TimeoutSec 2
+                if ($resp.StatusCode -eq 200 -and $resp.Content -match '"ok"\s*:\s*true' -and $resp.Content -match '"ffmpeg"\s*:\s*true') {
+                  Write-Host $resp.Content
+                  $ok = $true
+                  break
+                }
+              } catch {}
+              Start-Sleep -Seconds 1
+            }
+            if (-not $ok) { throw "health check did not succeed" }
+          } finally {
+            if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+            Get-ChildItem -Path $env:EVC_DATA_DIR -Recurse -Filter *.log -ErrorAction SilentlyContinue | ForEach-Object {
+              Write-Host "---- $($_.FullName)"
+              Get-Content $_.FullName -Tail 40
+            }
+          }
+
       - name: Upload package
         uses: actions/upload-artifact@v4
         with:

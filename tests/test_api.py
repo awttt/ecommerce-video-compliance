@@ -17,6 +17,26 @@ def sign_in() -> None:
     manager._settings["relay_access_token"] = "access-token-for-tests"
 
 
+def test_windowed_mode_replaces_missing_stdio(monkeypatch, tmp_path):
+    import sys
+
+    from uvicorn.logging import ColourizedFormatter
+
+    from app.logging_setup import ensure_stdio
+    from app.paths import reset_paths_cache
+
+    monkeypatch.setenv("EVC_DATA_DIR", str(tmp_path))
+    reset_paths_cache()
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    ensure_stdio()
+    assert sys.stdout is not None and sys.stderr is not None
+    assert sys.stdout.isatty() is False
+    ColourizedFormatter(use_colors=sys.stdout.isatty())
+    sys.stdout.write("started\n")
+    sys.stdout.flush()
+
+
 def test_health_and_settings_do_not_leak_the_key(monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-env-example-9876")
     with TestClient(create_app()) as client:

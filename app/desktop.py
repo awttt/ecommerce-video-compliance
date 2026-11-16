@@ -13,6 +13,7 @@ import webbrowser
 import uvicorn
 
 from app.factory import create_app
+from app.logging_setup import ensure_stdio
 from app.paths import load_project_dotenv
 
 
@@ -36,12 +37,15 @@ def _wait_until_up(host: str, port: int, server: uvicorn.Server, thread: threadi
 
 
 def serve(host: str, port: int) -> tuple[uvicorn.Server, threading.Thread]:
+    ensure_stdio()
+    interactive = sys.stdout is not None and sys.stdout.isatty()
     config = uvicorn.Config(
         create_app(),
         host=host,
         port=port,
         log_level="info",
         access_log=False,
+        use_colors=interactive,
     )
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, name="evc-api", daemon=True)
@@ -60,6 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    ensure_stdio()
     load_project_dotenv()
     _configure_loop()
     args = build_parser().parse_args(argv)
