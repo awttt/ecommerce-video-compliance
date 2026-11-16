@@ -1,0 +1,54 @@
+name: Windows package
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: windows-package
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: Build Windows package
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build the desktop app
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
+
+      - name: Put FFmpeg next to the executable
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
+          $dest = Join-Path $env:RUNNER_TEMP "ffmpeg"
+          Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $dest
+          $ffmpeg = Get-ChildItem -Path $dest -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          if (-not $ffmpeg) { throw "ffmpeg.exe was not in the downloaded archive" }
+          $ffprobe = Join-Path $ffmpeg.DirectoryName "ffprobe.exe"
+          if (-not (Test-Path $ffprobe)) { throw "ffprobe.exe was not next to ffmpeg.exe" }
+          Copy-Item $ffmpeg.FullName, $ffprobe -Destination "dist\VideoCompliance\"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: VideoCompliance-windows
+          path: dist/VideoCompliance
+          if-no-files-found: error
+          retention-days: 14
