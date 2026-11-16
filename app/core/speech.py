@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+from app.core.deepseek import SpeechJudgeError
 from app.core.ffmpeg import FFmpegError, extract_audio, probe_video, speech_codec
 from app.core.pipeline import JobCancelled, cleanup_tree, wait_while_paused
 from app.core.tencent_asr import MAX_AUDIO_BYTES, MockAsrClient, TencentAsrClient, chunk_spans
@@ -118,12 +119,15 @@ async def _recognize(
     await on_progress(
         SpeechProgress(stage="judging", message=f"正在判定口播文本（{len(sentences)} 句）", hits=[], ratio=0.85)
     )
-    hits = await judge.judge_speech(sentences)
+    try:
+        hits = await judge.judge_speech(sentences)
+        message = f"口播判定完成，命中 {len(hits)} 条"
+    except SpeechJudgeError as exc:
+        hits = list(exc.hits)
+        message = str(exc)
     if cancel.is_set():
         raise JobCancelled()
-    await on_progress(
-        SpeechProgress(stage="done", message=f"口播判定完成，命中 {len(hits)} 条", hits=hits, ratio=1)
-    )
+    await on_progress(SpeechProgress(stage="done", message=message, hits=hits, ratio=1))
     return hits
 
 

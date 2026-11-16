@@ -83,6 +83,18 @@ def test_speech_quote_must_occur_in_the_sentence_and_keeps_word_time():
     assert finding.time_range == "00:13-00:15"
 
 
+def test_speech_json_accepts_trailing_commas_and_unquoted_keys():
+    from app.core.parsing import extract_json
+
+    loose = (
+        '{"items":[{句子:1,"类别":"价格","原文":"九十九元","置信度":"确定","判定理由":"口播中明确提及价格",}]}'
+    )
+    hits = parse_speech_result(loose, [_sentence()])
+    assert [item.text for item in hits] == ["九十九元"]
+    with pytest.raises(ValueError, match="可解析"):
+        extract_json("Expecting property name")
+
+
 def test_full_sentence_quote_matches_requested_shape():
     content = json.dumps(
         {
@@ -367,6 +379,8 @@ async def test_logged_in_speech_fetches_credentials_while_extracting_audio(monke
     from app.services.manager import JobManager
 
     order: list[str] = []
+    monkeypatch.setenv("TENCENTCLOUD_SECRET_ID", "AKIDLOCALDEBUG")
+    monkeypatch.setenv("TENCENTCLOUD_SECRET_KEY", "local-debug-secret")
 
     async def fake_probe(_path):
         return VideoProbe(1.0, True, True, 16, 16)
@@ -514,14 +528,15 @@ async def test_credential_failure_skips_speech_without_calling_tencent(monkeypat
         await manager.shutdown()
 
 
-def test_legacy_engine_becomes_the_large_model():
+def test_asr_engine_choice_is_kept():
     from app.core.asr_engine import configured_engine
     from app.schemas import SettingUpdate
 
-    assert configured_engine("16k_zh") == "16k_zh_en_2.0"
-    assert configured_engine("") == "16k_zh_en_2.0"
+    assert configured_engine("16k_zh_en_2.0") == "16k_zh_en_2.0"
+    assert configured_engine("") == "16k_zh"
+    assert configured_engine("16k_zh") == "16k_zh"
     assert SettingUpdate(asr_engine="16k_zh_en_2.0").asr_engine == "16k_zh_en_2.0"
-    assert SettingUpdate(asr_engine="16k_zh").asr_engine == "16k_zh_en_2.0"
+    assert SettingUpdate(asr_engine="16k_zh").asr_engine == "16k_zh"
 
 
 def test_run_config_accepts_asr_fields():

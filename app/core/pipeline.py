@@ -12,14 +12,57 @@ from pathlib import Path
 
 from app.core.aggregate import aggregate
 from app.core.deepseek import Recognizer
-from app.core.ffmpeg import FFmpegError, extract_frames, extract_one_frame, probe_video
-from app.schemas import Finding, Frame, RawHit, RunConfig
+from app.core.ffmpeg import FFmpegError, extract_frames, extract_one_frame, frame_bounds, probe_video
+from app.schemas import MANUAL_REVIEW_CATEGORY, MANUAL_REVIEW_NOTE, Finding, Frame, RawHit, RunConfig, is_manual_review
 
 log = logging.getLogger(__name__)
 
 
 class JobCancelled(Exception):
     pass
+
+
+def manual_review_hit(start_sec: float, end_sec: float, reason: str) -> RawHit:
+    """识别失败的一帧。时间用这一帧的起止，备注留给导出后人工看。"""
+    compact = " ".join(str(reason or "").split())
+    if len(compact) > 120:
+        compact = compact[:120]
+    return RawHit(
+        start_sec=start_sec,
+        end_sec=end_sec,
+        category=MANUAL_REVIEW_CATEGORY,
+        text="",
+        position="",
+        confidence="",
+        reason=compact or "画面识别失败",
+        note=MANUAL_REVIEW_NOTE,
+        source="画面",
+    )
+
+
+def drop_retried_reviews(
+    findings: list[Finding],
+    indexes: list[int],
+    fps: float,
+    duration: float,
+) -> list[Finding]:
+    """重试某一帧时拿掉这一帧原来的解析失败行。重试再失败会重新记一条。"""
+    windows: list[tuple[float, float]] = []
+    for index in indexes:
+        bounds = frame_bounds(int(index), fps, duration)
+        if bounds is not None:
+            windows.append(bounds)
+    if not windows:
+        return list(findings)
+    kept: list[Finding] = []
+    for item in findings:
+        if is_manual_review(item.category) and any(
+            abs(item.start_sec - start) < 0.05 and abs(item.end_sec - end) < 0.05
+            for start, end in windows
+        ):
+            continue
+        kept.append(item)
+    return kept
 
 
 def recognition_max_edge(max_width: int, detail: str) -> int:
@@ -159,6 +202,7 @@ async def _run(
                         recognized += 1
                         failed_indexes.append(item.index)
                         last_error = str(exc)
+                        raw.append(manual_review_hit(item.start_sec, item.end_sec, str(exc)))
                     log.warning("frame %s failed: %s", item.index, exc)
                 else:
                     async with lock:
@@ -250,7 +294,7 @@ async def _run(
         raise JobCancelled()
     if extracted == 0:
         raise FFmpegError("没有抽出任何帧，请确认视频编码可以被 FFmpeg 读取")
-    if recognized and failed == recognized and not raw:
+    if recognized and failed == recognized:
         detail = last_error or "没有成功的识别结果"
         raise RuntimeError(f"全部分帧识别失败（{failed} 帧）。{detail}")
 
@@ -364,6 +408,7 @@ async def _run_selected(
                         recognized += 1
                         failed_indexes.append(item.index)
                         last_error = str(exc)
+                        raw.append(manual_review_hit(item.start_sec, item.end_sec, str(exc)))
                     log.warning("frame %s retry failed: %s", item.index, exc)
                 else:
                     async with lock:
@@ -415,11 +460,14 @@ async def _run_selected(
                 except FFmpegError as exc:
                     if cancel.is_set() or "已取消" in str(exc):
                         raise JobCancelled() from exc
+                    bounds = frame_bounds(index, config.fps, probe.duration)
                     async with lock:
                         failed += 1
                         recognized += 1
                         failed_indexes.append(index)
                         last_error = str(exc)
+                        if bounds is not None:
+                            raw.append(manual_review_hit(bounds[0], bounds[1], str(exc)))
                     await publish("recognizing", f"正在重试失败的帧，失败 {failed} 帧")
                     continue
                 while not cancel.is_set():

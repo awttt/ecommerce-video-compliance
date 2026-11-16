@@ -66,6 +66,15 @@ class Finding(BaseModel):
         }
 
 
+# 识别失败的帧仍占一行，方便导出后人工看。它不是价格、规格或品牌命中。
+MANUAL_REVIEW_CATEGORY = "解析失败"
+MANUAL_REVIEW_NOTE = "解析失败，需要人工审核"
+
+
+def is_manual_review(category: str) -> bool:
+    return category == MANUAL_REVIEW_CATEGORY
+
+
 _RULE_CATEGORIES = ("价格", "规格", "品牌", "夸大宣传")
 
 
@@ -175,13 +184,13 @@ class RunConfig(BaseModel):
     model: str = "glm-5.3-flash"
     detail: str = "original"
     thinking: bool = False
-    timeout_sec: float = 60
+    timeout_sec: float = 120
     mock: bool = False
     asr_enabled: bool = True
     tencent_secret_id: str = ""
     tencent_secret_key: str = ""
     tencent_region: str = "ap-shanghai"
-    asr_engine: str = "16k_zh_en_2.0"
+    asr_engine: str = "16k_zh"
     rules: DetectionRules = Field(default_factory=lambda: DetectionRules())
 
 
@@ -434,14 +443,14 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "jpeg_q": 5,
     "detail": "original",
     "thinking": False,
-    "timeout_sec": 60.0,
+    "timeout_sec": 120.0,
     "mock_mode": False,
     "mcp_enabled": False,
     "asr_enabled": True,
     "tencent_secret_id": "",
     "tencent_secret_key": "",
     "tencent_region": "ap-shanghai",
-    "asr_engine": "16k_zh_en_2.0",
+    "asr_engine": "16k_zh",
     "rules": {
         "categories": ["价格", "规格", "品牌", "夸大宣传"],
         "extra_phrases": default_extra_phrases(),

@@ -27,6 +27,24 @@ log = logging.getLogger(__name__)
 
 _RETRY_STATUS = {408, 409, 429, 500, 502, 503, 504}
 _MAX_TOKENS = {"low": 2048, "high": 4096}
+_JSON_FIX = "上一次不是合法 JSON。请只输出一个 JSON 对象，键名和文字都用英文双引号，} 和 ] 前面不要加逗号。"
+# 口播判定带整份词表和思考，比单帧画面更容易超过「单帧超时」。
+_SPEECH_TIMEOUT_FLOOR = 120.0
+_SPEECH_TIMEOUT_CAP = 180.0
+_SPEECH_ATTEMPTS = 2
+
+
+class SpeechJudgeError(RuntimeError):
+    """模型没判完，但词表已经在转写里对上了。hits 要保留。"""
+
+    def __init__(self, message: str, hits: list[RawHit]):
+        super().__init__(message)
+        self.hits = hits
+
+
+def speech_request_timeout(timeout_sec: float) -> httpx.Timeout:
+    seconds = min(_SPEECH_TIMEOUT_CAP, max(float(timeout_sec), _SPEECH_TIMEOUT_FLOOR))
+    return httpx.Timeout(seconds, connect=10.0)
 
 
 class Recognizer(Protocol):
@@ -100,16 +118,23 @@ class DeepSeekRecognizer:
             raise RuntimeError("识别已取消")
         encoded = await asyncio.to_thread(_encode_image, frame.path)
         body = self._body(frame, encoded)
+        content = await self._complete_message(client, body)
         try:
-            content = await self._complete(client, body)
-        except APIStatusError as exc:
-            if exc.status == 400 and "response_format" in exc.detail:
-                body.pop("response_format", None)
-                content = await self._complete(client, body)
-            else:
+            hits = parse_frame_result(content, frame)
+        except ValueError:
+            log.warning("frame %s returned unparsed JSON, retrying", frame.index)
+            retry = self._body(frame, encoded)
+            if "response_format" not in body:
+                retry.pop("response_format", None)
+            retry["messages"].append({"role": "user", "content": _JSON_FIX})
+            content = await self._complete_message(client, retry)
+            try:
+                hits = parse_frame_result(content, frame)
+            except ValueError:
+                log.warning("frame %s unparsed response: %s", frame.index, redact(content)[:300])
                 raise
         log.debug("frame %s response %s", frame.index, redact(content)[:300])
-        return apply_rules(parse_frame_result(content, frame), self.config.rules)
+        return apply_rules(hits, self.config.rules)
 
     async def judge_speech(self, sentences: list[SpeechSentence]) -> list[RawHit]:
         client = self._client
@@ -120,25 +145,39 @@ class DeepSeekRecognizer:
         for batch in _speech_batches(sentences):
             body = self._speech_body(batch)
             try:
-                content = await self._complete(client, body)
-            except APIStatusError as exc:
-                if exc.status == 400 and "response_format" in exc.detail:
-                    body.pop("response_format", None)
-                    try:
-                        content = await self._complete(client, body)
-                    except Exception as retry_exc:
-                        errors.append(str(retry_exc))
-                        continue
-                else:
-                    errors.append(str(exc))
-                    continue
+                content = await self._complete_message(client, body)
+                try:
+                    batch_hits = parse_speech_result(content, batch, corpus=sentences)
+                except ValueError:
+                    retry = self._speech_body(batch)
+                    if "response_format" not in body:
+                        retry.pop("response_format", None)
+                    retry["messages"].append({"role": "user", "content": _JSON_FIX})
+                    content = await self._complete_message(client, retry)
+                    batch_hits = parse_speech_result(content, batch, corpus=sentences)
             except Exception as exc:
-                errors.append(str(exc))
+                message = str(exc)
+                if "JSON" in message or "json" in message or "Expecting" in message:
+                    message = "口播判定结果不是合法 JSON"
+                errors.append(message)
                 continue
-            hits.extend(parse_speech_result(content, batch, corpus=sentences))
+            hits.extend(batch_hits)
         if errors and not hits:
+            local = apply_rules([], self.config.rules, sentences=sentences)
+            if local:
+                raise SpeechJudgeError(f"{errors[0]}，已按词表保留 {len(local)} 条", local)
             raise RuntimeError(errors[0])
         return apply_rules(hits, self.config.rules, sentences=sentences)
+
+    async def _complete_message(self, client: httpx.AsyncClient, body: dict) -> str:
+        timeout = speech_request_timeout(self.config.timeout_sec)
+        try:
+            return await self._complete(client, body, timeout=timeout, attempts=_SPEECH_ATTEMPTS)
+        except APIStatusError as exc:
+            if exc.status == 400 and "response_format" in exc.detail:
+                body.pop("response_format", None)
+                return await self._complete(client, body, timeout=timeout, attempts=_SPEECH_ATTEMPTS)
+            raise
 
     def _speech_body(self, sentences: list[SpeechSentence]) -> dict:
         lines = [
@@ -177,14 +216,22 @@ class DeepSeekRecognizer:
         body.update(model_controls(self.config.thinking))
         return body
 
-    async def _complete(self, client: httpx.AsyncClient, body: dict) -> str:
+    async def _complete(
+        self,
+        client: httpx.AsyncClient,
+        body: dict,
+        *,
+        timeout: httpx.Timeout | None = None,
+        attempts: int = 3,
+    ) -> str:
         last_error = "模型请求失败"
-        for attempt in range(3):
+        for attempt in range(attempts):
             try:
                 response = await client.post(
                     chat_url(self.config.base_url),
                     headers={"Authorization": f"Bearer {self.config.api_key}"},
                     json=body,
+                    timeout=timeout,
                 )
             except httpx.TimeoutException as exc:
                 last_error = "模型请求超时"

@@ -104,8 +104,12 @@ async def test_partial_failure_records_the_frame_index(tmp_path: Path):
         seen.append(progress)
 
     findings = await run_pipeline(video, work, _config(fps=1, concurrency=1), OneFail(), asyncio.Event(), on_progress)
-    assert findings
-    assert findings[0].text == "¥199"
+    assert [item.category for item in findings] == ["解析失败", "价格"]
+    assert findings[0].note == "解析失败，需要人工审核"
+    assert findings[0].start_sec == 0
+    assert findings[0].end_sec == 1
+    assert "503" in findings[0].reason
+    assert findings[1].text == "¥199"
     assert seen[-1].failed_frames == 1
     assert seen[-1].failed_indexes == [1]
     assert "503" in seen[-1].last_error
@@ -151,7 +155,11 @@ async def test_selected_retry_reports_a_frame_that_fails_again(tmp_path: Path):
         None,
         [1],
     )
-    assert findings == []
+    assert len(findings) == 1
+    assert findings[0].category == "解析失败"
+    assert findings[0].note == "解析失败，需要人工审核"
+    assert findings[0].start_sec == 0
+    assert "boom" in findings[0].reason
     assert failed == [1]
     assert "boom" in error
     assert not work.exists()

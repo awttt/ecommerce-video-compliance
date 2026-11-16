@@ -99,6 +99,11 @@ const MODEL_OPTIONS = [
   { value: "deepseek-flash", label: "DeepSeek 4.1 Flash" },
 ];
 
+const ASR_ENGINE_OPTIONS = [
+  { value: "16k_zh", label: "通用引擎 16k_zh（免费资源包）" },
+  { value: "16k_zh_en_2.0", label: "大模型 2.0（16k_zh_en_2.0）" },
+];
+
 const CATEGORY_PILL: Record<string, string> = {
   价格: "pill--price",
   规格: "pill--spec",
@@ -961,7 +966,7 @@ export function Shell() {
                   type="info"
                   showIcon
                   style={{ marginBottom: 12 }}
-                  message="账号已登录，还没有拿到画面识别密钥。请点右上角的刷新余额。"
+                  message="当前账号还不能识别画面，请联系管理员开通。"
                 />
               ) : null}
               <div className="slider-row" style={{ marginBottom: 12 }}>
@@ -1026,21 +1031,13 @@ export function Shell() {
               </Button>
               <div className="queue-actions">
                 <Button
-                  icon={<PauseOutlined />}
-                  disabled={queuePaused || queueAction !== null || !hasActiveWork}
-                  loading={queueAction === "pause"}
-                  onClick={() => void changeQueue(true)}
-                >
-                  暂停
-                </Button>
-                <Button
-                  icon={<CaretRightOutlined />}
+                  icon={queuePaused ? <CaretRightOutlined /> : <PauseOutlined />}
                   type={queuePaused ? "primary" : "default"}
-                  disabled={!queuePaused || queueAction !== null}
-                  loading={queueAction === "resume"}
-                  onClick={() => void changeQueue(false)}
+                  disabled={queueAction !== null || (!queuePaused && !hasActiveWork)}
+                  loading={queueAction !== null}
+                  onClick={() => void changeQueue(!queuePaused)}
                 >
-                  开始
+                  {queuePaused ? "开始" : "暂停"}
                 </Button>
               </div>
               <Popconfirm
@@ -1523,8 +1520,8 @@ export function Shell() {
           <Form.Item label="腾讯云地域" name="tencent_region" extra="登录后的口播使用中转站返回的地域。这里只在本机用环境变量调试时生效。" rules={[{ required: true }]}>
             <Input />
           </Form.Item>
-          <Form.Item label="录音识别引擎" name="asr_engine" rules={[{ required: true }]} extra="录音文件识别大模型 2.0 用 16k_zh_en_2.0，对应这个套餐。">
-            <Input />
+          <Form.Item label="录音识别引擎" name="asr_engine" rules={[{ required: true }]} extra="免费的 10 小时包只抵扣通用引擎。大模型 2.0 需要对应的资源包。">
+            <Select options={ASR_ENGINE_OPTIONS} />
           </Form.Item>
           <Space wrap>
             <Button type="primary" htmlType="submit">保存</Button>

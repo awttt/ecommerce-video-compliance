@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 
 from app.core.ffmpeg import FFmpegError, VideoProbe, decode_bytes, resolve_bin
-from app.schemas import Finding
+from app.schemas import Finding, is_manual_review
 
 log = logging.getLogger(__name__)
 
@@ -95,6 +95,11 @@ def normalize_cuts(
     return merged, keeps
 
 
+def cuttable_findings(findings: list[Finding]) -> list[Finding]:
+    """解析失败的托底行只给人工看，不参与删除段。"""
+    return [item for item in findings if not is_manual_review(item.category)]
+
+
 def plan_cuts(
     duration: float,
     findings: list[Finding],
@@ -133,11 +138,12 @@ def _planned_cuts(
 ) -> list[tuple[float, float]]:
     if duration <= 0:
         raise EditorError("视频时长无效，无法剪辑")
-    if not findings:
+    usable = cuttable_findings(findings)
+    if not usable:
         raise EditorError("没有命中区间，无需剪辑")
     pauses = sorted(silences or [])
     cuts: list[tuple[float, float]] = []
-    for item in findings:
+    for item in usable:
         window = _speech_window(item, padding, duration, pauses) if item.source == "口播" else _picture_window(item, padding, duration)
         if window is not None:
             cuts.append(window)

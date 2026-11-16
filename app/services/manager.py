@@ -20,6 +20,7 @@ from app.core.deepseek import build_recognizer
 from app.core.relay import (
     CHAT_BASE,
     KEY_NAME,
+    KEY_NOT_READY,
     RelayClient,
     RelayError,
     configured_model,
@@ -30,9 +31,9 @@ from app.core.relay import (
     usable_api_key,
 )
 from app.logging_setup import redact
-from app.core.editor import detect_silences, draft_cuts, normalize_cuts, render_clean_video
+from app.core.editor import cuttable_findings, detect_silences, draft_cuts, normalize_cuts, render_clean_video
 from app.core.ffmpeg import FFmpegError, extract_strip, probe_video
-from app.core.pipeline import JobCancelled, Progress, run_pipeline, run_selected_frames
+from app.core.pipeline import JobCancelled, Progress, drop_retried_reviews, run_pipeline, run_selected_frames
 from app.core.speech import NoAudio, SpeechProgress, run_speech
 from app.core.asr_engine import configured_engine
 from app.core.tencent_asr import (
@@ -899,7 +900,12 @@ class JobManager:
                     state.speech_ratio = 0.0
                     state.asr_error = None
                 if selective:
-                    kept_visual = [item for item in state.findings if item.source != "口播"]
+                    kept_visual = drop_retried_reviews(
+                        [item for item in state.findings if item.source != "口播"],
+                        selective,
+                        state.fps,
+                        state.duration_sec or 0,
+                    )
                     recognized_base = max(0, state.frames_recognized - len(selective))
                     state.frames_recognized = recognized_base
                     state.visual_findings = list(kept_visual)
@@ -1081,7 +1087,7 @@ class JobManager:
             model=model,
             detail=str(options.get("detail") or "original"),
             thinking=bool(options.get("thinking", False)),
-            timeout_sec=float(options.get("timeout_sec", 60)),
+            timeout_sec=float(options.get("timeout_sec", 120)),
             mock=bool(options.get("mock", False)),
             asr_enabled=bool(options.get("asr_enabled", True)),
             tencent_secret_id=secret_id,
@@ -1101,7 +1107,7 @@ class JobManager:
             return self._rules()
 
     def _env_tencent(self) -> tuple[str, str, str] | None:
-        """本机调试用的长期密钥。正式安装不设置这两项，登录后改向中转站要临时凭证。"""
+        """未登录时的调试密钥。已登录则改向中转站要临时凭证，不读这里。"""
         secret_id = os.environ.get("TENCENTCLOUD_SECRET_ID", "").strip()
         secret_key = os.environ.get("TENCENTCLOUD_SECRET_KEY", "").strip()
         if not secret_id or not secret_key:
@@ -1117,6 +1123,16 @@ class JobManager:
         if config.mock:
             asr = MockAsrClient()
             prepare = None
+        elif self._relay_logged_in():
+            asr = TencentAsrClient(
+                "",
+                "",
+                config.tencent_region,
+                config.asr_engine,
+                timeout=max(30.0, config.timeout_sec),
+                credential_provider=lambda: self._load_asr_credentials(state.cancel_event),
+            )
+            prepare = lambda client=asr: self._apply_relay_credentials(client, state.cancel_event)
         else:
             env = self._env_tencent()
             if env is not None:
@@ -1129,16 +1145,6 @@ class JobManager:
                     timeout=max(30.0, config.timeout_sec),
                 )
                 prepare = None
-            elif self._relay_logged_in():
-                asr = TencentAsrClient(
-                    "",
-                    "",
-                    config.tencent_region,
-                    config.asr_engine,
-                    timeout=max(30.0, config.timeout_sec),
-                    credential_provider=lambda: self._load_asr_credentials(state.cancel_event),
-                )
-                prepare = lambda client=asr: self._apply_relay_credentials(client, state.cancel_event)
             else:
                 message = "未登录，已跳过口播检测"
 
@@ -1444,12 +1450,13 @@ class JobManager:
 
     async def plan_edit(self, job_id: str, padding_sec: float) -> JobState:
         state, source = await self._editable(job_id)
-        if not state.findings:
+        usable = cuttable_findings(state.findings)
+        if not usable:
             raise RuntimeError("没有命中区间，无需剪辑")
         probe = await probe_video(source)
         duration = probe.duration or state.duration_sec or 0
         silences = await detect_silences(source)
-        cuts, keeps = draft_cuts(duration, state.findings, padding_sec, silences)
+        cuts, keeps = draft_cuts(duration, usable, padding_sec, silences)
         await self.ensure_strip(job_id, source)
         state.edit_plan = _plan_payload(padding_sec, cuts, rendered=False)
         if keeps:
@@ -1729,8 +1736,9 @@ class JobManager:
         try:
             await self._ensure_relay_key()
         except RelayError as exc:
+            log.warning("picture key was not issued: %s", exc)
             await self.db.save_settings(self._settings)
-            return f"已登录，但还没有拿到画面识别密钥：{exc}"
+            return f"已登录。{exc}"
         try:
             stats = await self._call_authed(self.relay.usage)
             self._apply_usage(stats if isinstance(stats, dict) else {})
@@ -1774,7 +1782,8 @@ class JobManager:
             if exc.status == 401 or fallback is None:
                 if exc.status == 401:
                     raise
-                raise RelayError(groups_lookup_failed_message(name), 502) from None
+                log.warning("relay group lookup failed: %s", groups_lookup_failed_message(name))
+                raise RelayError("暂时无法确认账号权限，请稍后再试。", 502) from None
             return fallback
         if not isinstance(groups, list):
             groups = []
@@ -1819,10 +1828,8 @@ class JobManager:
                     created["group_id"] = updated.get("group_id")
             if not _same_id(created.get("group_id"), group_id):
                 self._forget_local_relay_key()
-                raise RelayError(
-                    "新建的密钥没有绑到指定分组。已有密钥未改动、未删除。请确认该账号已被分配此专属分组。",
-                    502,
-                )
+                log.warning("new relay key was not bound to group %s; existing keys were left unchanged", group_id)
+                raise RelayError(KEY_NOT_READY, 502)
             self._settings["relay_api_key"] = secret.strip()
             if created_id is not None:
                 self._settings["relay_api_key_id"] = created_id

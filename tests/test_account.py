@@ -11,6 +11,7 @@ from app.core.relay import (
     RelayClient,
     RelayError,
     explain_error,
+    group_unavailable_message,
     resolve_relay_group_id,
     usable_api_key,
 )
@@ -372,7 +373,7 @@ def test_explain_error_uses_chinese_and_hides_secrets():
     assert usable_api_key(RELAY_KEY) is True
     denied = explain_error(403, {"reason": "GROUP_NOT_ALLOWED", "message": "user is not allowed to bind this group"})
     assert denied.status == 403
-    assert "专属分组" in str(denied)
+    assert str(denied) == "当前账号还不能识别画面，请联系管理员开通。"
     assert "sk-" not in str(denied)
     token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signaturevalue"
     assert token not in redact(f"header {token}")
@@ -486,8 +487,10 @@ def test_resolve_relay_group_id_prefers_the_exclusive_name():
         )
     except RelayError as exc:
         assert exc.status == 403
-        assert "专属分组" in str(exc)
-        assert "99" in str(exc)
+        assert str(exc) == "当前账号还不能识别画面，请联系管理员开通。"
+        detail = group_unavailable_message(DEFAULT_RELAY_GROUP_NAME, 99)
+        assert "不会改用其他分组" in detail
+        assert "99" in detail
     else:
         raise AssertionError("missing group should fail")
     try:
@@ -573,8 +576,8 @@ def test_group_not_allowed_on_create_keeps_existing_keys(monkeypatch):
         body = login(client)
         assert body["settings"]["account_logged_in"] is True
         assert body["settings"]["has_api_key"] is False
-        assert "专属分组" in body["message"]
-        assert "不会改用其他分组" in body["message"]
+        assert body["message"] == "已登录。当前账号还不能识别画面，请联系管理员开通。"
+        assert "不会改用其他分组" not in body["message"]
         assert upstream.creates == 1
         assert upstream.create_body == {"name": "电商视频合规", "group_id": TARGET_GROUP_ID}
         assert upstream.group_updates == []
@@ -597,10 +600,9 @@ def test_missing_exclusive_group_is_a_clear_error_and_creates_nothing(monkeypatc
         assert body["settings"]["account_logged_in"] is True
         assert body["settings"]["has_api_key"] is False
         assert body["settings"]["api_key_source"] == "none"
-        assert DEFAULT_RELAY_GROUP_NAME in body["message"]
-        assert "专属分组" in body["message"]
-        assert "分配" in body["message"]
-        assert "不会改用其他分组" in body["message"]
+        assert body["message"] == "已登录。当前账号还不能识别画面，请联系管理员开通。"
+        assert DEFAULT_RELAY_GROUP_NAME not in body["message"]
+        assert "不会改用其他分组" not in body["message"]
         assert upstream.creates == 0
         assert upstream.group_updates == []
         assert upstream.deletes == 0
@@ -640,8 +642,8 @@ def test_configured_group_id_that_is_not_available_does_not_create_a_key(monkeyp
         attach(upstream)
         body = login(client)
         assert body["settings"]["has_api_key"] is False
-        assert "99" in body["message"]
-        assert "专属分组" in body["message"]
+        assert body["message"] == "已登录。当前账号还不能识别画面，请联系管理员开通。"
+        assert "99" not in body["message"]
         assert upstream.creates == 0
         assert upstream.deletes == 0
 
@@ -664,8 +666,8 @@ def test_group_lookup_failure_without_a_fallback_does_not_create_a_key():
         attach(upstream)
         body = login(client)
         assert body["settings"]["has_api_key"] is False
-        assert "无法查询" in body["message"]
-        assert DEFAULT_RELAY_GROUP_NAME in body["message"]
+        assert body["message"] == "已登录。暂时无法确认账号权限，请稍后再试。"
+        assert DEFAULT_RELAY_GROUP_NAME not in body["message"]
         assert upstream.creates == 0
         assert upstream.deletes == 0
 

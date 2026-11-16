@@ -1,11 +1,9 @@
-"""录音文件识别引擎。大模型 2.0 才走预付费套餐，通用引擎 16k_zh 不走。"""
+"""录音文件识别引擎。免费资源包只抵扣通用引擎 16k_zh，大模型 2.0 另计。"""
 
-ASR_ENGINE = "16k_zh_en_2.0"
+ASR_ENGINE = "16k_zh"
 
 
 def configured_engine(value: object) -> str:
-    """空值和旧的通用引擎都改成大模型 2.0。"""
+    """空值用免费的通用引擎。已经选过的引擎保持原样。"""
     text = str(value or "").strip()
-    if text in {"", "16k_zh"}:
-        return ASR_ENGINE
-    return text
+    return text or ASR_ENGINE

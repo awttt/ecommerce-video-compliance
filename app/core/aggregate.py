@@ -6,7 +6,7 @@ import re
 from collections import Counter
 
 from app.core.timeutil import format_range
-from app.schemas import Finding, RawHit
+from app.schemas import MANUAL_REVIEW_NOTE, Finding, RawHit, is_manual_review
 
 # 口播只吸收时间戳的浮点误差。
 MERGE_EPSILON = 0.08
@@ -37,6 +37,8 @@ def price_group_key(text: str) -> str:
 
 def _group_key(hit: RawHit) -> tuple[str, str, str]:
     source = hit.source or "画面"
+    if is_manual_review(hit.category):
+        return hit.category, f"{hit.start_sec:.3f}-{hit.end_sec:.3f}", source
     if source == "画面" and hit.category == "价格":
         text_key = price_group_key(hit.text)
     else:
@@ -113,6 +115,22 @@ def _choose_text(items: list[RawHit]) -> str:
 
 
 def _merge(items: list[RawHit]) -> Finding:
+    if is_manual_review(items[0].category):
+        item = items[0]
+        start = item.start_sec
+        end = item.end_sec
+        return Finding(
+            time_range=format_range(start, end),
+            category=item.category,
+            source=item.source or "画面",
+            text=item.text,
+            position=item.position,
+            confidence=item.confidence,
+            reason=item.reason,
+            note=item.note or MANUAL_REVIEW_NOTE,
+            start_sec=round(start, 3),
+            end_sec=round(end, 3),
+        )
     start = min(item.start_sec for item in items)
     end = max(item.end_sec for item in items)
     confidence = "确定" if all(item.confidence == "确定" for item in items) else "疑似"

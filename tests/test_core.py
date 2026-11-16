@@ -1,18 +1,27 @@
 import asyncio
+import json
+
+import httpx
+import pytest
 
 from app.core.aggregate import aggregate
-from app.core.deepseek import chat_url
-import pytest
+from app.core.deepseek import (
+    DeepSeekRecognizer,
+    SpeechJudgeError,
+    _JSON_FIX,
+    chat_url,
+    speech_request_timeout,
+)
 
 from app.core.editor import EditorError, _parse_silences, draft_cuts, normalize_cuts, plan_cuts
 from app.core.parsing import parse_frame_result
-from app.core.pipeline import wait_while_paused
+from app.core.pipeline import drop_retried_reviews, manual_review_hit, wait_while_paused
 from app.core.prompts import SPEECH_SYSTEM_PROMPT, SYSTEM_PROMPT, speech_system_prompt, visual_system_prompt
 from app.core.rules import apply_rules
 from app.core.timeutil import format_clock, format_range
 from app.core.transcript import SpeechSentence
 from app.paths import safe_filename
-from app.schemas import DetectionRules, Finding, Frame, PhraseRule, RawHit
+from app.schemas import MANUAL_REVIEW_NOTE, DetectionRules, Finding, Frame, PhraseRule, RawHit, RunConfig
 
 
 def _frame() -> Frame:
@@ -244,6 +253,39 @@ def _speech(start: float, end: float, sentence_end: float | None = None, next_st
         sentence_end=sentence_end if sentence_end is not None else end,
         next_start=next_start,
     )
+
+
+def test_failed_frames_stay_in_the_export_and_out_of_the_cut():
+    hits = [
+        manual_review_hit(0, 1, "模型没有返回可解析的 JSON"),
+        manual_review_hit(1, 2, "模型请求超时"),
+        RawHit(
+            start_sec=4,
+            end_sec=5,
+            category="价格",
+            text="¥199",
+            position="右下角",
+            confidence="确定",
+            reason="画面写着价格",
+        ),
+    ]
+    findings = aggregate(hits)
+    assert [item.category for item in findings] == ["解析失败", "解析失败", "价格"]
+    assert findings[0].note == MANUAL_REVIEW_NOTE
+    assert findings[0].confidence == ""
+    assert findings[0].start_sec == 0
+    assert findings[0].end_sec == 1
+    exported = findings[0].export_dict()
+    assert exported["备注"] == "解析失败，需要人工审核"
+    assert exported["时间点"]
+    assert "JSON" in exported["判定理由"]
+    assert findings[1].start_sec == 1
+    cuts, _keeps = plan_cuts(10, findings, padding=0.5)
+    assert cuts == [(3.5, 5.5)]
+    with pytest.raises(EditorError, match="没有命中区间"):
+        plan_cuts(10, findings[:2], padding=0)
+    kept = drop_retried_reviews(findings[:2], [1], fps=1, duration=10)
+    assert [(item.start_sec, item.end_sec) for item in kept] == [(1.0, 2.0)]
 
 
 def test_plan_cuts_removes_hit_range_with_padding():
@@ -502,6 +544,101 @@ def test_exaggeration_keeps_the_absolute_words_and_drops_ordinary_speech():
     stored["rules"]["categories"] = ["价格"]
     assert enable_exaggeration(stored) is False
     assert stored["rules"]["categories"] == ["价格"]
+
+
+def _chat_response(content: str, status: int = 200) -> httpx.Response:
+    if status != 200:
+        return httpx.Response(status, json={"error": {"message": content}})
+    return httpx.Response(status, json={"choices": [{"message": {"content": content}}]})
+
+
+def test_speech_request_waits_longer_than_a_frame():
+    assert speech_request_timeout(60).read == 120
+    assert speech_request_timeout(150).read == 150
+    assert speech_request_timeout(240).read == 180
+
+
+async def test_speech_timeout_keeps_phrase_hits():
+    rules = DetectionRules(
+        categories=["价格", "夸大宣传"],
+        extra_phrases=[PhraseRule(text="个位数", category="价格", source="口播")],
+    )
+    recognizer = DeepSeekRecognizer(RunConfig(api_key="sk-test", timeout_sec=60, rules=rules))
+    recognizer._client = object()
+    seen: dict = {}
+
+    async def fail(client, body, *, timeout=None, attempts=3):
+        seen["timeout"] = timeout
+        seen["attempts"] = attempts
+        raise RuntimeError("模型请求超时")
+
+    recognizer._complete = fail
+    sentences = [SpeechSentence("个位数到手赶紧去抢吧", 18.0, 20.0)]
+    with pytest.raises(SpeechJudgeError) as caught:
+        await recognizer.judge_speech(sentences)
+    assert str(caught.value) == "模型请求超时，已按词表保留 1 条"
+    assert [(item.category, item.text, item.source) for item in caught.value.hits] == [
+        ("价格", "个位数", "口播")
+    ]
+    assert seen["attempts"] == 2
+    assert seen["timeout"].read == 120
+
+    recognizer.config = RunConfig(api_key="sk-test", timeout_sec=60, rules=DetectionRules(categories=["价格"]))
+    with pytest.raises(RuntimeError, match="^模型请求超时$"):
+        await recognizer.judge_speech(sentences)
+
+
+async def test_frame_retries_once_when_the_model_returns_unparsed_json(tmp_path):
+    image = tmp_path / "frame.jpg"
+    image.write_bytes(b"\xff\xd8frame")
+    calls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append(body)
+        if len(calls) == 1:
+            return _chat_response("response_format is unsupported", status=400)
+        if len(calls) == 2:
+            return _chat_response("这一帧我用文字说明，不是 JSON")
+        return _chat_response(
+            '{"items":[{"类别":"价格","原文":"¥9.9","位置":"左下角","置信度":"确定","判定理由":"画面写着价格","备注":""}]}'
+        )
+
+    recognizer = DeepSeekRecognizer(RunConfig(api_key="sk-test", thinking=False, base_url="https://token4u.cc/v1"))
+    recognizer._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        hits = await recognizer.recognize(Frame(index=57, start_sec=56, end_sec=57, path=str(image)))
+    finally:
+        await recognizer.aclose()
+    assert [item.text for item in hits] == ["¥9.9"]
+    assert len(calls) == 3
+    assert "response_format" in calls[0]
+    assert "response_format" not in calls[1]
+    assert "response_format" not in calls[2]
+    assert calls[2]["messages"][-1] == {"role": "user", "content": _JSON_FIX}
+    picture = calls[2]["messages"][1]["content"]
+    assert picture[1]["type"] == "image_url"
+    assert picture[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+
+async def test_frame_reports_the_parse_error_when_the_retry_is_also_invalid(tmp_path):
+    image = tmp_path / "frame.jpg"
+    image.write_bytes(b"\xff\xd8frame")
+    calls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(json.loads(request.content))
+        return _chat_response("仍然不是 JSON")
+
+    recognizer = DeepSeekRecognizer(RunConfig(api_key="sk-test", thinking=False, base_url="https://token4u.cc/v1"))
+    recognizer._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(ValueError, match="可解析的 JSON"):
+            await recognizer.recognize(Frame(index=57, start_sec=56, end_sec=57, path=str(image)))
+    finally:
+        await recognizer.aclose()
+    assert len(calls) == 2
+    assert calls[1]["messages"][-1]["content"] == _JSON_FIX
 
 
 def test_chat_url_accepts_official_base():

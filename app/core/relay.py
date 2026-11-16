@@ -79,10 +79,7 @@ _REASON = {
     "DAILY_LIMIT_EXCEEDED": (429, "今天的充值额度已用完"),
     "WECHAT_PAYMENT_MP_NOT_CONFIGURED": (502, "微信支付还没配好"),
     "USER_INACTIVE": (403, "这个账号已停用"),
-    "GROUP_NOT_ALLOWED": (
-        403,
-        "当前账号不能使用这个分组。专属分组需要管理员先分配给该账号，程序不会改用其他分组",
-    ),
+    "GROUP_NOT_ALLOWED": (403, "当前账号还不能识别画面，请联系管理员开通。"),
 }
 
 _TEXT = (
@@ -105,9 +102,11 @@ _TEXT = (
     (
         "not allowed to bind this group",
         403,
-        "当前账号不能使用这个分组。专属分组需要管理员先分配给该账号，程序不会改用其他分组",
+        "当前账号还不能识别画面，请联系管理员开通。",
     ),
 )
+
+KEY_NOT_READY = "当前账号还不能识别画面，请联系管理员开通。"
 
 _CJK = re.compile(r"[\u4e00-\u9fff]")
 
@@ -191,7 +190,8 @@ def resolve_relay_group_id(groups: list[dict], *, name: str, fallback_id: int | 
         raise RelayError(f"可用分组里有多个名为「{wanted}」的分组，无法确定绑定哪一个", 502)
     if fallback_id is not None and fallback_id in available:
         return fallback_id
-    raise RelayError(group_unavailable_message(wanted, fallback_id), 403)
+    log.warning("relay group unavailable: %s", group_unavailable_message(wanted, fallback_id))
+    raise RelayError(KEY_NOT_READY, 403)
 
 
 def usable_api_key(value: object) -> bool:
