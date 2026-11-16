@@ -49,7 +49,7 @@
 6. 临时帧在 `data/frames/{job_id}`，临时音频在 `data/audio/{job_id}`。任务结束就删，除非 `EVC_KEEP_FRAMES=1`。
 7. `POST /api/jobs/{id}/cut` 生成 `clean.mp4`。预览在原片和剪辑结果之间切换。
 
-进度用约 700 ms 轮询 `GET /api/jobs/{id}`，也有 SSE `/events`。取消要停掉抽帧进程、音频进程，并关掉画面模型和 ASR 客户端。画面识别失败的帧号记在任务的 `failed_frames_json`。全部帧都失败时任务失败；只有一部分失败时任务完成，并写明失败帧数和最后一次错误。`POST /api/jobs/{id}/retry-frames` 重试这些帧：记下了帧号就只重抽这些帧，并和已有画面命中合在一起；没记下帧号就重跑全部画面。口播已经成功就保留，口播也失败则一起重跑。前面还有任务时排到队尾。
+进度用约 700 ms 轮询 `GET /api/jobs/{id}`，也有 SSE `/events`。取消要停掉抽帧进程、音频进程，并关掉画面模型和 ASR 客户端。画面识别失败的帧号记在任务的 `failed_frames_json`。全部帧都失败时任务失败；只有一部分失败时任务完成，并写明失败帧数和最后一次错误。`POST /api/jobs/{id}/retry-frames` 只重试失败的画面帧，并和已有画面命中合在一起；没记下帧号就重跑全部画面。口播结果和转写文本都保留，不会为了补画面再调腾讯云或重判文字。`POST /api/jobs/{id}/retry-speech` 正文 `{part}`：`transcribe` 只在转写失败、还没有转写文本时重跑抽音频和腾讯云，然后再判定文字，不重跑画面；`judge` 只在已经有转写文本、文字判定失败或只按词表保住命中时重判文字，不再调用腾讯云，也不重跑画面。视频没有音轨，或未登录而跳过口播的，不提供这两个按钮。前面还有任务时排到队尾。重试种类记在 `retry_part`，程序重新打开后排队中的重试仍按这一档跑，不会改成整段重来。
 
 程序重新打开时，正在跑或暂停的任务记为失败；还在排队的任务会留在队列里。如果退出前队列是暂停的（存在暂停中的任务），重新打开后仍然暂停。
 
@@ -89,7 +89,8 @@
 - `POST /jobs` 单文件字段名 `file`。`POST /jobs/batch` 字段名 `files`，一次最多 20 个。非法文件记在 `errors` 里，不要因此丢掉同批里的合法文件。
 - `GET /jobs`，`GET /jobs/{id}`，`GET /jobs/{id}/events`
 - `POST /jobs/{id}/cancel`，`DELETE /jobs/{id}`
-- `POST /jobs/{id}/retry-frames` 重试这个任务里识别失败的画面帧。任务还在排队、运行或暂停时返回 409。原视频不在了返回 404。
+- `POST /jobs/{id}/retry-frames` 重试这个任务里识别失败的画面帧，不重跑口播。任务还在排队、运行或暂停时返回 409。原视频不在了返回 404。
+- `POST /jobs/{id}/retry-speech` 正文 `{part: "transcribe" | "judge"}`。转写重试要原视频还在；文字判定重试用已经落下的转写，不再请求腾讯云。条件不符返回 409，任务不存在返回 404。
 - `GET /jobs/{id}/media`，`GET /jobs/{id}/output`，`GET /jobs/{id}/strip/{index}`（时间轴缩略图 JPEG）
 - `GET /jobs/{id}/export?fmt=json|xlsx`
 - `POST /jobs/export`，正文 `{ids}`，至少 2 个、最多 20 个。已完成的视频合成一个 Excel：结果表在原来的 8 列前加「视频」，未完成的只记在「任务信息」里。单视频导出的 8 列不变

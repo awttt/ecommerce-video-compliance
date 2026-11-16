@@ -10,6 +10,7 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
@@ -60,6 +61,10 @@ class BatchCreated(BaseModel):
 
 class BatchExportRequest(BaseModel):
     ids: list[str] = Field(min_length=1, max_length=20)
+
+
+class SpeechRetryRequest(BaseModel):
+    part: Literal["transcribe", "judge"]
 
 
 class QueueState(BaseModel):
@@ -389,6 +394,20 @@ async def retry_failed_frames(job_id: str) -> JobPublic:
     _check_id(job_id)
     try:
         state = await get_manager().retry_failed_frames(job_id)
+    except JobNotFound as exc:
+        raise HTTPException(status_code=404, detail="任务不存在") from exc
+    except BusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="视频文件不存在") from exc
+    return state.to_public()
+
+
+@router.post("/jobs/{job_id}/retry-speech", response_model=JobPublic, response_model_by_alias=True, dependencies=[Depends(require_login)])
+async def retry_speech(job_id: str, body: SpeechRetryRequest) -> JobPublic:
+    _check_id(job_id)
+    try:
+        state = await get_manager().retry_speech(job_id, body.part)
     except JobNotFound as exc:
         raise HTTPException(status_code=404, detail="任务不存在") from exc
     except BusyError as exc:

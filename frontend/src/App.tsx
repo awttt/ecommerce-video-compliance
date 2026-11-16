@@ -58,6 +58,7 @@ import {
   pauseQueue,
   resumeQueue,
   retryFailedFrames,
+  retrySpeech,
   openDir,
   planEdit,
   renderEdit,
@@ -168,6 +169,14 @@ function retryNotice(job: Job): string {
   if (job.status === "failed") return job.error || job.message || `部分帧识别失败（${job.failed_frames} 帧）`;
   if (job.message.includes("部分帧识别失败")) return job.message;
   return `部分帧识别失败（${job.failed_frames} 帧）`;
+}
+
+function speechRetryNotice(job: Job): string {
+  if (job.speech_retry === "transcribe") {
+    return job.asr_error || job.speech_message || "口播转写失败，可只重试转写";
+  }
+  if (job.speech_message.includes("已按词表保留")) return job.speech_message;
+  return job.speech_message || job.asr_error || "口播文字判定失败，可只重试判定";
 }
 
 function stepIndex(job: Job | null): number {
@@ -315,9 +324,22 @@ export function Shell() {
   }
 
   async function retryFrames(id: string) {
-    setRetryingId(id);
+    setRetryingId(`${id}:frames`);
     try {
       const next = await retryFailedFrames(id);
+      setJob(next);
+      await refreshHistory();
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "重试失败");
+    } finally {
+      setRetryingId("");
+    }
+  }
+
+  async function retrySpeechPart(id: string, part: "transcribe" | "judge") {
+    setRetryingId(`${id}:speech`);
+    try {
+      const next = await retrySpeech(id, part);
       setJob(next);
       await refreshHistory();
     } catch (error) {
@@ -1151,7 +1173,7 @@ export function Shell() {
                       showIcon
                       message={retryNotice(job)}
                       action={
-                        <Button size="small" loading={retryingId === job.id} onClick={() => retryFrames(job.id)}>
+                        <Button size="small" loading={retryingId === `${job.id}:frames`} onClick={() => retryFrames(job.id)}>
                           重试失败的 {job.failed_frames} 帧
                         </Button>
                       }
@@ -1164,7 +1186,23 @@ export function Shell() {
                       message={job.error === "interrupted" ? "程序退出时任务未完成" : job.error}
                     />
                   ) : null}
-                  {job.asr_error && job.status !== "failed" ? (
+                  {job.speech_retry ? (
+                    <Alert
+                      style={{ marginTop: 12 }}
+                      type={job.status === "failed" ? "error" : "warning"}
+                      showIcon
+                      message={speechRetryNotice(job)}
+                      action={
+                        <Button
+                          size="small"
+                          loading={retryingId === `${job.id}:speech`}
+                          onClick={() => retrySpeechPart(job.id, job.speech_retry as "transcribe" | "judge")}
+                        >
+                          {job.speech_retry === "transcribe" ? "重试口播转写" : "重试文字判定"}
+                        </Button>
+                      }
+                    />
+                  ) : job.asr_error && job.status !== "failed" ? (
                     <Alert style={{ marginTop: 12 }} type="warning" showIcon message={job.asr_error} />
                   ) : null}
                   <div style={{ marginTop: 12 }}>

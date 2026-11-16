@@ -24,6 +24,7 @@ function job(partial: Partial<Job>): Job {
     speech_stage: "",
     speech_message: "",
     asr_error: null,
+    speech_retry: "",
     mock: false,
     output_ready: false,
     preview_hint: "",

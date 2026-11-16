@@ -37,6 +37,7 @@ export interface Job {
   speech_stage: string;
   speech_message: string;
   asr_error: string | null;
+  speech_retry: "" | "transcribe" | "judge";
   mock: boolean;
   output_ready: boolean;
   preview_hint: string;

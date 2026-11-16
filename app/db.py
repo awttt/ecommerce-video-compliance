@@ -47,6 +47,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     speech_stage TEXT NOT NULL DEFAULT '',
     speech_message TEXT NOT NULL DEFAULT '',
     asr_error TEXT,
+    speech_transcript_json TEXT NOT NULL DEFAULT '[]',
+    speech_judge TEXT NOT NULL DEFAULT '',
+    retry_part TEXT NOT NULL DEFAULT '',
     options_json TEXT NOT NULL DEFAULT '{}',
     output_path TEXT,
     edit_plan TEXT,
@@ -101,6 +104,9 @@ _JOB_FIELDS = (
     "speech_stage",
     "speech_message",
     "asr_error",
+    "speech_transcript_json",
+    "speech_judge",
+    "retry_part",
     "options_json",
     "output_path",
     "edit_plan",
@@ -150,6 +156,9 @@ class Database:
         await self._add_column("jobs", "hold_sec", "REAL NOT NULL DEFAULT 0")
         await self._add_column("jobs", "paused_at", "TEXT")
         await self._add_column("jobs", "failed_frames_json", "TEXT NOT NULL DEFAULT '[]'")
+        await self._add_column("jobs", "speech_transcript_json", "TEXT NOT NULL DEFAULT '[]'")
+        await self._add_column("jobs", "speech_judge", "TEXT NOT NULL DEFAULT ''")
+        await self._add_column("jobs", "retry_part", "TEXT NOT NULL DEFAULT ''")
 
     async def _add_column(self, table: str, name: str, declaration: str) -> None:
         cursor = await self.conn.execute(f"PRAGMA table_info({table})")

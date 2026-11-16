@@ -34,7 +34,8 @@ from app.logging_setup import redact
 from app.core.editor import cuttable_findings, detect_silences, draft_cuts, normalize_cuts, render_clean_video
 from app.core.ffmpeg import FFmpegError, extract_strip, probe_video
 from app.core.pipeline import JobCancelled, Progress, drop_retried_reviews, run_pipeline, run_selected_frames
-from app.core.speech import NoAudio, SpeechProgress, run_speech
+from app.core.speech import NoAudio, SpeechProgress, judge_transcript, run_speech
+from app.core.transcript import dump_sentences, load_sentences
 from app.core.asr_engine import configured_engine
 from app.core.tencent_asr import (
     ASR_MAX_RETRIES,
@@ -233,6 +234,10 @@ class JobState:
     failed_indexes: list[int] = field(default_factory=list)
     last_frame_error: str = ""
     retry_failed: bool = False
+    retry_part: str = ""
+    speech_transcript: list[dict] = field(default_factory=list)
+    speech_judge: str = ""
+    hold_failed_indexes: bool = False
     queue_at: str = ""
 
     def touch(self) -> None:
@@ -260,6 +265,9 @@ class JobState:
             "speech_stage": self.speech_stage,
             "speech_message": self.speech_message,
             "asr_error": self.asr_error,
+            "speech_transcript_json": json.dumps(self.speech_transcript, ensure_ascii=False),
+            "speech_judge": self.speech_judge,
+            "retry_part": self.retry_part,
             "options_json": json.dumps(self.options, ensure_ascii=False),
             "output_path": self.output_path,
             "edit_plan": json.dumps(self.edit_plan, ensure_ascii=False) if self.edit_plan else None,
@@ -293,6 +301,7 @@ class JobState:
             speech_stage=self.speech_stage,
             speech_message=self.speech_message,
             asr_error=self.asr_error,
+            speech_retry=speech_retry_kind(self),
             mock=bool(self.options.get("mock")),
             output_ready=output_ready,
             preview_hint=_preview_hint(self.source_path),
@@ -336,6 +345,49 @@ def _failed_indexes(raw) -> list[int]:
     return indexes
 
 
+def _retry_part(raw) -> str:
+    text = str(raw or "")
+    if text in {"frames", "transcribe", "judge"}:
+        return text
+    return ""
+
+
+def _load_transcript(raw) -> list[dict]:
+    return dump_sentences(load_sentences(raw))
+
+
+def speech_retry_kind(state: JobState) -> str:
+    """结束后还能单独补的那一档。转写文本不发给前端。"""
+    if state.status not in {"done", "failed"}:
+        return ""
+    if not bool(state.options.get("asr_enabled", True)):
+        return ""
+    if _speech_unretryable(state):
+        return ""
+    if state.speech_transcript:
+        if state.speech_judge == "ok":
+            return ""
+        if state.speech_judge in {"partial", "failed"} or "已按词表保留" in (state.speech_message or ""):
+            return "judge"
+        if state.speech_stage in {"judging", "failed"} or state.status == "failed":
+            return "judge"
+        return ""
+    if "已按词表保留" in (state.speech_message or ""):
+        return "transcribe"
+    if state.speech_stage == "failed":
+        return "transcribe"
+    if state.status == "failed" and state.speech_stage in {"audio", "submitting", "transcribing"}:
+        return "transcribe"
+    return ""
+
+
+def _speech_unretryable(state: JobState) -> bool:
+    if state.speech_stage == "skipped":
+        return True
+    text = f"{state.speech_message or ''}\n{state.asr_error or ''}"
+    return "没有音轨" in text or "未登录" in text
+
+
 def _partial_frame_note(count: int, detail: str) -> str:
     if count <= 0:
         return ""
@@ -373,6 +425,9 @@ def _state_from_row(row, findings: list[Finding]) -> JobState:
         speech_stage=_cell(row, "speech_stage", ""),
         speech_message=_cell(row, "speech_message", ""),
         asr_error=_cell(row, "asr_error", None),
+        speech_transcript=_load_transcript(_cell(row, "speech_transcript_json", "[]")),
+        speech_judge=str(_cell(row, "speech_judge", "") or ""),
+        retry_part=_retry_part(_cell(row, "retry_part", "")),
         options=options,
         output_path=row["output_path"],
         created_at=row["created_at"],
@@ -707,9 +762,40 @@ class JobManager:
             raise BusyError("没有失败的帧")
         if not Path(state.source_path).is_file():
             raise FileNotFoundError("视频文件不存在")
+        return await self._enqueue_retry(state, "frames", "排队重试失败的帧")
+
+    async def retry_speech(self, job_id: str, part: str) -> JobState:
+        if part not in {"transcribe", "judge"}:
+            raise BusyError("只能重试口播转写或文字判定")
+        state = await self.get(job_id)
+        if state.status in {"queued", "running", "paused"}:
+            raise BusyError("任务还在进行，结束后再重试口播")
+        if state.status not in {"done", "failed"}:
+            raise BusyError("这个任务不能重试口播")
+        if not bool(state.options.get("asr_enabled", True)):
+            raise BusyError("这次任务没有开口播检测")
+        if _speech_unretryable(state):
+            raise BusyError("口播已跳过，不能单独重试")
+        if part == "judge":
+            if not state.speech_transcript:
+                raise BusyError("还没有口播文本，请先重试转写")
+            if speech_retry_kind(state) != "judge":
+                raise BusyError("文字判定已经完成")
+            label = "排队重试文字判定"
+        else:
+            if state.speech_transcript and speech_retry_kind(state) == "judge":
+                raise BusyError("转写已经完成，请只重试文字判定")
+            if speech_retry_kind(state) != "transcribe":
+                raise BusyError("口播转写没有失败")
+            if not Path(state.source_path).is_file():
+                raise FileNotFoundError("视频文件不存在")
+            label = "排队重试口播转写"
+        return await self._enqueue_retry(state, part, label)
+
+    async def _enqueue_retry(self, state: JobState, part: str, label: str) -> JobState:
         async with self._gate:
             if state.status in {"queued", "running", "paused"}:
-                raise BusyError("任务还在进行，结束后再重试失败的帧")
+                raise BusyError("任务还在进行，结束后再重试")
             others = [
                 job
                 for job in self._jobs.values()
@@ -718,14 +804,15 @@ class JobManager:
             if len(others) >= _MAX_QUEUE:
                 raise BusyError("排队已满（最多 20 个），请等一部分完成后再重试")
             ahead = sum(1 for job in self._jobs.values() if job.status in {"queued", "running", "paused"})
-            state.retry_failed = True
+            state.retry_part = part
+            state.retry_failed = part == "frames"
             state.queue_at = utcnow()
             state.cancel_event = asyncio.Event()
             state.status = "queued"
             state.stage = "queued"
             state.finished_at = None
             state.error = None
-            state.message = "排队重试失败的帧" if ahead == 0 else f"排队重试失败的帧，前面还有 {ahead} 个"
+            state.message = label if ahead == 0 else f"{label}，前面还有 {ahead} 个"
             if self._queue_paused and state.paused_at is None:
                 state.paused_at = self._pause_mark or _precise_now()
             state.touch()
@@ -874,32 +961,27 @@ class JobManager:
 
     async def run(self, job_id: str) -> None:
         state = self._jobs[job_id]
+        part = ""
         selective: list[int] = []
-        keep_speech = False
         kept_visual: list[Finding] = []
         recognized_base = 0
         async with self._gate:
             if self._queue_paused or state.cancel_event.is_set() or state.status in TERMINAL:
                 return
-            retrying = state.retry_failed
+            part = state.retry_part if state.retry_part in {"frames", "transcribe", "judge"} else ""
+            if not part and state.retry_failed:
+                part = "frames"
+            state.retry_part = ""
             state.retry_failed = False
-            if retrying:
+            state.hold_failed_indexes = False
+            if part == "frames":
                 selective = sorted({index for index in state.failed_indexes if isinstance(index, int) and index > 0})
-                keep_speech = state.speech_stage == "done"
-                state.failed_frames = 0
-                state.failed_indexes = []
                 state.last_frame_error = ""
                 state.error = None
-                if keep_speech:
-                    state.speech_hits = [finding_as_hit(item) for item in state.findings if item.source == "口播"]
-                    state.speech_ratio = 1.0
-                else:
-                    state.speech_stage = ""
-                    state.speech_message = ""
-                    state.speech_hits = []
-                    state.speech_ratio = 0.0
-                    state.asr_error = None
+                state.speech_hits = [finding_as_hit(item) for item in state.findings if item.source == "口播"]
+                state.speech_ratio = 1.0
                 if selective:
+                    state.hold_failed_indexes = True
                     kept_visual = drop_retried_reviews(
                         [item for item in state.findings if item.source != "口播"],
                         selective,
@@ -910,6 +992,8 @@ class JobManager:
                     state.frames_recognized = recognized_base
                     state.visual_findings = list(kept_visual)
                 else:
+                    state.failed_frames = 0
+                    state.failed_indexes = []
                     state.frames_recognized = 0
                     state.frames_extracted = 0
                     state.frames_estimated = 0
@@ -919,13 +1003,37 @@ class JobManager:
                 state.hit_count = len(state.findings)
                 if selective:
                     self._apply_ratio(state)
+            elif part in {"transcribe", "judge"}:
+                state.error = None
+                state.visual_findings = [item for item in state.findings if item.source != "口播"]
+                state.speech_hits = []
+                state.speech_ratio = 0.0
+                state.asr_error = None
+                state.speech_message = ""
+                state.speech_judge = ""
+                if part == "transcribe":
+                    state.speech_stage = ""
+                    state.speech_transcript = []
+                else:
+                    state.speech_stage = "judging"
+                state.findings = list(state.visual_findings)
+                state.hit_count = len(state.findings)
+                self._apply_ratio(state)
             state.status = "running"
-            state.stage = "extracting"
-            if selective:
+            if part == "judge":
+                state.stage = "recognizing"
+                state.message = "正在重试文字判定"
+            elif part == "transcribe":
+                state.stage = "extracting"
+                state.message = "正在重试口播转写"
+            elif selective:
+                state.stage = "extracting"
                 state.message = "正在重试失败的帧"
-            elif retrying:
+            elif part == "frames":
+                state.stage = "extracting"
                 state.message = "正在重试全部画面"
             else:
+                state.stage = "extracting"
                 state.message = "准备处理"
             state.started_at = state.started_at or utcnow()
             state.touch()
@@ -947,71 +1055,83 @@ class JobManager:
                 await self._on_speech(state, progress)
 
             async with recognizer:
-                if selective:
-                    visual_task = asyncio.create_task(
-                        run_selected_frames(
-                            Path(state.source_path),
-                            frames_dir(state.id),
-                            config,
-                            recognizer,
-                            state.cancel_event,
-                            on_progress,
-                            lambda proc: holder.__setitem__("proc", proc),
-                            selective,
-                            recognized_base=recognized_base,
-                            frames_estimated=state.frames_estimated,
-                            frames_extracted=state.frames_extracted,
-                            resume=self._resume,
-                        ),
-                        name=f"visual-{state.id}",
-                    )
-                else:
-                    visual_task = asyncio.create_task(
-                        run_pipeline(
-                            Path(state.source_path),
-                            frames_dir(state.id),
-                            config,
-                            recognizer,
-                            state.cancel_event,
-                            on_progress,
-                            lambda proc: holder.__setitem__("proc", proc),
-                            self._resume,
-                        ),
-                        name=f"visual-{state.id}",
-                    )
-                speech_task = None if keep_speech else self._start_speech(state, config, recognizer, holder, on_speech)
                 still_failed: list[int] | None = None
                 frame_error = ""
-                try:
-                    if selective:
-                        findings, still_failed, frame_error = await visual_task
-                        findings = refold_findings([*kept_visual, *findings])
-                    else:
-                        findings = await visual_task
-                except BaseException:
-                    state.cancel_event.set()
-                    _kill_processes(holder)
-                    if speech_task is not None:
-                        speech_task.cancel()
-                        await asyncio.gather(speech_task, return_exceptions=True)
-                    raise
                 speech_hits: list[RawHit] = []
                 speech_error = ""
-                if speech_task is not None:
-                    if not speech_task.done():
-                        async with state.progress_lock:
-                            if state.status not in TERMINAL:
-                                state.stage = "aggregating"
-                                state.message = "画面已完成，正在等待口播结果"
-                                state.touch()
-                        self._publish(state)
-                    speech_hits, speech_error = await speech_task
+                if part == "judge":
+                    speech_hits, speech_error = await self._judge_saved(state, recognizer, on_speech)
+                    findings = list(state.visual_findings)
+                elif part == "transcribe":
+                    speech_task = self._start_speech(state, config, recognizer, holder, on_speech)
+                    if speech_task is None:
+                        speech_hits, speech_error = [], ""
+                    else:
+                        speech_hits, speech_error = await speech_task
+                    findings = list(state.visual_findings)
                 else:
-                    speech_hits = list(state.speech_hits)
+                    if selective:
+                        visual_task = asyncio.create_task(
+                            run_selected_frames(
+                                Path(state.source_path),
+                                frames_dir(state.id),
+                                config,
+                                recognizer,
+                                state.cancel_event,
+                                on_progress,
+                                lambda proc: holder.__setitem__("proc", proc),
+                                selective,
+                                recognized_base=recognized_base,
+                                frames_estimated=state.frames_estimated,
+                                frames_extracted=state.frames_extracted,
+                                resume=self._resume,
+                            ),
+                            name=f"visual-{state.id}",
+                        )
+                    else:
+                        visual_task = asyncio.create_task(
+                            run_pipeline(
+                                Path(state.source_path),
+                                frames_dir(state.id),
+                                config,
+                                recognizer,
+                                state.cancel_event,
+                                on_progress,
+                                lambda proc: holder.__setitem__("proc", proc),
+                                self._resume,
+                            ),
+                            name=f"visual-{state.id}",
+                        )
+                    speech_task = None if part == "frames" else self._start_speech(state, config, recognizer, holder, on_speech)
+                    try:
+                        if selective:
+                            findings, still_failed, frame_error = await visual_task
+                            findings = refold_findings([*kept_visual, *findings])
+                        else:
+                            findings = await visual_task
+                    except BaseException:
+                        state.cancel_event.set()
+                        _kill_processes(holder)
+                        if speech_task is not None:
+                            speech_task.cancel()
+                            await asyncio.gather(speech_task, return_exceptions=True)
+                        raise
+                    if speech_task is not None:
+                        if not speech_task.done():
+                            async with state.progress_lock:
+                                if state.status not in TERMINAL:
+                                    state.stage = "aggregating"
+                                    state.message = "画面已完成，正在等待口播结果"
+                                    state.touch()
+                            self._publish(state)
+                        speech_hits, speech_error = await speech_task
+                    else:
+                        speech_hits = list(state.speech_hits)
                 if state.cancel_event.is_set():
                     raise JobCancelled()
             async with state.progress_lock:
                 if still_failed is not None:
+                    state.hold_failed_indexes = False
                     state.failed_indexes = list(still_failed)
                     state.failed_frames = len(still_failed)
                     state.last_frame_error = frame_error
@@ -1021,6 +1141,12 @@ class JobManager:
                     state.asr_error = speech_error
                     state.speech_stage = "failed"
                     state.speech_message = speech_error
+                    if (
+                        state.speech_transcript
+                        and not _speech_unretryable(state)
+                        and state.speech_judge not in {"partial", "ok"}
+                    ):
+                        state.speech_judge = "failed"
                 state.findings = combine_findings(findings, speech_hits)
                 state.hit_count = len(state.findings)
                 state.status = "done"
@@ -1205,9 +1331,45 @@ class JobManager:
             expired_at=creds.expired_at,
         )
 
+    async def _remember_transcript(self, state: JobState, sentences) -> None:
+        payload = dump_sentences(sentences)
+        async with state.progress_lock:
+            if state.status in TERMINAL:
+                return
+            state.speech_transcript = payload
+            state.speech_judge = ""
+            state.touch()
+        try:
+            await self.db.upsert_job(state.to_row())
+        except Exception:
+            log.exception("save speech transcript failed for %s", state.id)
+
+    async def _judge_saved(self, state: JobState, recognizer, on_speech) -> tuple[list[RawHit], str]:
+        sentences = load_sentences(state.speech_transcript)
+        if not sentences:
+            message = "没有可重试的口播文本"
+            await on_speech(SpeechProgress(stage="failed", message=message, hits=[], ratio=1, judge="failed"))
+            return [], message
+        try:
+            hits = await judge_transcript(sentences, recognizer, state.cancel_event, on_speech)
+            return hits, ""
+        except asyncio.CancelledError:
+            raise
+        except JobCancelled:
+            return [], ""
+        except Exception as exc:
+            log.exception("speech judge %s failed", state.id)
+            message = str(exc)[:500] or "口播检测失败"
+            await on_speech(SpeechProgress(stage="failed", message=message, hits=[], ratio=1, judge="failed"))
+            return [], message
+
     async def _speech_job(self, state, asr, recognizer, holder, on_speech, prepare=None) -> tuple[list[RawHit], str]:
         try:
             async with asr:
+
+                async def on_transcript(sentences) -> None:
+                    await self._remember_transcript(state, sentences)
+
                 hits = await run_speech(
                     Path(state.source_path),
                     audio_dir(state.id),
@@ -1218,6 +1380,7 @@ class JobManager:
                     lambda proc: holder.__setitem__("audio_proc", proc),
                     resume=self._resume,
                     prepare=prepare,
+                    on_transcript=on_transcript,
                 )
             return hits, ""
         except asyncio.CancelledError:
@@ -1235,7 +1398,8 @@ class JobManager:
         except Exception as exc:
             log.exception("speech %s failed", state.id)
             message = str(exc)[:500] or "口播检测失败"
-            await on_speech(SpeechProgress(stage="failed", message=message, hits=[], ratio=1))
+            judge = "failed" if state.speech_transcript else ""
+            await on_speech(SpeechProgress(stage="failed", message=message, hits=[], ratio=1, judge=judge))
             return [], message
 
     async def _on_visual(self, state: JobState, progress: Progress) -> None:
@@ -1248,9 +1412,10 @@ class JobManager:
             state.frames_estimated = progress.frames_estimated
             state.frames_extracted = progress.frames_extracted
             state.frames_recognized = progress.frames_recognized
-            state.failed_frames = progress.failed_frames
-            state.failed_indexes = list(progress.failed_indexes)
-            state.last_frame_error = progress.last_error
+            if not state.hold_failed_indexes:
+                state.failed_frames = progress.failed_frames
+                state.failed_indexes = list(progress.failed_indexes)
+                state.last_frame_error = progress.last_error
             state.visual_findings = progress.findings
             state.findings = combine_findings(progress.findings, state.speech_hits)
             state.hit_count = len(state.findings)
@@ -1266,6 +1431,8 @@ class JobManager:
                 return
             state.speech_stage = progress.stage
             state.speech_message = progress.message
+            if progress.judge in {"ok", "partial", "failed"}:
+                state.speech_judge = progress.judge
             state.speech_hits = progress.hits
             state.speech_ratio = progress.ratio
             state.findings = combine_findings(state.visual_findings, progress.hits)

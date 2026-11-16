@@ -218,6 +218,7 @@ class JobPublic(BaseModel):
     speech_stage: str = ""
     speech_message: str = ""
     asr_error: str | None = None
+    speech_retry: Literal["", "transcribe", "judge"] = ""
     mock: bool = False
     output_ready: bool = False
     preview_hint: str = ""

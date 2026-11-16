@@ -10,6 +10,7 @@ from app.core.deepseek import SpeechJudgeError
 from app.core.ffmpeg import FFmpegError, extract_audio, probe_video, speech_codec
 from app.core.pipeline import JobCancelled, cleanup_tree, wait_while_paused
 from app.core.tencent_asr import MAX_AUDIO_BYTES, MockAsrClient, TencentAsrClient, chunk_spans
+from app.core.transcript import SpeechSentence
 from app.schemas import RawHit
 
 
@@ -18,16 +19,18 @@ class NoAudio(Exception):
 
 
 class SpeechProgress:
-    def __init__(self, *, stage: str, message: str, hits: list[RawHit], ratio: float):
+    def __init__(self, *, stage: str, message: str, hits: list[RawHit], ratio: float, judge: str = ""):
         self.stage = stage
         self.message = message
         self.hits = hits
         self.ratio = ratio
+        self.judge = judge
 
 
 SpeechCb = Callable[[SpeechProgress], Awaitable[None]]
 ProcessCb = Callable[[asyncio.subprocess.Process | None], None]
 PrepareCb = Callable[[], Awaitable[None]]
+TranscriptCb = Callable[[list[SpeechSentence]], Awaitable[None]]
 
 
 async def run_speech(
@@ -40,10 +43,13 @@ async def run_speech(
     on_process: ProcessCb | None = None,
     resume: asyncio.Event | None = None,
     prepare: PrepareCb | None = None,
+    on_transcript: TranscriptCb | None = None,
 ) -> list[RawHit]:
     work_dir.mkdir(parents=True, exist_ok=True)
     try:
-        return await _run(video, work_dir, asr, judge, cancel, on_progress, on_process, resume, prepare)
+        return await _run(
+            video, work_dir, asr, judge, cancel, on_progress, on_process, resume, prepare, on_transcript
+        )
     finally:
         cleanup_tree(work_dir)
 
@@ -58,11 +64,21 @@ async def _run(
     on_process: ProcessCb | None,
     resume: asyncio.Event | None = None,
     prepare: PrepareCb | None = None,
+    on_transcript: TranscriptCb | None = None,
 ) -> list[RawHit]:
     prepared = asyncio.create_task(prepare()) if prepare is not None else None
     try:
         return await _recognize(
-            video, work_dir, asr, judge, cancel, on_progress, on_process, resume, prepared
+            video,
+            work_dir,
+            asr,
+            judge,
+            cancel,
+            on_progress,
+            on_process,
+            resume,
+            prepared,
+            on_transcript,
         )
     finally:
         if prepared is not None:
@@ -84,6 +100,7 @@ async def _recognize(
     on_process: ProcessCb | None,
     resume: asyncio.Event | None,
     prepared: asyncio.Task | None,
+    on_transcript: TranscriptCb | None = None,
 ) -> list[RawHit]:
     await on_progress(SpeechProgress(stage="audio", message="正在提取音频", hits=[], ratio=0.15))
     probe = await probe_video(video)
@@ -116,18 +133,34 @@ async def _recognize(
     if not sentences:
         await on_progress(SpeechProgress(stage="done", message="没有识别到口播文本", hits=[], ratio=1))
         return []
+    if on_transcript is not None:
+        await on_transcript(sentences)
+    if cancel.is_set():
+        raise JobCancelled()
+    return await judge_transcript(sentences, judge, cancel, on_progress)
+
+
+async def judge_transcript(
+    sentences: list[SpeechSentence],
+    judge,
+    cancel: asyncio.Event,
+    on_progress: SpeechCb,
+) -> list[RawHit]:
+    """只对已经转好的文字做判定。不再抽音频，也不再请求腾讯云。"""
     await on_progress(
         SpeechProgress(stage="judging", message=f"正在判定口播文本（{len(sentences)} 句）", hits=[], ratio=0.85)
     )
     try:
         hits = await judge.judge_speech(sentences)
         message = f"口播判定完成，命中 {len(hits)} 条"
+        judge_status = "ok"
     except SpeechJudgeError as exc:
         hits = list(exc.hits)
         message = str(exc)
+        judge_status = "partial"
     if cancel.is_set():
         raise JobCancelled()
-    await on_progress(SpeechProgress(stage="done", message=message, hits=hits, ratio=1))
+    await on_progress(SpeechProgress(stage="done", message=message, hits=hits, ratio=1, judge=judge_status))
     return hits
 
 

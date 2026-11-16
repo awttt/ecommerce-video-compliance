@@ -152,6 +152,14 @@ export function retryFailedFrames(id: string): Promise<Job> {
   return request<Job>(`/api/jobs/${id}/retry-frames`, { method: "POST" });
 }
 
+export function retrySpeech(id: string, part: "transcribe" | "judge"): Promise<Job> {
+  return request<Job>(`/api/jobs/${id}/retry-speech`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ part }),
+  });
+}
+
 export function deleteJob(id: string): Promise<void> {
   return request<void>(`/api/jobs/${id}`, { method: "DELETE" });
 }
