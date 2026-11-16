@@ -9,7 +9,7 @@ from pathlib import Path
 from app.core.deepseek import SpeechJudgeError
 from app.core.ffmpeg import FFmpegError, extract_audio, probe_video, speech_codec
 from app.core.pipeline import JobCancelled, cleanup_tree, wait_while_paused
-from app.core.tencent_asr import MAX_AUDIO_BYTES, MockAsrClient, TencentAsrClient, chunk_spans
+from app.core.tencent_asr import MAX_AUDIO_BYTES, FaultAsrClient, MockAsrClient, TencentAsrClient, chunk_spans
 from app.core.transcript import SpeechSentence
 from app.schemas import RawHit
 
@@ -36,7 +36,7 @@ TranscriptCb = Callable[[list[SpeechSentence]], Awaitable[None]]
 async def run_speech(
     video: Path,
     work_dir: Path,
-    asr: TencentAsrClient | MockAsrClient,
+    asr: TencentAsrClient | MockAsrClient | FaultAsrClient,
     judge,
     cancel: asyncio.Event,
     on_progress: SpeechCb,
@@ -57,7 +57,7 @@ async def run_speech(
 async def _run(
     video: Path,
     work_dir: Path,
-    asr: TencentAsrClient | MockAsrClient,
+    asr: TencentAsrClient | MockAsrClient | FaultAsrClient,
     judge,
     cancel: asyncio.Event,
     on_progress: SpeechCb,
@@ -93,7 +93,7 @@ async def _run(
 async def _recognize(
     video: Path,
     work_dir: Path,
-    asr: TencentAsrClient | MockAsrClient,
+    asr: TencentAsrClient | MockAsrClient | FaultAsrClient,
     judge,
     cancel: asyncio.Event,
     on_progress: SpeechCb,

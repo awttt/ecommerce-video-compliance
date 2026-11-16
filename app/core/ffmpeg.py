@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import shutil
+import subprocess
 import sys
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -30,16 +31,30 @@ def decode_bytes(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+# 从访达打开 .app 时 PATH 里没有 Homebrew。只在打包后的程序里查找这些目录。
+_DARWIN_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin")
+
+
+def _frozen_bin_candidates(name: str) -> list[Path]:
+    suffix = ".exe" if os.name == "nt" else ""
+    filename = f"{name}{suffix}"
+    exe_dir = Path(sys.executable).resolve().parent
+    candidates = [exe_dir / filename]
+    if sys.platform == "darwin" and exe_dir.name == "MacOS" and exe_dir.parent.name == "Contents":
+        candidates.append(exe_dir.parent.parent.parent / filename)
+        candidates.extend(Path(prefix) / filename for prefix in _DARWIN_BIN_DIRS)
+    return candidates
+
+
 def resolve_bin(name: str) -> str:
     env_name = {"ffmpeg": "EVC_FFMPEG", "ffprobe": "EVC_FFPROBE"}.get(name, "")
     override = os.environ.get(env_name, "").strip() if env_name else ""
     if override:
         return override
     if getattr(sys, "frozen", False):
-        suffix = ".exe" if os.name == "nt" else ""
-        beside = Path(sys.executable).resolve().parent / f"{name}{suffix}"
-        if beside.is_file():
-            return str(beside)
+        for candidate in _frozen_bin_candidates(name):
+            if candidate.is_file():
+                return str(candidate)
     found = shutil.which(name)
     if not found:
         hint = f"，或设置环境变量 {env_name}" if env_name else ""
@@ -56,13 +71,29 @@ def ffmpeg_available() -> bool:
     return True
 
 
-async def _run(cmd: list[str]) -> tuple[int, str]:
-    proc = await asyncio.create_subprocess_exec(
+def hidden_process_kwargs() -> dict[str, int]:
+    """Windows 上启动 ffmpeg 时不分配控制台，避免打包后的窗口程序弹出黑框。"""
+    if sys.platform != "win32":
+        return {}
+    return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+
+
+async def spawn_process(
+    *cmd: str,
+    stdout: int | None = asyncio.subprocess.PIPE,
+    stderr: int | None = asyncio.subprocess.PIPE,
+) -> asyncio.subprocess.Process:
+    return await asyncio.create_subprocess_exec(
         *cmd,
         stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        stdout=stdout,
+        stderr=stderr,
+        **hidden_process_kwargs(),
     )
+
+
+async def _run(cmd: list[str]) -> tuple[int, str]:
+    proc = await spawn_process(*cmd)
     stdout, stderr = await proc.communicate()
     text = decode_bytes(stdout) + decode_bytes(stderr)
     return proc.returncode or 0, text
@@ -217,12 +248,7 @@ async def extract_frames(
         "1",
         pattern,
     ]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    proc = await spawn_process(*cmd, stdout=asyncio.subprocess.DEVNULL)
     if on_process:
         on_process(proc)
     stderr_chunks: list[bytes] = []
@@ -322,12 +348,7 @@ async def extract_one_frame(
     ]
     if cancel.is_set():
         raise FFmpegError("已取消")
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    proc = await spawn_process(*cmd, stdout=asyncio.subprocess.DEVNULL)
     if on_process:
         on_process(proc)
     try:
@@ -440,12 +461,7 @@ async def extract_audio(
     if duration is not None and duration > 0:
         cmd.extend(["-t", f"{duration:.3f}"])
     cmd.extend(["-vn", "-ac", "1", "-ar", "16000", *codec_args, str(dest)])
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    proc = await spawn_process(*cmd, stdout=asyncio.subprocess.DEVNULL)
     if on_process:
         on_process(proc)
     stderr_chunks: list[bytes] = []

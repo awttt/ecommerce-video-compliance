@@ -56,7 +56,7 @@ def serve(host: str, port: int) -> tuple[uvicorn.Server, threading.Thread]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="电商视频素材合规检测")
+    parser = argparse.ArgumentParser(description="御镜视频素材审核系统")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-window", action="store_true", help="只启动本地服务，不打开桌面窗口")
@@ -88,7 +88,7 @@ def main(argv: list[str] | None = None) -> None:
             thread.join()
             return
         webview.create_window(
-            "电商视频素材合规检测",
+            "御镜视频素材审核系统",
             url,
             width=1360,
             height=860,

@@ -20,6 +20,7 @@ from app.core.prompts import SPEECH_SYSTEM_PROMPT, SYSTEM_PROMPT, speech_system_
 from app.core.rules import apply_rules
 from app.core.timeutil import format_clock, format_range
 from app.core.transcript import SpeechSentence
+from app.core.ffmpeg import resolve_bin
 from app.paths import safe_filename
 from app.schemas import MANUAL_REVIEW_NOTE, DetectionRules, Finding, Frame, PhraseRule, RawHit, RunConfig
 
@@ -60,6 +61,83 @@ def test_safe_filename_keeps_chinese_and_drops_path():
     assert safe_filename(r"..\目录\价格 演示.mp4") == "价格 演示.mp4"
     assert safe_filename("CON.mp4") == "_CON.mp4"
     assert safe_filename('a:b?.mp4') == "a_b_.mp4"
+
+
+def test_frozen_mac_app_finds_ffmpeg_beside_the_bundle_then_homebrew(monkeypatch, tmp_path):
+    import sys
+
+    import app.core.ffmpeg as ffmpeg
+
+    macos = tmp_path / "VideoCompliance.app" / "Contents" / "MacOS"
+    macos.mkdir(parents=True)
+    exe = macos / "VideoCompliance"
+    exe.write_text("exe", encoding="utf-8")
+    inside = macos / "ffmpeg"
+    beside = tmp_path / "ffmpeg"
+    brew = tmp_path / "homebrew" / "bin"
+    brew.mkdir(parents=True)
+    brewed = brew / "ffmpeg"
+    for path in (inside, beside, brewed):
+        path.write_text("bin", encoding="utf-8")
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(sys, "executable", str(exe))
+    monkeypatch.delenv("EVC_FFMPEG", raising=False)
+    monkeypatch.setattr(ffmpeg.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(ffmpeg, "_DARWIN_BIN_DIRS", (str(brew),))
+
+    assert resolve_bin("ffmpeg") == str(inside)
+    inside.unlink()
+    assert resolve_bin("ffmpeg") == str(beside)
+    beside.unlink()
+    assert resolve_bin("ffmpeg") == str(brewed)
+
+
+def test_dev_mode_resolves_ffmpeg_from_path(monkeypatch):
+    import sys
+
+    import app.core.ffmpeg as ffmpeg
+
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    monkeypatch.delenv("EVC_FFMPEG", raising=False)
+    monkeypatch.setattr(ffmpeg.shutil, "which", lambda name: "/usr/bin/ffmpeg" if name == "ffmpeg" else None)
+    assert resolve_bin("ffmpeg") == "/usr/bin/ffmpeg"
+
+
+async def test_spawn_process_hides_console_on_windows(monkeypatch):
+    import app.core.ffmpeg as ffmpeg
+
+    seen: dict = {}
+
+    async def fake_exec(*args, **kwargs):
+        seen["args"] = args
+        seen["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(ffmpeg.sys, "platform", "win32")
+    monkeypatch.setattr(ffmpeg.asyncio, "create_subprocess_exec", fake_exec)
+    await ffmpeg.spawn_process("ffmpeg", "-version", stdout=asyncio.subprocess.DEVNULL)
+    assert seen["args"] == ("ffmpeg", "-version")
+    assert seen["kwargs"]["creationflags"] == 0x08000000
+    assert seen["kwargs"]["stdin"] == asyncio.subprocess.DEVNULL
+    assert seen["kwargs"]["stdout"] == asyncio.subprocess.DEVNULL
+    assert seen["kwargs"]["stderr"] == asyncio.subprocess.PIPE
+
+
+async def test_spawn_process_leaves_console_flags_off_other_platforms(monkeypatch):
+    import app.core.ffmpeg as ffmpeg
+
+    seen: dict = {}
+
+    async def fake_exec(*_args, **kwargs):
+        seen["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(ffmpeg.sys, "platform", "darwin")
+    monkeypatch.setattr(ffmpeg.asyncio, "create_subprocess_exec", fake_exec)
+    await ffmpeg.spawn_process("ffmpeg")
+    assert "creationflags" not in seen["kwargs"]
 
 
 def test_prompt_forbids_guessing():
@@ -707,10 +785,12 @@ async def test_saved_model_collapses_to_the_two_choices(tmp_path):
     stored = dict(DEFAULT_SETTINGS)
     stored["model"] = "deepseek-v4.1-flash-1017"
     stored["base_url"] = "https://example.invalid"
+    stored["tencent_region"] = "ap-guangzhou"
     await db.save_settings(stored)
     loaded = await db.load_settings()
     assert loaded["model"] == DEEPSEEK_FLASH_MODEL
     assert loaded["base_url"] == "https://example.invalid"
+    assert loaded["tencent_region"] == "ap-shanghai"
     custom = dict(DEFAULT_SETTINGS)
     custom["model"] = "glm-4.5-air"
     await db.save_settings(custom)

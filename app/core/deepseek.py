@@ -15,7 +15,7 @@ from typing import Protocol
 
 import httpx
 
-from app.core.parsing import parse_frame_result, parse_speech_result
+from app.core.parsing import extract_json, parse_frame_result, parse_speech_result
 from app.core.prompts import speech_system_prompt, speech_user_prompt, user_prompt, visual_system_prompt
 from app.core.rules import apply_rules
 from app.core.timeutil import format_range
@@ -372,9 +372,54 @@ def _mock_span(text: str, matched) -> str:
     return matched.group(0).strip()
 
 
-def build_recognizer(config: RunConfig) -> DeepSeekRecognizer | MockRecognizer:
-    if config.mock:
-        return MockRecognizer(config.rules)
-    if not config.api_key:
-        raise RuntimeError("未配置画面识别 API Key。请登录后再开始检测。")
-    return DeepSeekRecognizer(config)
+def frame_call_should_fail(index: int) -> bool:
+    """第 1、4、7… 帧失败，其余帧继续。至少两帧时才能同时看到失败和成功。"""
+    return index % 3 == 1
+
+
+class FaultRecognizer:
+    """测试账号注入的失败。不发起画面或口播模型请求。"""
+
+    def __init__(self, inner: Recognizer, config: RunConfig):
+        self.inner = inner
+        self.config = config
+
+    async def __aenter__(self) -> FaultRecognizer:
+        enter = getattr(self.inner, "__aenter__", None)
+        if enter is not None:
+            await enter()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        exit_inner = getattr(self.inner, "__aexit__", None)
+        if exit_inner is not None:
+            return bool(await exit_inner(exc_type, exc, tb))
+        await self.inner.aclose()
+        return False
+
+    async def aclose(self) -> None:
+        await self.inner.aclose()
+
+    async def recognize(self, frame: Frame) -> list[RawHit]:
+        if self.config.fault_bad_json:
+            extract_json("{")
+        if self.config.fault_partial_frames and frame_call_should_fail(frame.index):
+            raise RuntimeError("模型返回 HTTP 503：Service temporarily unavailable")
+        return await self.inner.recognize(frame)
+
+    async def judge_speech(self, sentences: list[SpeechSentence]) -> list[RawHit]:
+        if self.config.fault_bad_json:
+            extract_json("{")
+        return await self.inner.judge_speech(sentences)
+
+
+def build_recognizer(config: RunConfig) -> Recognizer:
+    if config.fault_bad_json or config.mock:
+        inner: Recognizer = MockRecognizer(config.rules)
+    else:
+        if not config.api_key:
+            raise RuntimeError("未配置画面识别 API Key。请登录后再开始检测。")
+        inner = DeepSeekRecognizer(config)
+    if config.fault_bad_json or config.fault_partial_frames:
+        return FaultRecognizer(inner, config)
+    return inner

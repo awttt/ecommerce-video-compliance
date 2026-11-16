@@ -186,6 +186,9 @@ class RunConfig(BaseModel):
     thinking: bool = False
     timeout_sec: float = 120
     mock: bool = False
+    fault_bad_json: bool = False
+    fault_tencent: bool = False
+    fault_partial_frames: bool = False
     asr_enabled: bool = True
     tencent_secret_id: str = ""
     tencent_secret_key: str = ""
@@ -246,6 +249,9 @@ class SettingUpdate(BaseModel):
     thinking: bool | None = None
     timeout_sec: float | None = Field(default=None, ge=15, le=180)
     mock_mode: bool | None = None
+    fault_bad_json: bool | None = None
+    fault_tencent: bool | None = None
+    fault_partial_frames: bool | None = None
     mcp_enabled: bool | None = None
     model: str | None = None
     asr_enabled: bool | None = None
@@ -324,6 +330,9 @@ class SettingPublic(BaseModel):
     thinking: bool
     timeout_sec: float
     mock_mode: bool
+    fault_bad_json: bool = False
+    fault_tencent: bool = False
+    fault_partial_frames: bool = False
     mcp_enabled: bool = False
     asr_enabled: bool
     has_tencent_secret: bool
@@ -434,6 +443,10 @@ class CutsUpdate(BaseModel):
     cuts: list[CutSpan] = Field(default_factory=list, max_length=200)
 
 
+FIXED_TENCENT_REGION = "ap-shanghai"
+TEST_ACCOUNT_EMAIL = "350944364@qq.com"
+FAULT_FIELDS = ("fault_bad_json", "fault_tencent", "fault_partial_frames")
+
 DEFAULT_SETTINGS: dict[str, object] = {
     "api_key": "",
     "base_url": "https://api.deepseek.com",
@@ -446,11 +459,14 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "thinking": False,
     "timeout_sec": 120.0,
     "mock_mode": False,
+    "fault_bad_json": False,
+    "fault_tencent": False,
+    "fault_partial_frames": False,
     "mcp_enabled": False,
     "asr_enabled": True,
     "tencent_secret_id": "",
     "tencent_secret_key": "",
-    "tencent_region": "ap-shanghai",
+    "tencent_region": FIXED_TENCENT_REGION,
     "asr_engine": "16k_zh",
     "rules": {
         "categories": ["价格", "规格", "品牌", "夸大宣传"],

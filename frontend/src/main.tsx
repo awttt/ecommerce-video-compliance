@@ -7,29 +7,10 @@ import "antd/dist/reset.css";
 import "./styles.css";
 
 /**
- * 全局设计规范 —— 「简白」
- * 单一强调色（墨绿）+ 中性暖白底色 + 克制的边框与阴影。
- * 所有颜色只在这里和 styles.css 中定义，组件内不再散落硬编码色值。
+ * 颜色使用 Ant Design 默认色。这里只保留字号、圆角和控件高度。
  */
 const theme = {
   token: {
-    colorPrimary: "#1F6F5B",
-    colorInfo: "#1F6F5B",
-    colorSuccess: "#2E7D62",
-    colorWarning: "#B0791F",
-    colorError: "#B4453C",
-    colorText: "#1C2621",
-    colorTextSecondary: "#5F6D65",
-    colorTextTertiary: "#8B968F",
-    colorTextQuaternary: "#B0B9B2",
-    colorBorder: "#E4EAE4",
-    colorBorderSecondary: "#EFF2EF",
-    colorBgLayout: "#F7F8F6",
-    colorBgContainer: "#FFFFFF",
-    colorBgElevated: "#FFFFFF",
-    colorFillAlter: "#F7F9F7",
-    colorFillSecondary: "#F1F4F1",
-    colorFillTertiary: "#F5F7F5",
     borderRadius: 8,
     borderRadiusLG: 14,
     borderRadiusSM: 6,
@@ -47,34 +28,14 @@ const theme = {
   components: {
     Button: {
       fontWeight: 500,
-      primaryShadow: "none",
-      defaultShadow: "none",
-      dangerShadow: "none",
     },
     Card: {
-      headerBg: "transparent",
       headerFontSize: 15,
       paddingLG: 24,
     },
     Table: {
-      headerBg: "#F8FAF8",
-      headerColor: "#6E7A73",
-      headerSplitColor: "transparent",
-      rowHoverBg: "#F4F8F5",
-      borderColor: "#EDF1ED",
       cellPaddingBlock: 12,
       headerBorderRadius: 8,
-    },
-    Segmented: {
-      trackBg: "#F1F4F1",
-      itemSelectedBg: "#FFFFFF",
-    },
-    Tag: {
-      defaultBg: "#F2F5F2",
-      defaultColor: "#5F6D65",
-    },
-    Progress: {
-      defaultColor: "#1F6F5B",
     },
     Steps: {
       iconSize: 26,

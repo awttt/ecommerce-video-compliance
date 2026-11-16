@@ -16,7 +16,7 @@ export function mcpEndpoint(location: PageLocation): string {
 }
 
 export function mcpAgentPrompt(url: string): string {
-  return `请把本机的「电商视频素材合规检测」加进 MCP，服务名用 evc。不要改检测程序的代码，也不要再启动一个检测进程。
+  return `请把本机的「御镜视频素材审核系统」加进 MCP，服务名用 evc。不要改检测程序的代码，也不要再启动一个检测进程。
 
 连接地址：${url}
 传输方式：Streamable HTTP

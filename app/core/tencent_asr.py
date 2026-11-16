@@ -676,6 +676,33 @@ def _error_parts(response: httpx.Response) -> tuple[str, str]:
     return code, message
 
 
+class FaultAsrClient:
+    """测试用。不连接腾讯云，直接按接口调用失败返回。"""
+
+    async def __aenter__(self) -> FaultAsrClient:
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        await self.aclose()
+        return False
+
+    async def aclose(self) -> None:
+        return None
+
+    async def transcribe(
+        self,
+        pieces: list[tuple[float, Path]],
+        *,
+        cancel: asyncio.Event,
+        on_status: Callable[[str], Awaitable[None]],
+        resume: asyncio.Event | None = None,
+    ) -> list[SpeechSentence]:
+        del pieces, on_status, resume
+        if cancel.is_set():
+            raise JobCancelled()
+        raise TencentAsrError("无法连接腾讯云语音识别", code="Network")
+
+
 class MockAsrClient:
     """不访问腾讯云。返回一句固定口播，用来打通并行流程。"""
 

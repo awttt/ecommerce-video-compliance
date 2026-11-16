@@ -40,6 +40,7 @@ from app.core.asr_engine import configured_engine
 from app.core.tencent_asr import (
     ASR_MAX_RETRIES,
     AsrCredentials,
+    FaultAsrClient,
     MockAsrClient,
     TencentAsrClient,
     parse_relay_credentials,
@@ -51,7 +52,10 @@ from app.db import Database
 from app.exporting import BatchExportJob, batch_export_file, export_file, write_batch_xlsx, write_json, write_xlsx
 from app.paths import audio_dir, data_dir, exports_dir, frames_dir, video_dir
 from app.schemas import (
+    FAULT_FIELDS,
+    TEST_ACCOUNT_EMAIL,
     DEFAULT_SETTINGS,
+    FIXED_TENCENT_REGION,
     AccountAction,
     AccountOptions,
     CutSpan,
@@ -559,7 +563,10 @@ class JobManager:
             detail=str(self._settings["detail"]),
             thinking=bool(self._settings["thinking"]),
             timeout_sec=float(self._settings["timeout_sec"]),
-            mock_mode=bool(self._settings["mock_mode"]),
+            mock_mode=self._visible_mock(),
+            fault_bad_json=self._visible_fault("fault_bad_json"),
+            fault_tencent=self._visible_fault("fault_tencent"),
+            fault_partial_frames=self._visible_fault("fault_partial_frames"),
             mcp_enabled=bool(self._settings.get("mcp_enabled", False)),
             asr_enabled=bool(self._settings.get("asr_enabled", True)),
             has_tencent_secret=bool(secret_id and secret_key),
@@ -603,15 +610,20 @@ class JobManager:
             "detail",
             "thinking",
             "timeout_sec",
-            "mock_mode",
             "mcp_enabled",
             "model",
             "asr_enabled",
-            "tencent_region",
             "asr_engine",
         ):
             if name in raw and raw[name] is not None:
                 data[name] = raw[name]
+        for name in ("mock_mode", *FAULT_FIELDS):
+            if name not in raw or raw[name] is None:
+                continue
+            if raw[name] and not self._is_test_account():
+                continue
+            data[name] = bool(raw[name])
+        data["tencent_region"] = FIXED_TENCENT_REGION
         if raw.get("rules") is not None:
             data["rules"] = DetectionRules.model_validate(raw["rules"]).model_dump()
         self._settings = data
@@ -651,9 +663,7 @@ class JobManager:
         return "", "none"
 
     def _effective_tencent(self) -> tuple[str, str, str, str]:
-        region = str(self._settings.get("tencent_region") or "").strip()
-        if not region:
-            region = os.environ.get("TENCENTCLOUD_REGION", "").strip() or "ap-shanghai"
+        region = FIXED_TENCENT_REGION
         saved_id = str(self._settings.get("tencent_secret_id") or "").strip()
         saved_key = str(self._settings.get("tencent_secret_key") or "").strip()
         if saved_id and saved_key:
@@ -670,8 +680,19 @@ class JobManager:
         except Exception:
             return DetectionRules()
 
+    def _is_test_account(self) -> bool:
+        return self._account_email().strip().lower() == TEST_ACCOUNT_EMAIL
+
+    def _visible_mock(self) -> bool:
+        return bool(self._settings.get("mock_mode")) and self._is_test_account()
+
+    def _visible_fault(self, name: str) -> bool:
+        return bool(self._settings.get(name)) and self._is_test_account()
+
     def _mock_enabled(self) -> bool:
-        return bool(self._settings.get("mock_mode")) or os.environ.get("EVC_MOCK") == "1"
+        if os.environ.get("EVC_MOCK") == "1":
+            return True
+        return self._visible_mock()
 
     async def create_job(
         self,
@@ -707,7 +728,7 @@ class JobManager:
             "mock": use_mock,
             "asr_enabled": use_asr,
             "asr_engine": configured_engine(self._settings.get("asr_engine")),
-            "tencent_region": str(self._settings.get("tencent_region") or "ap-shanghai"),
+            "tencent_region": FIXED_TENCENT_REGION,
             "rules": self._rules().model_dump(),
         }
         state = JobState(
@@ -1197,7 +1218,7 @@ class JobManager:
 
     def _config_for(self, state: JobState) -> RunConfig:
         key, source = self._effective_key()
-        secret_id, secret_key, region, _secret_source = self._effective_tencent()
+        secret_id, secret_key, _region, _secret_source = self._effective_tencent()
         options = state.options
         base_url = str(options.get("base_url") or self._settings["base_url"])
         model = configured_model(options.get("model") or self._settings["model"])
@@ -1214,11 +1235,14 @@ class JobManager:
             detail=str(options.get("detail") or "original"),
             thinking=bool(options.get("thinking", False)),
             timeout_sec=float(options.get("timeout_sec", 120)),
-            mock=bool(options.get("mock", False)),
+            mock=bool(options.get("mock", False)) or self._mock_enabled(),
+            fault_bad_json=self._visible_fault("fault_bad_json"),
+            fault_tencent=self._visible_fault("fault_tencent"),
+            fault_partial_frames=self._visible_fault("fault_partial_frames"),
             asr_enabled=bool(options.get("asr_enabled", True)),
             tencent_secret_id=secret_id,
             tencent_secret_key=secret_key,
-            tencent_region=str(options.get("tencent_region") or region),
+            tencent_region=FIXED_TENCENT_REGION,
             asr_engine=configured_engine(options.get("asr_engine")),
             rules=self._rules_from(options),
         )
@@ -1238,15 +1262,16 @@ class JobManager:
         secret_key = os.environ.get("TENCENTCLOUD_SECRET_KEY", "").strip()
         if not secret_id or not secret_key:
             return None
-        region = os.environ.get("TENCENTCLOUD_REGION", "").strip()
-        if not region:
-            region = str(self._settings.get("tencent_region") or "ap-shanghai")
+        region = os.environ.get("TENCENTCLOUD_REGION", "").strip() or FIXED_TENCENT_REGION
         return secret_id, secret_key, region
 
     def _start_speech(self, state: JobState, config: RunConfig, recognizer, holder: dict, on_speech):
         if not config.asr_enabled:
             return None
-        if config.mock:
+        if config.fault_tencent:
+            asr = FaultAsrClient()
+            prepare = None
+        elif config.mock:
             asr = MockAsrClient()
             prepare = None
         elif self._relay_logged_in():

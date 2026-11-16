@@ -2,9 +2,11 @@ import {
   CaretRightOutlined,
   CloudUploadOutlined,
   DeleteOutlined,
+  ExperimentOutlined,
   DownloadOutlined,
   FolderOpenOutlined,
   HistoryOutlined,
+  HomeOutlined,
   PauseOutlined,
   ScissorOutlined,
   SettingOutlined,
@@ -67,6 +69,7 @@ import {
 } from "./api";
 import { formatBalance, LoginPage, RegisterPage } from "./AuthPages";
 import { mcpAgentPrompt, mcpEndpoint } from "./mcpPrompt";
+import { showTestMenu } from "./testMenu";
 import { CutTimeline } from "./CutTimeline";
 import {
   directoryEntries,
@@ -100,6 +103,10 @@ const MODEL_OPTIONS = [
   { value: "deepseek-flash", label: "DeepSeek 4.1 Flash" },
 ];
 
+/** 剪辑入口和 JSON 导出先不露出，功能代码保留。 */
+const SHOW_JSON_EXPORT = false;
+const SHOW_CUT_BUTTON = false;
+
 const ASR_ENGINE_OPTIONS = [
   { value: "16k_zh", label: "通用引擎 16k_zh（免费资源包）" },
   { value: "16k_zh_en_2.0", label: "大模型 2.0（16k_zh_en_2.0）" },
@@ -112,19 +119,8 @@ const CATEGORY_PILL: Record<string, string> = {
   夸大宣传: "pill--hype",
 };
 
-/** 取景框 + 扫描线：品牌标记，用于顶栏与登录页 */
-export function BrandMark({ size = 21 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path
-        d="M4 9V7a3 3 0 0 1 3-3h2M15 4h2a3 3 0 0 1 3 3v2M20 15v2a3 3 0 0 1-3 3h-2M9 20H7a3 3 0 0 1-3-3v-2"
-        stroke="currentColor"
-        strokeWidth="1.7"
-        strokeLinecap="round"
-      />
-      <path d="M7.5 12h9" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-    </svg>
-  );
+export function BrandMark() {
+  return <img className="brand-logo" src="/logo.png" alt="" />;
 }
 
 function statusTag(status: string) {
@@ -240,6 +236,20 @@ function McpDrawer({
   );
 }
 
+const ACCOUNT_KEY_NOTICE = "当前还不能识别画面，请联系管理员处理。";
+
+function accountKeyNotice(text: string): string {
+  if (
+    text.includes("请联系管理员") ||
+    text.includes("画面识别密钥") ||
+    text.includes("可用分组") ||
+    text.includes("专属分组")
+  ) {
+    return ACCOUNT_KEY_NOTICE;
+  }
+  return "";
+}
+
 export function Shell() {
   const { message } = AntApp.useApp();
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -272,6 +282,7 @@ export function Shell() {
   scanningRef.current = scanning;
   const [rulesOpen, setRulesOpen] = useState(false);
   const [mcpOpen, setMcpOpen] = useState(false);
+  const [testOpen, setTestOpen] = useState(false);
   const [mcpSaving, setMcpSaving] = useState(false);
   const [mcpLive, setMcpLive] = useState<boolean | null>(null);
   const [ruleCategories, setRuleCategories] = useState<string[]>(["价格", "规格", "品牌", "夸大宣传"]);
@@ -401,10 +412,8 @@ export function Shell() {
       detail: settings.detail,
       thinking: settings.thinking,
       timeout_sec: settings.timeout_sec,
-      mock_mode: settings.mock_mode,
       asr_enabled: settings.asr_enabled,
       model: settings.model,
-      tencent_region: settings.tencent_region,
       asr_engine: settings.asr_engine,
     });
   }, [form, settings]);
@@ -840,6 +849,14 @@ export function Shell() {
     { title: "备注", dataIndex: "备注", width: 160, ellipsis: true },
   ];
 
+  async function saveTestFlag(patch: Record<string, boolean>) {
+    try {
+      setSettings(await saveSettings(patch));
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "保存失败");
+    }
+  }
+
   async function refreshAccount() {
     if (refreshingAccount || loggingOut) return;
     setRefreshingAccount(true);
@@ -850,11 +867,12 @@ export function Shell() {
       message.success(result.message || "已更新余额");
     } catch (error) {
       const text = error instanceof Error ? error.message : "刷新失败";
-      if (text.includes("分组") || text.includes("画面识别密钥") || text.includes("专属")) {
-        setKeyNotice(text);
+      const blocked = accountKeyNotice(text);
+      if (blocked) {
+        setKeyNotice(blocked);
         refreshSettings().catch(() => undefined);
       }
-      message.error(text);
+      message.error(blocked || text);
       if (text.includes("请重新登录") || text.includes("请先登录") || text.includes("还没有登录")) {
         refreshSettings().catch(() => undefined);
       }
@@ -898,7 +916,7 @@ export function Shell() {
       <RegisterPage
         onRegistered={(next, notice) => {
           setSettings(next);
-          setKeyNotice(notice && notice.includes("画面识别密钥") ? notice : "");
+          setKeyNotice(accountKeyNotice(notice || ""));
           setAuthPage("login");
         }}
         onGoLogin={() => setAuthPage("login")}
@@ -907,7 +925,7 @@ export function Shell() {
       <LoginPage
         onLoggedIn={(next, notice) => {
           setSettings(next);
-          setKeyNotice(notice && notice.includes("画面识别密钥") ? notice : "");
+          setKeyNotice(accountKeyNotice(notice || ""));
         }}
         onGoRegister={() => setAuthPage("register")}
       />
@@ -920,11 +938,18 @@ export function Shell() {
         <button className="brand" type="button" onClick={() => setWorkspace("detect")}>
           <span className="brand-mark"><BrandMark /></span>
           <span className="brand-text">
-            <strong>电商视频素材合规检测</strong>
-            <span>本地识别画面和口播中的价格、规格、品牌，口播里的夸大宣传也会标出时间区间</span>
+            <strong>御镜视频素材审核系统</strong>
           </span>
         </button>
         <nav className="app-nav">
+          <Button
+            type="text"
+            icon={<HomeOutlined />}
+            className={workspace === "detect" ? "is-active" : ""}
+            onClick={() => setWorkspace("detect")}
+          >
+            首页
+          </Button>
           <Button type="text" icon={<HistoryOutlined />} onClick={() => { setHistoryOpen(true); refreshHistory().catch(() => undefined); }}>
             历史
           </Button>
@@ -947,12 +972,21 @@ export function Shell() {
           >
             充值
           </Button>
+          {showTestMenu(settings.account_email) ? (
+            <Button
+              type="text"
+              icon={<ExperimentOutlined />}
+              className={testOpen ? "is-active" : ""}
+              onClick={() => setTestOpen(true)}
+            >
+              测试
+            </Button>
+          ) : null}
         </nav>
         <div className="app-account">
           <Popover
             content={
               <Space direction="vertical" size={4}>
-                <span>冻结 {formatBalance(settings.account_frozen_balance)}</span>
                 <span>今日消耗 {formatBalance(settings.account_today_cost)}</span>
                 <span>累计消耗 {formatBalance(settings.account_total_cost)}</span>
               </Space>
@@ -977,8 +1011,17 @@ export function Shell() {
         <Row gutter={[16, 16]}>
           <Col xs={24} lg={8}>
             <Card title="上传视频">
-              {settings?.mock_mode ? (
-                <Alert type="warning" showIcon style={{ marginBottom: 12 }} message="模拟识别已打开，不会调用模型。" />
+              {settings.mock_mode ? (
+                <Alert type="warning" showIcon style={{ marginBottom: 12 }} message="模拟识别已打开，不会请求画面模型和大语言模型，也不会领取口播凭证。" />
+              ) : null}
+              {settings.fault_bad_json ? (
+                <Alert type="warning" showIcon style={{ marginBottom: 12 }} message="测试：每一帧都会按非法 JSON 失败，任务会整段失败，不会请求模型。" />
+              ) : null}
+              {settings.fault_tencent ? (
+                <Alert type="warning" showIcon style={{ marginBottom: 12 }} message="测试：口播会在调用腾讯云时失败，画面识别继续，不会真的请求腾讯云。" />
+              ) : null}
+              {settings.fault_partial_frames ? (
+                <Alert type="warning" showIcon style={{ marginBottom: 12 }} message="测试：第 1、4、7… 帧会调用失败，其余帧照常识别。" />
               ) : null}
               {keyNotice ? (
                 <Alert type="error" showIcon style={{ marginBottom: 12 }} message={keyNotice} />
@@ -988,7 +1031,7 @@ export function Shell() {
                   type="info"
                   showIcon
                   style={{ marginBottom: 12 }}
-                  message="当前账号还不能识别画面，请联系管理员开通。"
+                  message={ACCOUNT_KEY_NOTICE}
                 />
               ) : null}
               <div className="slider-row" style={{ marginBottom: 12 }}>
@@ -1314,14 +1357,16 @@ export function Shell() {
                       locale={{ emptyText: running ? "识别进行中，命中会陆续出现" : "没有发现画面或口播中的价格、规格、品牌或夸大宣传" }}
                     />
                     <div className="toolbar">
-                      <Button
-                        icon={<DownloadOutlined />}
-                        loading={fileAction === "json"}
-                        disabled={job.status !== "done" || fileAction !== null}
-                        onClick={() => void runFileAction("json", async () => { await downloadExport(job.id, "json"); })}
-                      >
-                        导出 JSON
-                      </Button>
+                      {SHOW_JSON_EXPORT ? (
+                        <Button
+                          icon={<DownloadOutlined />}
+                          loading={fileAction === "json"}
+                          disabled={job.status !== "done" || fileAction !== null}
+                          onClick={() => void runFileAction("json", async () => { await downloadExport(job.id, "json"); })}
+                        >
+                          导出 JSON
+                        </Button>
+                      ) : null}
                       <Button
                         icon={<DownloadOutlined />}
                         loading={fileAction === "xlsx"}
@@ -1359,14 +1404,16 @@ export function Shell() {
                       >
                         打开导出目录
                       </Button>
-                      <Button
-                        icon={<ScissorOutlined />}
-                        loading={editAction === "plan"}
-                        disabled={editBusy || job.status !== "done" || job.findings.length === 0}
-                        onClick={() => enterEditor().catch((error: Error) => message.error(error.message))}
-                      >
-                        剪辑
-                      </Button>
+                      {SHOW_CUT_BUTTON ? (
+                        <Button
+                          icon={<ScissorOutlined />}
+                          loading={editAction === "plan"}
+                          disabled={editBusy || job.status !== "done" || job.findings.length === 0}
+                          onClick={() => enterEditor().catch((error: Error) => message.error(error.message))}
+                        >
+                          剪辑
+                        </Button>
+                      ) : null}
                       <InputNumber min={0} max={2} step={0.1} value={padding} onChange={(value) => setPadding(Number(value) || 0)} addonAfter="画面边距" />
                       {editorOn ? (
                         <>
@@ -1471,7 +1518,7 @@ export function Shell() {
               ) : (
                 <div className="video-empty">
                   <div className="empty-state">
-                    <span className="empty-mark"><BrandMark size={24} /></span>
+                    <span className="empty-mark"><BrandMark /></span>
                     <span className="empty-title">还没有检测结果</span>
                     <span className="empty-sub">上传视频后，这里会显示进度、时间轴和命中列表</span>
                   </div>
@@ -1483,21 +1530,18 @@ export function Shell() {
         )}
       </div>
 
-      <Drawer title="设置" open={settingsOpen} onClose={() => setSettingsOpen(false)} width={460}>
-        <Paragraph type="secondary">
-          当前账号 {settings.account_email}。画面识别使用这个账号的密钥，请求地址固定为 https://token4u.cc/v1。画面模型可以在 GLM 5.3 Flash 和 DeepSeek 4.1 Flash 之间切换。口播由这个账号向中转站领取临时凭证，再由本机直接提交腾讯云。
-        </Paragraph>
-        <Paragraph type="secondary">
-          API Key 只保存在本机数据库。当前来源：
-          {settings?.api_key_source === "account"
-            ? "登录账号"
-            : settings?.api_key_source === "saved"
-              ? "本机已保存"
-              : settings?.api_key_source === "env"
-                ? "环境变量"
-                : "未配置"}
-          {settings?.api_key_masked ? `（${settings.api_key_masked}）` : ""}
-        </Paragraph>
+      <Drawer
+        title="设置"
+        rootClassName="settings-drawer"
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        width={460}
+        footer={
+          <Button type="primary" onClick={() => form.submit()}>
+            保存
+          </Button>
+        }
+      >
         <Form
           form={form}
           layout="vertical"
@@ -1549,33 +1593,58 @@ export function Shell() {
           <Form.Item label="单帧超时（秒）" name="timeout_sec">
             <InputNumber min={15} max={180} style={{ width: "100%" }} />
           </Form.Item>
-          <Form.Item label="模拟识别" name="mock_mode" valuePropName="checked" extra="打开后不调用 API，只用于看流程。">
-            <Switch />
-          </Form.Item>
           <Form.Item label="口播检测" name="asr_enabled" valuePropName="checked" extra="关闭后只检测画面，不再提取音频。登录后的口播凭证由中转站签发，不保存在本机。">
             <Switch checkedChildren="开" unCheckedChildren="关" />
-          </Form.Item>
-          <Form.Item label="腾讯云地域" name="tencent_region" extra="登录后的口播使用中转站返回的地域。这里只在本机用环境变量调试时生效。" rules={[{ required: true }]}>
-            <Input />
           </Form.Item>
           <Form.Item label="录音识别引擎" name="asr_engine" rules={[{ required: true }]} extra="免费的 10 小时包只抵扣通用引擎。大模型 2.0 需要对应的资源包。">
             <Select options={ASR_ENGINE_OPTIONS} />
           </Form.Item>
-          <Space wrap>
-            <Button type="primary" htmlType="submit">保存</Button>
-            <Button
-              onClick={async () => {
-                setSettings(await saveSettings({ clear_api_key: true }));
-                message.success("已清除本机保存的 Key");
-              }}
-            >
-              清除 Key
-            </Button>
-          </Space>
         </Form>
       </Drawer>
 
-      <Drawer title="审核规则" open={rulesOpen} onClose={() => setRulesOpen(false)} width={560}>
+      <Drawer
+        title="审核规则"
+        rootClassName="rules-drawer"
+        open={rulesOpen}
+        onClose={() => setRulesOpen(false)}
+        width={560}
+        footer={
+          <Button
+            type="primary"
+            onClick={async () => {
+              const parsed = phrasesFromDrafts(phraseDrafts);
+              if (parsed.error) {
+                message.error(parsed.error);
+                return;
+              }
+              if (ruleCategories.length === 0 && parsed.phrases.length === 0) {
+                message.error("至少启用一个类别，或添加一条额外命中词");
+                return;
+              }
+              try {
+                const saved = await saveSettings({
+                  rules: {
+                    categories: ruleCategories,
+                    extra_phrases: parsed.phrases,
+                    ignore_phrases: ignoreText
+                      .split(/\n+/)
+                      .map((item) => item.trim())
+                      .filter(Boolean),
+                    note: ruleNote.trim(),
+                  },
+                });
+                setSettings(saved);
+                applyRuleForm(saved.rules);
+                message.success("审核规则已保存，之后的识别会使用这套规则");
+              } catch (error) {
+                message.error(error instanceof Error ? error.message : "保存失败");
+              }
+            }}
+          >
+            保存规则
+          </Button>
+        }
+      >
         <Paragraph type="secondary">
           规则只保存在本机。口播词按原话匹配，X 表示数字。画面词只写进画面提示，必须在这一帧里看得见。短词只要原话里连续出现就会命中。忽略词和原文完全一致，或原文只是忽略词里的一段时不报告。补充说明不能放宽「禁止推测」。夸大宣传只看口播转写，原话里出现绝对化用语或疗效承诺才标，不判断真假。
         </Paragraph>
@@ -1625,41 +1694,43 @@ export function Shell() {
             onChange={(event) => setRuleNote(event.target.value)}
           />
         </div>
-        <Button
-          type="primary"
-          style={{ marginTop: 16 }}
-          onClick={async () => {
-            const parsed = phrasesFromDrafts(phraseDrafts);
-            if (parsed.error) {
-              message.error(parsed.error);
-              return;
-            }
-            if (ruleCategories.length === 0 && parsed.phrases.length === 0) {
-              message.error("至少启用一个类别，或添加一条额外命中词");
-              return;
-            }
-            try {
-              const saved = await saveSettings({
-                rules: {
-                  categories: ruleCategories,
-                  extra_phrases: parsed.phrases,
-                  ignore_phrases: ignoreText
-                    .split(/\n+/)
-                    .map((item) => item.trim())
-                    .filter(Boolean),
-                  note: ruleNote.trim(),
-                },
-              });
-              setSettings(saved);
-              applyRuleForm(saved.rules);
-              message.success("审核规则已保存，之后的识别会使用这套规则");
-            } catch (error) {
-              message.error(error instanceof Error ? error.message : "保存失败");
-            }
-          }}
-        >
-          保存规则
-        </Button>
+      </Drawer>
+
+      <Drawer title="测试" open={testOpen} onClose={() => setTestOpen(false)} width={460}>
+        <Paragraph type="secondary">
+          打开后，下一次识别按这里的失败场景走。非法 JSON 和腾讯云失败都不会真的发出那次请求。测完请关掉。
+        </Paragraph>
+        <div className="test-row">
+          <div>
+            <Text strong>模拟识别</Text>
+            <p>不请求画面模型，也不向大语言模型领取口播凭证。登录和刷新余额仍会访问账号接口。</p>
+          </div>
+          <Switch checked={settings.mock_mode} onChange={(checked) => void saveTestFlag({ mock_mode: checked })} />
+        </div>
+        <div className="test-row">
+          <div>
+            <Text strong>接口返回非法 JSON</Text>
+            <p>每一帧都按「模型没有返回可解析的 JSON」失败，任务会整段失败。口播文字判定如果执行到，也会得到同样的错误。和下面的部分帧同时打开时，以非法 JSON 为准。</p>
+          </div>
+          <Switch checked={settings.fault_bad_json} onChange={(checked) => void saveTestFlag({ fault_bad_json: checked })} />
+        </div>
+        <div className="test-row">
+          <div>
+            <Text strong>腾讯云接口调用失败</Text>
+            <p>口播在提交识别时失败，提示无法连接腾讯云。画面识别继续，任务仍可以完成。</p>
+          </div>
+          <Switch checked={settings.fault_tencent} onChange={(checked) => void saveTestFlag({ fault_tencent: checked })} />
+        </div>
+        <div className="test-row">
+          <div>
+            <Text strong>部分帧调用失败</Text>
+            <p>第 1、4、7… 帧按模型 HTTP 503 失败，其余帧照常识别。视频至少要有 2 帧，才能同时看到失败和成功。关掉后再点「重试失败的帧」，就会按正常方式重跑。</p>
+          </div>
+          <Switch
+            checked={settings.fault_partial_frames}
+            onChange={(checked) => void saveTestFlag({ fault_partial_frames: checked })}
+          />
+        </div>
       </Drawer>
 
       <Drawer title="MCP" open={mcpOpen} onClose={() => setMcpOpen(false)} width={560}>

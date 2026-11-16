@@ -358,9 +358,16 @@ def test_frozen_app_points_tls_at_the_bundled_certificate(monkeypatch, tmp_path)
     cafile.write_text("bundle", encoding="utf-8")
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+    previous = os.environ.get("SSL_CERT_FILE")
     monkeypatch.delenv("SSL_CERT_FILE", raising=False)
-    configure_tls()
-    assert os.environ["SSL_CERT_FILE"] == str(cafile)
+    try:
+        configure_tls()
+        assert os.environ["SSL_CERT_FILE"] == str(cafile)
+    finally:
+        if previous is None:
+            os.environ.pop("SSL_CERT_FILE", None)
+        else:
+            os.environ["SSL_CERT_FILE"] = previous
 
 
 def test_explain_error_uses_chinese_and_hides_secrets():
@@ -373,7 +380,7 @@ def test_explain_error_uses_chinese_and_hides_secrets():
     assert usable_api_key(RELAY_KEY) is True
     denied = explain_error(403, {"reason": "GROUP_NOT_ALLOWED", "message": "user is not allowed to bind this group"})
     assert denied.status == 403
-    assert str(denied) == "当前账号还不能识别画面，请联系管理员开通。"
+    assert str(denied) == "当前还不能识别画面，请联系管理员处理。"
     assert "sk-" not in str(denied)
     token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signaturevalue"
     assert token not in redact(f"header {token}")
@@ -487,7 +494,7 @@ def test_resolve_relay_group_id_prefers_the_exclusive_name():
         )
     except RelayError as exc:
         assert exc.status == 403
-        assert str(exc) == "当前账号还不能识别画面，请联系管理员开通。"
+        assert str(exc) == "当前还不能识别画面，请联系管理员处理。"
         detail = group_unavailable_message(DEFAULT_RELAY_GROUP_NAME, 99)
         assert "不会改用其他分组" in detail
         assert "99" in detail
@@ -576,7 +583,7 @@ def test_group_not_allowed_on_create_keeps_existing_keys(monkeypatch):
         body = login(client)
         assert body["settings"]["account_logged_in"] is True
         assert body["settings"]["has_api_key"] is False
-        assert body["message"] == "已登录。当前账号还不能识别画面，请联系管理员开通。"
+        assert body["message"] == "已登录。当前还不能识别画面，请联系管理员处理。"
         assert "不会改用其他分组" not in body["message"]
         assert upstream.creates == 1
         assert upstream.create_body == {"name": "电商视频合规", "group_id": TARGET_GROUP_ID}
@@ -600,7 +607,7 @@ def test_missing_exclusive_group_is_a_clear_error_and_creates_nothing(monkeypatc
         assert body["settings"]["account_logged_in"] is True
         assert body["settings"]["has_api_key"] is False
         assert body["settings"]["api_key_source"] == "none"
-        assert body["message"] == "已登录。当前账号还不能识别画面，请联系管理员开通。"
+        assert body["message"] == "已登录。当前还不能识别画面，请联系管理员处理。"
         assert DEFAULT_RELAY_GROUP_NAME not in body["message"]
         assert "不会改用其他分组" not in body["message"]
         assert upstream.creates == 0
@@ -642,7 +649,7 @@ def test_configured_group_id_that_is_not_available_does_not_create_a_key(monkeyp
         attach(upstream)
         body = login(client)
         assert body["settings"]["has_api_key"] is False
-        assert body["message"] == "已登录。当前账号还不能识别画面，请联系管理员开通。"
+        assert body["message"] == "已登录。当前还不能识别画面，请联系管理员处理。"
         assert "99" not in body["message"]
         assert upstream.creates == 0
         assert upstream.deletes == 0
@@ -771,7 +778,7 @@ def test_register_send_code_and_public_options():
         failed = client.get("/api/account/options")
         assert failed.status_code == 200
         assert failed.json()["reachable"] is False
-        assert "token4u.cc" in failed.json()["message"]
+        assert "大语言模型" in failed.json()["message"]
 
 
 def test_refresh_rotates_an_expired_session_and_updates_balance():

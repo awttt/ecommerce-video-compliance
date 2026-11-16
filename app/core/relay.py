@@ -38,6 +38,8 @@ def configured_model(value: object) -> str:
     return PICTURE_MODEL
 
 
+KEY_NOT_READY = "当前还不能识别画面，请联系管理员处理。"
+
 _REASON = {
     "INVALID_CREDENTIALS": (400, "邮箱或密码不正确"),
     "EMAIL_EXISTS": (409, "这个邮箱已经注册"),
@@ -79,7 +81,7 @@ _REASON = {
     "DAILY_LIMIT_EXCEEDED": (429, "今天的充值额度已用完"),
     "WECHAT_PAYMENT_MP_NOT_CONFIGURED": (502, "微信支付还没配好"),
     "USER_INACTIVE": (403, "这个账号已停用"),
-    "GROUP_NOT_ALLOWED": (403, "当前账号还不能识别画面，请联系管理员开通。"),
+    "GROUP_NOT_ALLOWED": (403, KEY_NOT_READY),
 }
 
 _TEXT = (
@@ -102,11 +104,9 @@ _TEXT = (
     (
         "not allowed to bind this group",
         403,
-        "当前账号还不能识别画面，请联系管理员开通。",
+        KEY_NOT_READY,
     ),
 )
-
-KEY_NOT_READY = "当前账号还不能识别画面，请联系管理员开通。"
 
 _CJK = re.compile(r"[\u4e00-\u9fff]")
 
@@ -280,10 +280,10 @@ class RelayClient:
                 )
         except httpx.TimeoutException as exc:
             log.warning("relay timeout: %s", type(exc).__name__)
-            raise RelayError("连接 token4u.cc 超时，请稍后再试", 504) from exc
+            raise RelayError("连接大语言模型超时，请稍后再试", 504) from exc
         except httpx.HTTPError as exc:
             log.warning("relay connection failed: %s", type(exc).__name__)
-            raise RelayError("连不上 token4u.cc，请检查网络", 502) from exc
+            raise RelayError("连不上大语言模型，请检查网络", 502) from exc
         try:
             body = response.json()
         except ValueError:

@@ -11,19 +11,8 @@ import type { AccountOptions, Settings } from "./types";
 
 const { Paragraph } = Typography;
 
-/** 与顶栏一致的品牌标记（登录页独立内联，避免与 App 形成循环依赖） */
 function AuthLogo() {
-  return (
-    <svg width={26} height={26} viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path
-        d="M4 9V7a3 3 0 0 1 3-3h2M15 4h2a3 3 0 0 1 3 3v2M20 15v2a3 3 0 0 1-3 3h-2M9 20H7a3 3 0 0 1-3-3v-2"
-        stroke="currentColor"
-        strokeWidth="1.7"
-        strokeLinecap="round"
-      />
-      <path d="M7.5 12h9" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-    </svg>
-  );
+  return <img className="brand-logo" src="/logo.png" alt="" />;
 }
 
 export function formatBalance(value: number | null | undefined): string {
@@ -64,7 +53,7 @@ function AuthFrame({
       <Card className="auth-card">
         <div className="auth-brand">
           <span className="auth-logo"><AuthLogo /></span>
-          <strong>电商视频素材合规检测</strong>
+          <strong>御镜视频素材审核系统</strong>
           <span>识别画面与口播中的价格、规格、品牌，以及口播里的夸大宣传</span>
         </div>
         <div className="auth-title">{title}</div>
@@ -90,7 +79,7 @@ function SiteNotices({ options, optionsError }: { options: AccountOptions | null
           type="warning"
           showIcon
           style={{ marginBottom: 12 }}
-          message="站点开启了人机验证，这个窗口里填不了验证码。请先在 token4u 后台关闭验证码。"
+          message="站点开启了人机验证，这个窗口里填不了验证码。请先在大语言模型后台关闭验证码。"
         />
       ) : null}
     </>

@@ -73,7 +73,7 @@ def test_health_and_settings_do_not_leak_the_key(monkeypatch):
         assert stored.json()["tencent_secret_source"] == "saved"
         assert stored.json()["tencent_secret_id_masked"].endswith("1234")
         assert stored.json()["asr_enabled"] is False
-        assert stored.json()["tencent_region"] == "ap-guangzhou"
+        assert stored.json()["tencent_region"] == "ap-shanghai"
         cleared_secret = client.put("/api/settings", json={"clear_tencent_secret": True, "asr_enabled": True})
         assert cleared_secret.json()["tencent_secret_source"] == "none"
         assert cleared_secret.json()["has_tencent_secret"] is False

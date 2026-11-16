@@ -12,7 +12,7 @@ import aiosqlite
 from app.core.asr_engine import configured_engine
 from app.core.relay import configured_model
 from app.core.rule_catalog import apply_builtin_rules, enable_exaggeration
-from app.schemas import DEFAULT_SETTINGS, DetectionRules, Finding, clamp_concurrency
+from app.schemas import DEFAULT_SETTINGS, FIXED_TENCENT_REGION, DetectionRules, Finding, clamp_concurrency
 
 log = logging.getLogger(__name__)
 
@@ -189,6 +189,8 @@ class Database:
         engine = configured_engine(merged.get("asr_engine"))
         engine_changed = merged.get("asr_engine") != engine
         merged["asr_engine"] = engine
+        region_changed = merged.get("tencent_region") != FIXED_TENCENT_REGION
+        merged["tencent_region"] = FIXED_TENCENT_REGION
         bounded = clamp_concurrency(merged.get("concurrency"))
         concurrency_changed = merged.get("concurrency") != bounded
         merged["concurrency"] = bounded
@@ -199,7 +201,7 @@ class Database:
         except Exception:
             merged["rules"] = DetectionRules().model_dump()
             seeded = False
-        if seeded or concurrency_changed or exaggeration_changed or engine_changed:
+        if seeded or concurrency_changed or exaggeration_changed or engine_changed or region_changed:
             await self.save_settings(merged)
         return merged
 

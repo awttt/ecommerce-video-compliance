@@ -1,4 +1,4 @@
-# 电商视频素材合规检测
+# 御镜视频素材审核系统
 
 本地桌面工具。上传电商视频后，按可配置帧率抽帧，调用 `glm-5.3-flash` 读取画面里的价格、规格、品牌。开启口播检测时，同时用 FFmpeg 抽出音频，调用腾讯云录音文件识别，再用同一套规则判断口播。口播转写里的绝对化用语和疗效承诺会另标为夸大宣传，不判断这句话是不是真的。画面和口播并行处理，相邻命中收成时间区间。
 
@@ -141,7 +141,8 @@ agent 可以提交一个本地视频，或指定一个文件夹。文件夹只�
 ## 数据放在哪
 
 - 开发（直接 `python run.py`）：项目下的 `data/`
-- 打包后的 exe：`%APPDATA%\EcommerceVideoCompliance`
+- 打包后的 Windows exe：`%APPDATA%\EcommerceVideoCompliance`
+- 打包后的 macOS 应用：`~/Library/Application Support/EcommerceVideoCompliance`
 - 也可以用环境变量 `EVC_DATA_DIR` 指定
 
 里面有 `app.db`、上传视频副本、导出文件和 `logs/app.log`。画面识别密钥明文存在本机数据库，不要把 `data/` 或 `.env` 交给别人。登录后的口播凭证只留在内存里。
@@ -183,6 +184,20 @@ powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
 产物在 `dist\VideoCompliance\VideoCompliance.exe`。把 `ffmpeg.exe` 和 `ffprobe.exe` 放在 exe 旁边，或者保证它们在 PATH 里。程序会先找环境变量 `EVC_FFMPEG` / `EVC_FFPROBE`，再找 exe 同目录，最后找 PATH。
 
 打包是窗口程序，没有黑色控制台。出错时看 `%APPDATA%\EcommerceVideoCompliance\logs\app.log`。开发时用 `python run.py` 可以直接看到报错。
+
+## macOS 打包
+
+在 Mac 上执行，打出来的是本机架构的应用，不能用来生成 Windows exe。
+
+```bash
+scripts/build_mac.sh
+```
+
+产物是 `dist/VideoCompliance.app`，双击打开。脚本会做临时签名，方便在这台电脑上直接试。第一次若被系统拦住，再执行 `xattr -cr dist/VideoCompliance.app`，或在访达里按住 Control 点「打开」。
+
+FFmpeg 用 `brew install ffmpeg` 即可。从访达打开时，程序会查找 `.app` 里面、`.app` 旁边，以及 `/opt/homebrew/bin` 和 `/usr/local/bin`。也可以设置 `EVC_FFMPEG` 和 `EVC_FFPROBE`。
+
+打包后的数据和开发时的 `data/` 分开。要重新登录。默认仍听 `127.0.0.1:8765`，这个端口被占用时窗口会马上退出，日志在 `~/Library/Application Support/EcommerceVideoCompliance/logs/`。发给别人的应用没有开发者签名，对方的 Mac 可能拒绝打开。
 
 ## 剪辑预留
 

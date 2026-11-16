@@ -81,6 +81,9 @@ export interface Settings {
   thinking: boolean;
   timeout_sec: number;
   mock_mode: boolean;
+  fault_bad_json: boolean;
+  fault_tencent: boolean;
+  fault_partial_frames: boolean;
   mcp_enabled: boolean;
   asr_enabled: boolean;
   has_tencent_secret: boolean;

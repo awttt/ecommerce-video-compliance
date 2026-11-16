@@ -299,6 +299,31 @@ async def test_missing_tencent_secret_skips_speech_without_failing_the_switch():
         await manager.shutdown()
 
 
+async def test_settings_mock_overrides_a_real_job_and_skips_relay():
+    from app.core.deepseek import MockRecognizer, build_recognizer
+    from app.core.tencent_asr import MockAsrClient
+    from app.services.manager import JobManager
+
+    manager = JobManager()
+    await manager.init()
+    try:
+        manager._settings["mock_mode"] = True
+        manager._settings["relay_email"] = "350944364@qq.com"
+        manager._settings["relay_access_token"] = "token"
+        state = _state(True, False)
+        config = manager._config_for(state)
+        assert config.mock is True
+        assert isinstance(build_recognizer(config), MockRecognizer)
+        holder: dict = {}
+        task = manager._start_speech(state, config, None, holder, _accept_status)
+        assert isinstance(holder["asr"], MockAsrClient)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        await manager.shutdown()
+
+
 async def test_mock_asr_returns_the_sample_sentence():
     client = MockAsrClient()
     sentences = await client.transcribe([], cancel=asyncio.Event(), on_status=_accept_status)

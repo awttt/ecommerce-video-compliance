@@ -1,33 +1,34 @@
 /* ============================================================
-   电商视频素材合规检测 · 界面设计规范「简白」
-   一色强调（墨绿）· 暖白底 · 大留白 · 轻边框 · 弱阴影
+   界面颜色对齐 Ant Design 默认色：主色 #1677ff，中性灰底与边框。
+   价格、规格、品牌、夸大宣传的类别色单独保留。
    ============================================================ */
 
 :root {
-  --ink: #1c2621;
-  --ink-2: #5f6d65;
-  --ink-3: #8b968f;
-  --ink-4: #b0b9b2;
+  --ink: rgba(0, 0, 0, 0.88);
+  --ink-2: rgba(0, 0, 0, 0.65);
+  --ink-3: rgba(0, 0, 0, 0.45);
+  --ink-4: rgba(0, 0, 0, 0.25);
 
-  --canvas: #f7f8f6;
+  --canvas: #f5f5f5;
   --surface: #ffffff;
-  --wash: #f7f9f7;
-  --line: #e4eae4;
-  --line-soft: #eff2ef;
+  --wash: #fafafa;
+  --line: #d9d9d9;
+  --line-soft: #f0f0f0;
 
-  --brand: #1f6f5b;
-  --brand-soft: #eaf3ef;
-  --brand-line: #cde3d9;
+  --brand: #1677ff;
+  --brand-hover: #4096ff;
+  --brand-soft: #e6f4ff;
+  --brand-line: #91caff;
 
   --cat-price: #c0604a;
   --cat-spec: #b5872f;
   --cat-brand: #4b7fa6;
-  --danger: #b4453c;
+  --danger: #ff4d4f;
 
   --radius-card: 14px;
   --radius-ctl: 8px;
-  --shadow-card: 0 1px 2px rgba(28, 38, 33, 0.03), 0 8px 28px rgba(28, 38, 33, 0.035);
-  --shadow-pop: 0 18px 48px rgba(28, 38, 33, 0.12);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.03), 0 6px 16px rgba(0, 0, 0, 0.08);
+  --shadow-pop: 0 6px 16px rgba(0, 0, 0, 0.08);
 }
 
 /* ---------- 基础 ---------- */
@@ -126,10 +127,17 @@ body {
   place-items: center;
   width: 38px;
   height: 38px;
+  overflow: hidden;
   border-radius: 11px;
-  background: var(--brand);
-  color: #fff;
-  box-shadow: 0 4px 12px rgba(31, 111, 91, 0.18);
+  background: #000;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+}
+
+.brand-logo {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 .brand-text {
@@ -146,17 +154,8 @@ body {
   white-space: nowrap;
 }
 
-.brand-text > span {
-  overflow: hidden;
-  color: var(--ink-3);
-  font-size: 11.5px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 340px;
-}
-
 .brand:hover .brand-mark {
-  background: #1a604e;
+  background: #111;
 }
 
 .app-nav {
@@ -186,7 +185,7 @@ body {
 
 .app-nav .ant-btn:hover,
 .app-nav button:hover {
-  background: #eef3ef;
+  background: rgba(0, 0, 0, 0.04);
   color: var(--ink);
 }
 
@@ -194,7 +193,7 @@ body {
 .app-nav button.is-active {
   background: var(--surface);
   color: var(--brand);
-  box-shadow: 0 1px 3px rgba(28, 38, 33, 0.08);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
 }
 
 .app-account {
@@ -215,7 +214,7 @@ body {
   border: 1px solid var(--brand-line);
   border-radius: 999px;
   background: var(--brand-soft);
-  color: #256b58;
+  color: #0958d9;
   font-size: 12px;
   font-weight: 500;
   line-height: 1;
@@ -296,25 +295,11 @@ body {
   background: var(--surface);
 }
 
-.app-shell .ant-btn-primary {
-  box-shadow: 0 2px 6px rgba(31, 111, 91, 0.16);
-}
-
-.app-shell .ant-btn-primary:hover {
-  background: #1a604e;
-}
-
 .app-shell .ant-input,
 .app-shell .ant-input-number,
 .app-shell .ant-select-selector,
 .app-shell .ant-input-affix-wrapper {
   border-radius: var(--radius-ctl);
-}
-
-.app-shell .ant-input:focus,
-.app-shell .ant-input-focused,
-.app-shell .ant-input-affix-wrapper-focused {
-  box-shadow: 0 0 0 3px rgba(31, 111, 91, 0.08);
 }
 
 .app-shell .ant-form-item-label > label {
@@ -325,24 +310,7 @@ body {
 
 .app-shell .ant-alert {
   border-radius: 10px;
-  border-color: transparent;
   font-size: 13px;
-}
-
-.app-shell .ant-alert-info {
-  background: #f0f5f2;
-}
-
-.app-shell .ant-alert-warning {
-  background: #fbf6ea;
-}
-
-.app-shell .ant-alert-error {
-  background: #fbefee;
-}
-
-.app-shell .ant-alert-success {
-  background: #edf6f0;
 }
 
 /* Drawer / Modal / Popover 挂在 body 上，不在 .app-shell 内，用全局选择器 */
@@ -367,6 +335,21 @@ body {
   margin-bottom: 16px;
 }
 
+.test-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.test-row p {
+  margin: 4px 0 0;
+  color: var(--ink-3);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 .mcp-prompt {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 13px;
@@ -375,6 +358,14 @@ body {
 
 .ant-drawer .ant-drawer-body {
   padding: 24px;
+}
+
+.settings-drawer .ant-drawer-footer,
+.rules-drawer .ant-drawer-footer {
+  flex-shrink: 0;
+  border-top: 1px solid var(--line-soft);
+  padding: 16px 24px;
+  background: var(--surface);
 }
 
 .ant-modal .ant-modal-content,
@@ -393,7 +384,7 @@ body {
 }
 
 .app-shell .ant-segmented-item-selected {
-  box-shadow: 0 1px 3px rgba(28, 38, 33, 0.08);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
   font-weight: 500;
 }
 
@@ -405,7 +396,7 @@ body {
 
 .app-shell .ant-upload-drag {
   padding: 26px 20px;
-  border: 1px dashed #d6dfd7;
+  border: 1px dashed var(--line);
   border-radius: 12px;
   background: var(--wash);
   transition: border-color 0.2s ease, background 0.2s ease;
@@ -430,7 +421,7 @@ body {
   border-radius: 13px;
   background: var(--surface);
   color: var(--brand);
-  box-shadow: 0 2px 10px rgba(28, 38, 33, 0.06);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
   font-size: 22px;
 }
 
@@ -496,7 +487,7 @@ body {
 
 .queue-row.is-selected:hover {
   border-color: var(--brand);
-  background: #e3f0ea;
+  background: #bae0ff;
 }
 
 .slider-row {
@@ -582,10 +573,9 @@ body {
   place-items: center;
   width: 48px;
   height: 48px;
+  overflow: hidden;
   border-radius: 14px;
-  background: var(--surface);
-  color: var(--brand);
-  font-size: 22px;
+  background: #000;
   box-shadow: var(--shadow-card);
 }
 
@@ -735,8 +725,8 @@ body {
 }
 
 .pill--confirmed {
-  color: #2e7d62;
-  background: #eaf4ef;
+  color: #389e0d;
+  background: #f6ffed;
 }
 
 .pill--pending {
@@ -832,7 +822,7 @@ body {
   height: 58px;
   border: 1px solid var(--line-soft);
   border-radius: 0 0 10px 10px;
-  background: #e7f0e9;
+  background: #f5f5f5;
   cursor: crosshair;
   overflow: hidden;
 }
@@ -856,10 +846,10 @@ body {
   position: absolute;
   top: 0;
   height: 100%;
-  border-left: 1px solid rgba(180, 69, 60, 0.45);
-  border-right: 1px solid rgba(180, 69, 60, 0.45);
+  border-left: 1px solid rgba(255, 77, 79, 0.45);
+  border-right: 1px solid rgba(255, 77, 79, 0.45);
   border-radius: 4px;
-  background: rgba(180, 69, 60, 0.2);
+  background: rgba(255, 77, 79, 0.2);
   cursor: pointer;
   z-index: 1;
 }
@@ -881,7 +871,7 @@ body {
   top: 0;
   width: 16px;
   height: 100%;
-  background: rgba(28, 38, 33, 0.12);
+  background: rgba(0, 0, 0, 0.12);
   cursor: ew-resize;
 }
 
@@ -912,7 +902,7 @@ body {
 }
 
 .cut-handle.hot {
-  background: rgba(28, 38, 33, 0.24);
+  background: rgba(0, 0, 0, 0.24);
 }
 
 .cut-label {
@@ -921,7 +911,7 @@ body {
   right: 20px;
   top: 50%;
   transform: translateY(-50%);
-  color: #8c3b34;
+  color: #cf1322;
   font-size: 11px;
   font-weight: 500;
   white-space: nowrap;
@@ -1038,7 +1028,7 @@ body {
   min-height: 100vh;
   padding: 32px 24px;
   background:
-    radial-gradient(900px 420px at 50% -12%, #e4f0e9 0%, transparent 62%),
+    radial-gradient(900px 420px at 50% -12%, #e6f4ff 0%, transparent 62%),
     var(--canvas);
 }
 
@@ -1064,10 +1054,10 @@ body {
   width: 48px;
   height: 48px;
   margin: 0 auto 16px;
+  overflow: hidden;
   border-radius: 14px;
-  background: var(--brand);
-  color: #fff;
-  box-shadow: 0 8px 20px rgba(31, 111, 91, 0.2);
+  background: #000;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.16);
 }
 
 .auth-brand strong {
@@ -1145,14 +1135,14 @@ body {
   padding: 14px 20px;
   border: 1px solid var(--brand-line);
   border-radius: var(--radius-card);
-  background: linear-gradient(135deg, #f0f7f3 0%, var(--brand-soft) 100%);
+  background: linear-gradient(135deg, #ffffff 0%, var(--brand-soft) 100%);
 }
 
 .balance-card__label {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: #4b7b68;
+  color: var(--ink-3);
   font-size: 12px;
 }
 
@@ -1377,7 +1367,7 @@ body {
 }
 
 .amount-option.is-selected .amount-option__unit {
-  color: #4b8772;
+  color: var(--brand);
 }
 
 .custom-amount {
@@ -1417,7 +1407,7 @@ body {
 }
 
 .pay-summary__main > span {
-  color: #4b7b68;
+  color: var(--ink-3);
   font-size: 12px;
 }
 
@@ -1456,7 +1446,7 @@ body {
 }
 
 .pay-summary__side span {
-  color: #6d8b7e;
+  color: var(--ink-3);
   font-size: 11.5px;
 }
 
@@ -1894,12 +1884,12 @@ body {
 ::-webkit-scrollbar-thumb {
   border: 3px solid transparent;
   border-radius: 8px;
-  background: #dde4dd;
+  background: #d9d9d9;
   background-clip: content-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #c9d4ca;
+  background: #bfbfbf;
   background-clip: content-box;
 }
 
@@ -1908,10 +1898,6 @@ body {
 }
 
 @media (max-width: 1080px) {
-  .brand-text > span {
-    display: none;
-  }
-
   .app-account .account-chip {
     max-width: 170px;
   }
@@ -1953,12 +1939,12 @@ body {
 /* ---------- 状态标签与细节补充 ---------- */
 
 .pill--error {
-  color: #a24e3c;
-  background: #faefeb;
+  color: #cf1322;
+  background: #fff2f0;
 }
 
 .pill--active {
-  color: #1f6f5b;
+  color: var(--brand);
   background: var(--brand-soft);
 }
 
