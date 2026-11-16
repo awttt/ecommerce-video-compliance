@@ -30,7 +30,7 @@ jobs:
 
       - name: Build the desktop app
         shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
+        run: pwsh -ExecutionPolicy Bypass -File scripts\build_windows.ps1
 
       - name: Put FFmpeg next to the executable
         shell: pwsh

@@ -1,4 +1,4 @@
-# 在 Windows 上构建桌面程序。
+﻿# 在 Windows 上构建桌面程序。
 # 用法：powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
 
 $ErrorActionPreference = "Stop"
