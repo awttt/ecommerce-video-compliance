@@ -7,6 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.core.asr_engine import configured_engine
 from app.core.relay import configured_model
 from app.core.rule_catalog import default_extra_phrases
 
@@ -180,7 +181,7 @@ class RunConfig(BaseModel):
     tencent_secret_id: str = ""
     tencent_secret_key: str = ""
     tencent_region: str = "ap-shanghai"
-    asr_engine: str = "16k_zh"
+    asr_engine: str = "16k_zh_en_2.0"
     rules: DetectionRules = Field(default_factory=lambda: DetectionRules())
 
 
@@ -293,8 +294,8 @@ class SettingUpdate(BaseModel):
     def _engine(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        cleaned = value.strip()
-        if not re.fullmatch(r"[0-9A-Za-z_]{2,40}", cleaned):
+        cleaned = configured_engine(value)
+        if not re.fullmatch(r"[0-9A-Za-z_.]{2,40}", cleaned):
             raise ValueError("识别引擎名称无效")
         return cleaned
 
@@ -440,7 +441,7 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "tencent_secret_id": "",
     "tencent_secret_key": "",
     "tencent_region": "ap-shanghai",
-    "asr_engine": "16k_zh",
+    "asr_engine": "16k_zh_en_2.0",
     "rules": {
         "categories": ["价格", "规格", "品牌", "夸大宣传"],
         "extra_phrases": default_extra_phrases(),

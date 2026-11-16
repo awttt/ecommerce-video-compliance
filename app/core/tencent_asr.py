@@ -20,6 +20,7 @@ from pathlib import Path
 
 import httpx
 
+from app.core.asr_engine import ASR_ENGINE, configured_engine
 from app.core.pipeline import JobCancelled, wait_while_paused
 from app.core.transcript import SpeechSentence, SpeechWord
 
@@ -46,6 +47,7 @@ def sign_tc3(
     payload: str,
     timestamp: int,
     host: str = ASR_HOST,
+    token: str = "",
 ) -> dict[str, str]:
     algorithm = "TC3-HMAC-SHA256"
     date = datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%d")
@@ -77,7 +79,7 @@ def sign_tc3(
         f"{algorithm} Credential={secret_id}/{credential_scope}, "
         f"SignedHeaders={signed_headers}, Signature={signature}"
     )
-    return {
+    headers = {
         "Authorization": authorization,
         "Content-Type": "application/json; charset=utf-8",
         "Host": host,
@@ -86,6 +88,10 @@ def sign_tc3(
         "X-TC-Version": ASR_VERSION,
         "X-TC-Region": region,
     }
+    session = token.strip()
+    if session:
+        headers["X-TC-Token"] = session
+    return headers
 
 
 def chunk_spans(duration: float, byte_size: int, limit: int = MAX_AUDIO_BYTES) -> list[tuple[float, float]]:
@@ -178,8 +184,9 @@ class TencentAsrClient:
         secret_id: str,
         secret_key: str,
         region: str,
-        engine: str = "16k_zh",
+        engine: str = ASR_ENGINE,
         *,
+        token: str = "",
         host: str | None = None,
         timeout: float = 60,
         poll_interval: float = 1.5,
@@ -187,13 +194,22 @@ class TencentAsrClient:
     ):
         self.secret_id = secret_id
         self.secret_key = secret_key
+        self.token = token.strip()
         self.region = region or "ap-shanghai"
-        self.engine = engine or "16k_zh"
+        self.engine = configured_engine(engine)
         self.host = host or os.environ.get("TENCENT_ASR_HOST", "").strip() or ASR_HOST
         self.timeout = timeout
         self.poll_interval = poll_interval
         self._transport = transport
         self._client: httpx.AsyncClient | None = None
+
+    def apply_credentials(self, secret_id: str, secret_key: str, region: str, token: str) -> None:
+        """用这一次任务的临时凭证替换签名材料。不写入磁盘。"""
+        self.secret_id = secret_id.strip()
+        self.secret_key = secret_key.strip()
+        self.token = token.strip()
+        if region.strip():
+            self.region = region.strip()
 
     async def __aenter__(self) -> TencentAsrClient:
         self._client = httpx.AsyncClient(
@@ -225,6 +241,8 @@ class TencentAsrClient:
         client = self._client
         if client is None:
             raise RuntimeError("口播识别已取消")
+        if not self.secret_id or not self.secret_key:
+            raise TencentAsrError("没有口播凭证")
         sentences: list[SpeechSentence] = []
         total = max(len(pieces), 1)
         for index, (offset, path) in enumerate(pieces, start=1):
@@ -301,6 +319,7 @@ class TencentAsrClient:
             payload=payload,
             timestamp=timestamp,
             host=self.host,
+            token=self.token,
         )
         try:
             response = await client.post("/", content=payload.encode("utf-8"), headers=headers)

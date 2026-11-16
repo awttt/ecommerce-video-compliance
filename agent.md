@@ -14,7 +14,7 @@
 - 视觉请求只在 user 消息里放 `image_url.url` 的 data URL，不要带 `detail`。`glm-5.3-flash` 的 `thinking.type` 只能是 `enabled`，传 `disabled` 会 400。思考开关关闭时带 `reasoning_effort: low` 和 `max_tokens: 2048`；打开时用 `high` 和 `4096`。不要省略 `reasoning_effort`，上游默认是 `max`。使用 `response_format: json_object`；若 400 且错误提到 `response_format`，去掉该字段重试一次。408/409/429/500/502/503/504 和网络超时可重试。401/403 表示密钥无效。请求里不要带 temperature。低细节只把抽帧长边压到不超过 640，不传给模型。
 - 服务只监听 `127.0.0.1` 或 `localhost`。不要改成对外网卡。
 - 密钥只放在 gitignore 的 `.env` 和 `data/app.db`。不要写进任务记录、日志、测试、提交或聊天回复。`GET /api/settings` 只返回打码后的密钥。PUT 时空的密钥字段表示「不修改」。`clear_api_key` / `clear_tencent_secret` 只清本机保存的值。
-- 有效密钥的优先级：画面识别用数据库里的 `api_key`，否则用 `DEEPSEEK_API_KEY`（环境变量名保持不变）。腾讯云必须 SecretId 和 SecretKey 成对出现，数据库一对优先，否则用 `TENCENTCLOUD_SECRET_ID` + `TENCENTCLOUD_SECRET_KEY`。地域用设置里的 `tencent_region`，否则 `TENCENTCLOUD_REGION`，否则 `ap-shanghai`。基地址没有环境变量，只在数据库设置里。登录后的请求改用账号密钥和 `https://token4u.cc/v1`。这把自动密钥绑定分组「电商审核专属-bot创建」（`EVC_RELAY_GROUP_NAME`，编号用 `GET /api/v1/groups/available` 按名称解析，对不上再用仍在该列表中的 `EVC_RELAY_GROUP_ID`）。它是专属分组，未分配给账号时要明确报错，不能改绑或删除已有密钥，也不能改用其他分组。
+- 有效密钥的优先级：画面识别用数据库里的 `api_key`，否则用 `DEEPSEEK_API_KEY`（环境变量名保持不变）。登录后的口播不读本机保存的腾讯云密钥。程序向 token4u 的 `POST /api/v1/asr/credentials` 取临时凭证，和抽音频同时进行，签名多带 `X-TC-Token`，凭证不落盘。取不到就跳过口播，任务仍然成功。本机调试若同时设置了 `TENCENTCLOUD_SECRET_ID` 和 `TENCENTCLOUD_SECRET_KEY`，则直接用这一对，不再向中转站要凭证。地域优先用临时凭证返回的值，否则用设置里的 `tencent_region`，否则 `TENCENTCLOUD_REGION`，否则 `ap-shanghai`。基地址没有环境变量，只在数据库设置里。登录后的请求改用账号密钥和 `https://token4u.cc/v1`。这把自动密钥绑定分组「电商审核专属-bot创建」（`EVC_RELAY_GROUP_NAME`，编号用 `GET /api/v1/groups/available` 按名称解析，对不上再用仍在该列表中的 `EVC_RELAY_GROUP_ID`）。它是专属分组，未分配给账号时要明确报错，不能改绑或删除已有密钥，也不能改用其他分组。
 - `.env.example` 保持空值。`load_dotenv()` 用 `setdefault`，已经存在的环境变量优先。
 
 ## 改哪里
@@ -43,7 +43,7 @@
 
 1. `POST /api/jobs` 或 `POST /api/jobs/batch` 把文件放到 `data/videos/{job_id}/`。
 2. 同一时间只跑一个任务。其余保持 `queued`，最多 20 个。`EVC_INLINE_JOBS=1` 时在请求里同步跑完，测试靠这个。
-3. 画面：FFmpeg 按 FPS（0.5–2）抽 JPEG，边抽边发给当前选中的画面模型。口播：抽出 16 kHz 单声道，走腾讯云「录音文件识别」（`CreateRecTask` / `DescribeTaskStatus`，SourceType 1）。缺腾讯云密钥时跳过口播，任务仍然成功，`asr_error` 写明已跳过。
+3. 画面：FFmpeg 按 FPS（0.5–2）抽 JPEG，边抽边发给当前选中的画面模型。口播：抽出 16 kHz 单声道，用临时凭证走腾讯云「录音文件识别」（`CreateRecTask` / `DescribeTaskStatus`，SourceType 1）。未登录、凭证失败或本机没有调试密钥时跳过口播，任务仍然成功，`asr_error` 写明已跳过。
 4. 两边并行。总进度大约是画面 70% + 口播 30%，完成前不超过 99。画面先结束时提示「画面已完成，正在等待口播结果」。
 5. `aggregate()` 收成 `Finding`。口播命中额外带 `sentence_start`、`sentence_end`、`next_start`，只给剪辑用，不进导出。
 6. 临时帧在 `data/frames/{job_id}`，临时音频在 `data/audio/{job_id}`。任务结束就删，除非 `EVC_KEEP_FRAMES=1`。

@@ -317,6 +317,11 @@ class RelayClient:
         data = await self._request("GET", "/user/profile", token=token)
         return data if isinstance(data, dict) else {}
 
+    async def asr_credentials(self, token: str) -> dict:
+        """向中转站要一对短期口播凭证。响应里的密钥只留在内存。"""
+        data = await self._request("POST", "/asr/credentials", token=token, json={})
+        return data if isinstance(data, dict) else {}
+
     async def usage(self, token: str) -> dict:
         data = await self._request("GET", "/usage/dashboard/stats", token=token)
         return data if isinstance(data, dict) else {}

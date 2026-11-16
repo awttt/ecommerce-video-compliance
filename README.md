@@ -70,7 +70,7 @@ ecommerce-video-compliance/
 - Node.js 18+（只在构建界面时需要）
 - FFmpeg 5+，并且 `ffmpeg`、`ffprobe` 在 PATH 中
 - 能访问 `https://token4u.cc`（登录后的画面请求发到 `https://token4u.cc/v1`，模型可选 `glm-5.3-flash` 或 `deepseek-flash`）
-- 口播检测还要能访问 `https://asr.tencentcloudapi.com`，并准备腾讯云 SecretId / SecretKey
+- 口播检测还要能访问 `https://asr.tencentcloudapi.com`。登录后的临时凭证由 token4u 签发，本机不保存腾讯云密钥
 - Windows 桌面窗口使用系统 WebView2（Win10/11 一般已经带了）
 
 登录 token4u.cc 账号后，程序用该账号的密钥调用画面模型。注册或登录时会列出这个账号的可用分组（`GET /api/v1/groups/available`），按名称「电商审核专属-bot创建」解析出分组编号，再创建或复用一把名为「电商视频合规」的密钥并绑到该分组。这是专属分组，余额计费，费率 1.8 倍，含口播费用。管理员没有把分组分配给账号时，它不会出现在可用分组里，登录会提示需要分配，不会改用其他分组，也不会删除已有密钥。已经绑在别的分组上的同名密钥会留在原处，程序另用新分组里的密钥。
@@ -144,15 +144,16 @@ agent 可以提交一个本地视频，或指定一个文件夹。文件夹只�
 - 打包后的 exe：`%APPDATA%\EcommerceVideoCompliance`
 - 也可以用环境变量 `EVC_DATA_DIR` 指定
 
-里面有 `app.db`、上传视频副本、导出文件和 `logs/app.log`。画面识别密钥和腾讯云密钥明文存在本机数据库，不要把 `data/` 或 `.env` 交给别人。
+里面有 `app.db`、上传视频副本、导出文件和 `logs/app.log`。画面识别密钥明文存在本机数据库，不要把 `data/` 或 `.env` 交给别人。登录后的口播凭证只留在内存里。
 
 `.env` 示例：
 
 ```text
 DEEPSEEK_API_KEY=sk-...
-TENCENTCLOUD_SECRET_ID=AKID...
-TENCENTCLOUD_SECRET_KEY=...
-TENCENTCLOUD_REGION=ap-shanghai
+# 只在本机调试口播时填写。登录后的正式口播向 token4u 要临时凭证。
+# TENCENTCLOUD_SECRET_ID=
+# TENCENTCLOUD_SECRET_KEY=
+# TENCENTCLOUD_REGION=ap-shanghai
 EVC_FFMPEG=C:\ffmpeg\bin\ffmpeg.exe
 EVC_FFPROBE=C:\ffmpeg\bin\ffprobe.exe
 # EVC_RELAY_GROUP_NAME=电商审核专属-bot创建
@@ -164,12 +165,12 @@ EVC_FFPROBE=C:\ffmpeg\bin\ffprobe.exe
 ## 使用
 
 1. 登录 token4u.cc 账号。画面请求地址固定为 `https://token4u.cc/v1`，模型在 GLM 5.3 Flash 和 DeepSeek 4.1 Flash 之间选择。
-2. 需要口播检测时，打开「口播检测」，填写腾讯云 SecretId、SecretKey。地域默认 `ap-shanghai`，引擎默认 `16k_zh`。可以随时关掉口播，只检测画面。
+2. 需要口播检测时，打开「口播检测」。程序用登录账号向 token4u 领取临时凭证，再由本机把音频直接发给腾讯云。引擎默认 `16k_zh_en_2.0`（录音文件识别大模型 2.0）。可以随时关掉口播，只检测画面。
 3. 拖入视频。抽帧可在 0.5–2 FPS 之间调，并发在 1–8 之间，默认 4。
 4. 进度会同时显示抽帧、画面识别和口播阶段。画面检测与音频识别并行。
 5. 点击表格或时间轴，视频跳到对应时间。口播条目在时间轴下半部分。
 6. 导出 JSON 或 Excel。一次识别多个视频时，可以批量导出成一个 Excel。文件同时写在数据目录的 `exports/`。
-7. 任务结束后，中间 jpg 和临时音频会删除。视频副本和结果留下，方便回看历史。没有腾讯云密钥或口播识别失败时，画面结果仍然保留，并在任务上显示原因。有画面帧识别失败时，结果上会出现「重试失败的帧」。记下了帧号就只重跑这些帧；以前没记下帧号的任务会重跑全部画面。口播已经成功的会保留。
+7. 任务结束后，中间 jpg 和临时音频会删除。视频副本和结果留下，方便回看历史。没有口播凭证或口播识别失败时，画面结果仍然保留，并在任务上显示原因。有画面帧识别失败时，结果上会出现「重试失败的帧」。记下了帧号就只重跑这些帧；以前没记下帧号的任务会重跑全部画面。口播已经成功的会保留。
 
 画面长边默认压到 1280 像素。低细节会再把长边压到不超过 640。价格字很小的时候不要改成「低细节」。
 
@@ -202,7 +203,7 @@ pytest
 
 音频用 FFmpeg 抽成 16kHz 单声道。本地文件通过录音文件识别的 `CreateRecTask`（`SourceType=1`）上传，再轮询 `DescribeTaskStatus` 取带时间戳的句子。单段音频超过约 4.5MB 时按时间切开，时间戳加回视频里的起点。口播文本交给 `glm-5.3-flash` 做文本判定，原文对不上句子的会被丢掉。
 
-腾讯云密钥不会写进任务记录，日志里的 SecretId 和签名会打码。海外账号可以把 `TENCENT_ASR_HOST` 设成对应域名。
+口播临时凭证不会写进任务记录。日志里的 SecretId 和签名会打码。海外账号可以把 `TENCENT_ASR_HOST` 设成对应域名。
 
 ## 限制
 

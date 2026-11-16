@@ -9,6 +9,7 @@ from pathlib import Path
 
 import aiosqlite
 
+from app.core.asr_engine import configured_engine
 from app.core.relay import configured_model
 from app.core.rule_catalog import apply_builtin_rules, enable_exaggeration
 from app.schemas import DEFAULT_SETTINGS, DetectionRules, Finding, clamp_concurrency
@@ -176,6 +177,9 @@ class Database:
             if isinstance(stored, dict):
                 merged.update(stored)
         merged["model"] = configured_model(merged.get("model"))
+        engine = configured_engine(merged.get("asr_engine"))
+        engine_changed = merged.get("asr_engine") != engine
+        merged["asr_engine"] = engine
         bounded = clamp_concurrency(merged.get("concurrency"))
         concurrency_changed = merged.get("concurrency") != bounded
         merged["concurrency"] = bounded
@@ -186,7 +190,7 @@ class Database:
         except Exception:
             merged["rules"] = DetectionRules().model_dump()
             seeded = False
-        if seeded or concurrency_changed or exaggeration_changed:
+        if seeded or concurrency_changed or exaggeration_changed or engine_changed:
             await self.save_settings(merged)
         return merged
 

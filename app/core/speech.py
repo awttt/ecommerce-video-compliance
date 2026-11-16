@@ -26,6 +26,7 @@ class SpeechProgress:
 
 SpeechCb = Callable[[SpeechProgress], Awaitable[None]]
 ProcessCb = Callable[[asyncio.subprocess.Process | None], None]
+PrepareCb = Callable[[], Awaitable[None]]
 
 
 async def run_speech(
@@ -37,10 +38,11 @@ async def run_speech(
     on_progress: SpeechCb,
     on_process: ProcessCb | None = None,
     resume: asyncio.Event | None = None,
+    prepare: PrepareCb | None = None,
 ) -> list[RawHit]:
     work_dir.mkdir(parents=True, exist_ok=True)
     try:
-        return await _run(video, work_dir, asr, judge, cancel, on_progress, on_process, resume)
+        return await _run(video, work_dir, asr, judge, cancel, on_progress, on_process, resume, prepare)
     finally:
         cleanup_tree(work_dir)
 
@@ -54,6 +56,33 @@ async def _run(
     on_progress: SpeechCb,
     on_process: ProcessCb | None,
     resume: asyncio.Event | None = None,
+    prepare: PrepareCb | None = None,
+) -> list[RawHit]:
+    prepared = asyncio.create_task(prepare()) if prepare is not None else None
+    try:
+        return await _recognize(
+            video, work_dir, asr, judge, cancel, on_progress, on_process, resume, prepared
+        )
+    finally:
+        if prepared is not None:
+            if not prepared.done():
+                prepared.cancel()
+            try:
+                await prepared
+            except (asyncio.CancelledError, Exception):
+                pass
+
+
+async def _recognize(
+    video: Path,
+    work_dir: Path,
+    asr: TencentAsrClient | MockAsrClient,
+    judge,
+    cancel: asyncio.Event,
+    on_progress: SpeechCb,
+    on_process: ProcessCb | None,
+    resume: asyncio.Event | None,
+    prepared: asyncio.Task | None,
 ) -> list[RawHit]:
     await on_progress(SpeechProgress(stage="audio", message="正在提取音频", hits=[], ratio=0.15))
     probe = await probe_video(video)
@@ -63,6 +92,10 @@ async def _run(
     if cancel.is_set():
         raise JobCancelled()
     await wait_while_paused(cancel, resume)
+    if cancel.is_set():
+        raise JobCancelled()
+    if prepared is not None:
+        await prepared
     if cancel.is_set():
         raise JobCancelled()
     await on_progress(SpeechProgress(stage="submitting", message="正在提交腾讯云识别", hits=[], ratio=0.35))

@@ -7,7 +7,7 @@ import pytest
 
 from app.core.aggregate import aggregate
 from app.core.parsing import parse_speech_result
-from app.core.tencent_asr import MockAsrClient, TencentAsrClient, chunk_spans, parse_asr_data
+from app.core.tencent_asr import MockAsrClient, TencentAsrClient, chunk_spans, parse_asr_data, sign_tc3
 from app.core.transcript import SpeechSentence, SpeechWord
 from app.db import Database
 from app.schemas import RunConfig
@@ -268,8 +268,8 @@ async def test_missing_tencent_secret_skips_speech_without_failing_the_switch():
         assert task is not None
         hits, error = await task
         assert hits == []
-        assert "腾讯云密钥" in error
-        assert seen and "腾讯云密钥" in seen[0]
+        assert "未登录" in error
+        assert seen and "未登录" in seen[0]
         assert manager._start_speech(state, RunConfig(asr_enabled=False, mock=False), None, {}, on_speech) is None
     finally:
         await manager.shutdown()
@@ -321,6 +321,189 @@ async def test_old_findings_table_gains_source_column(tmp_path):
         assert findings[0].text == "¥199"
     finally:
         await database.close()
+
+
+def test_sign_tc3_adds_the_session_token_outside_the_signature():
+    headers = sign_tc3(
+        secret_id="AKIDexample",
+        secret_key="secret",
+        region="ap-shanghai",
+        action="CreateRecTask",
+        payload="{}",
+        timestamp=1_700_000_000,
+        token="session-token",
+    )
+    assert headers["X-TC-Token"] == "session-token"
+    assert "session-token" not in headers["Authorization"]
+
+
+def test_sign_tc3_omits_the_token_header_for_a_long_term_key():
+    headers = sign_tc3(
+        secret_id="AKIDexample",
+        secret_key="secret",
+        region="ap-shanghai",
+        action="CreateRecTask",
+        payload="{}",
+        timestamp=1_700_000_000,
+    )
+    assert "X-TC-Token" not in headers
+
+
+async def test_logged_in_speech_fetches_credentials_while_extracting_audio(monkeypatch, tmp_path):
+    from app.core.ffmpeg import VideoProbe
+    from app.core.relay import RelayClient
+    from app.services.manager import JobManager
+
+    order: list[str] = []
+
+    async def fake_probe(_path):
+        return VideoProbe(1.0, True, True, 16, 16)
+
+    async def fake_codec():
+        return ".wav", ["-c:a", "pcm_s16le"]
+
+    async def fake_extract(_video, dest, **_kwargs):
+        order.append("extract-start")
+        await asyncio.sleep(0.05)
+        dest.write_bytes(b"\x00\x01")
+        order.append("extract-end")
+
+    monkeypatch.setattr("app.core.speech.probe_video", fake_probe)
+    monkeypatch.setattr("app.core.speech.speech_codec", fake_codec)
+    monkeypatch.setattr("app.core.speech.extract_audio", fake_extract)
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        order.append("credentials")
+        assert request.url.path == "/api/v1/asr/credentials"
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "tmp_secret_id": "AKIDtmp",
+                    "tmp_secret_key": "tmp-secret",
+                    "token": "session-token",
+                    "region": "ap-guangzhou",
+                    "expired_at": 1_700_001_800,
+                },
+            },
+        )
+
+    seen_token: list[str] = []
+
+    def tencent(request: httpx.Request) -> httpx.Response:
+        seen_token.append(request.headers.get("X-TC-Token", ""))
+        if request.headers.get("X-TC-Action") == "CreateRecTask":
+            return httpx.Response(200, json={"Response": {"Data": {"TaskId": 7}, "RequestId": "a"}})
+        return httpx.Response(
+            200,
+            json={
+                "Response": {
+                    "Data": {
+                        "TaskId": 7,
+                        "Status": 2,
+                        "StatusStr": "success",
+                        "ResultDetail": [
+                            {"FinalSentence": "这款只要九十九元", "StartMs": 0, "EndMs": 400, "Words": []}
+                        ],
+                    },
+                    "RequestId": "b",
+                }
+            },
+        )
+
+    manager = JobManager()
+    await manager.init()
+    try:
+        manager._settings["relay_access_token"] = "login-token"
+        manager._settings["relay_email"] = "user@example.com"
+        manager.relay = RelayClient(transport=httpx.MockTransport(upstream))
+        state = _state(True, False)
+        state.source_path = str(tmp_path / "视频.mp4")
+        config = manager._config_for(state)
+        asr_holder: dict = {}
+
+        async def on_speech(_progress) -> None:
+            return None
+
+        class Judge:
+            async def judge_speech(self, _sentences):
+                return []
+
+        task = manager._start_speech(state, config, Judge(), asr_holder, on_speech)
+        assert task is not None
+        client = asr_holder["asr"]
+        client._transport = httpx.MockTransport(tencent)
+        hits, error = await task
+        assert error == ""
+        assert hits == []
+        assert seen_token and seen_token[0] == "session-token"
+        assert client.region == "ap-guangzhou"
+        assert order.index("credentials") < order.index("extract-end")
+    finally:
+        await manager.shutdown()
+
+
+async def test_credential_failure_skips_speech_without_calling_tencent(monkeypatch, tmp_path):
+    from app.core.ffmpeg import VideoProbe
+    from app.core.relay import RelayClient
+    from app.services.manager import JobManager
+
+    async def fake_probe(_path):
+        return VideoProbe(1.0, True, True, 16, 16)
+
+    async def fake_codec():
+        return ".wav", ["-c:a", "pcm_s16le"]
+
+    async def fake_extract(_video, dest, **_kwargs):
+        dest.write_bytes(b"\x00\x01")
+
+    monkeypatch.setattr("app.core.speech.probe_video", fake_probe)
+    monkeypatch.setattr("app.core.speech.speech_codec", fake_codec)
+    monkeypatch.setattr("app.core.speech.extract_audio", fake_extract)
+
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"code": 403, "message": "当前账号没有口播分组，请联系管理员分配"})
+
+    called = {"tencent": False}
+
+    def tencent(_request: httpx.Request) -> httpx.Response:
+        called["tencent"] = True
+        return httpx.Response(500, json={})
+
+    manager = JobManager()
+    await manager.init()
+    try:
+        manager._settings["relay_access_token"] = "login-token"
+        manager._settings["relay_email"] = "user@example.com"
+        manager.relay = RelayClient(transport=httpx.MockTransport(upstream))
+        state = _state(True, False)
+        state.source_path = str(tmp_path / "视频.mp4")
+        config = manager._config_for(state)
+        holder: dict = {}
+
+        async def on_speech(_progress) -> None:
+            return None
+
+        task = manager._start_speech(state, config, None, holder, on_speech)
+        assert task is not None
+        holder["asr"]._transport = httpx.MockTransport(tencent)
+        hits, error = await task
+        assert hits == []
+        assert "口播分组" in error
+        assert called["tencent"] is False
+    finally:
+        await manager.shutdown()
+
+
+def test_legacy_engine_becomes_the_large_model():
+    from app.core.asr_engine import configured_engine
+    from app.schemas import SettingUpdate
+
+    assert configured_engine("16k_zh") == "16k_zh_en_2.0"
+    assert configured_engine("") == "16k_zh_en_2.0"
+    assert SettingUpdate(asr_engine="16k_zh_en_2.0").asr_engine == "16k_zh_en_2.0"
+    assert SettingUpdate(asr_engine="16k_zh").asr_engine == "16k_zh_en_2.0"
 
 
 def test_run_config_accepts_asr_fields():

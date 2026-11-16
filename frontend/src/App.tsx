@@ -1450,7 +1450,7 @@ export function Shell() {
 
       <Drawer title="设置" open={settingsOpen} onClose={() => setSettingsOpen(false)} width={460}>
         <Paragraph type="secondary">
-          当前账号 {settings.account_email}。画面识别使用这个账号的密钥，请求地址固定为 https://token4u.cc/v1。画面模型可以在 GLM 5.3 Flash 和 DeepSeek 4.1 Flash 之间切换。口播继续用腾讯云。
+          当前账号 {settings.account_email}。画面识别使用这个账号的密钥，请求地址固定为 https://token4u.cc/v1。画面模型可以在 GLM 5.3 Flash 和 DeepSeek 4.1 Flash 之间切换。口播由这个账号向中转站领取临时凭证，再由本机直接提交腾讯云。
         </Paragraph>
         <Paragraph type="secondary">
           API Key 只保存在本机数据库。当前来源：
@@ -1468,8 +1468,6 @@ export function Shell() {
           layout="vertical"
           onFinish={async (values: Record<string, unknown>) => {
             const payload = { ...values };
-            if (!payload.tencent_secret_id) delete payload.tencent_secret_id;
-            if (!payload.tencent_secret_key) delete payload.tencent_secret_key;
             try {
               setSettings(await saveSettings(payload));
               message.success("已保存");
@@ -1519,23 +1517,13 @@ export function Shell() {
           <Form.Item label="模拟识别" name="mock_mode" valuePropName="checked" extra="打开后不调用 API，只用于看流程。">
             <Switch />
           </Form.Item>
-          <Form.Item label="口播检测" name="asr_enabled" valuePropName="checked" extra="关闭后只检测画面，不再提取音频。">
+          <Form.Item label="口播检测" name="asr_enabled" valuePropName="checked" extra="关闭后只检测画面，不再提取音频。登录后的口播凭证由中转站签发，不保存在本机。">
             <Switch checkedChildren="开" unCheckedChildren="关" />
           </Form.Item>
-          <Paragraph type="secondary">
-            腾讯云密钥只保存在本机。当前来源：{settings?.tencent_secret_source === "saved" ? "本机已保存" : settings?.tencent_secret_source === "env" ? "环境变量" : "未配置"}
-            {settings?.tencent_secret_id_masked ? `（SecretId ${settings.tencent_secret_id_masked}）` : ""}
-          </Paragraph>
-          <Form.Item label="腾讯云 SecretId" name="tencent_secret_id">
-            <Input.Password placeholder="留空表示不修改" autoComplete="off" />
-          </Form.Item>
-          <Form.Item label="腾讯云 SecretKey" name="tencent_secret_key">
-            <Input.Password placeholder="留空表示不修改" autoComplete="off" />
-          </Form.Item>
-          <Form.Item label="腾讯云地域" name="tencent_region" rules={[{ required: true }]}>
+          <Form.Item label="腾讯云地域" name="tencent_region" extra="登录后的口播使用中转站返回的地域。这里只在本机用环境变量调试时生效。" rules={[{ required: true }]}>
             <Input />
           </Form.Item>
-          <Form.Item label="录音识别引擎" name="asr_engine" rules={[{ required: true }]} extra="普通话录音文件识别常用 16k_zh。">
+          <Form.Item label="录音识别引擎" name="asr_engine" rules={[{ required: true }]} extra="录音文件识别大模型 2.0 用 16k_zh_en_2.0，对应这个套餐。">
             <Input />
           </Form.Item>
           <Space wrap>
@@ -1547,14 +1535,6 @@ export function Shell() {
               }}
             >
               清除 Key
-            </Button>
-            <Button
-              onClick={async () => {
-                setSettings(await saveSettings({ clear_tencent_secret: true }));
-                message.success("已清除本机保存的腾讯云密钥");
-              }}
-            >
-              清除腾讯云密钥
             </Button>
           </Space>
         </Form>

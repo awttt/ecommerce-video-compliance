@@ -34,6 +34,7 @@ from app.core.editor import detect_silences, draft_cuts, normalize_cuts, render_
 from app.core.ffmpeg import FFmpegError, extract_strip, probe_video
 from app.core.pipeline import JobCancelled, Progress, run_pipeline, run_selected_frames
 from app.core.speech import NoAudio, SpeechProgress, run_speech
+from app.core.asr_engine import configured_engine
 from app.core.tencent_asr import MockAsrClient, TencentAsrClient
 from app.core.timeutil import utcnow
 from app.db import Database
@@ -493,7 +494,7 @@ class JobManager:
             tencent_secret_key_masked=mask_key(secret_key),
             tencent_secret_source=secret_source,
             tencent_region=region,
-            asr_engine=str(self._settings.get("asr_engine") or "16k_zh"),
+            asr_engine=configured_engine(self._settings.get("asr_engine")),
             rules=self._rules(),
             account_logged_in=self._relay_logged_in(),
             account_email=self._account_email(),
@@ -632,7 +633,7 @@ class JobManager:
             "base_url": str(self._settings["base_url"]),
             "mock": use_mock,
             "asr_enabled": use_asr,
-            "asr_engine": str(self._settings.get("asr_engine") or "16k_zh"),
+            "asr_engine": configured_engine(self._settings.get("asr_engine")),
             "tencent_region": str(self._settings.get("tencent_region") or "ap-shanghai"),
             "rules": self._rules().model_dump(),
         }
@@ -1069,7 +1070,7 @@ class JobManager:
             tencent_secret_id=secret_id,
             tencent_secret_key=secret_key,
             tencent_region=str(options.get("tencent_region") or region),
-            asr_engine=str(options.get("asr_engine") or "16k_zh"),
+            asr_engine=configured_engine(options.get("asr_engine")),
             rules=self._rules_from(options),
         )
 
@@ -1082,34 +1083,70 @@ class JobManager:
         except Exception:
             return self._rules()
 
+    def _env_tencent(self) -> tuple[str, str, str] | None:
+        """本机调试用的长期密钥。正式安装不设置这两项，登录后改向中转站要临时凭证。"""
+        secret_id = os.environ.get("TENCENTCLOUD_SECRET_ID", "").strip()
+        secret_key = os.environ.get("TENCENTCLOUD_SECRET_KEY", "").strip()
+        if not secret_id or not secret_key:
+            return None
+        region = os.environ.get("TENCENTCLOUD_REGION", "").strip()
+        if not region:
+            region = str(self._settings.get("tencent_region") or "ap-shanghai")
+        return secret_id, secret_key, region
+
     def _start_speech(self, state: JobState, config: RunConfig, recognizer, holder: dict, on_speech):
         if not config.asr_enabled:
             return None
         if config.mock:
             asr = MockAsrClient()
-        elif config.tencent_secret_id and config.tencent_secret_key:
-            asr = TencentAsrClient(
-                config.tencent_secret_id,
-                config.tencent_secret_key,
-                config.tencent_region,
-                config.asr_engine,
-                timeout=max(30.0, config.timeout_sec),
-            )
+            prepare = None
         else:
-            message = "未配置腾讯云密钥，已跳过口播检测"
+            env = self._env_tencent()
+            if env is not None:
+                secret_id, secret_key, region = env
+                asr = TencentAsrClient(
+                    secret_id,
+                    secret_key,
+                    region,
+                    config.asr_engine,
+                    timeout=max(30.0, config.timeout_sec),
+                )
+                prepare = None
+            elif self._relay_logged_in():
+                asr = TencentAsrClient(
+                    "",
+                    "",
+                    config.tencent_region,
+                    config.asr_engine,
+                    timeout=max(30.0, config.timeout_sec),
+                )
+                prepare = lambda client=asr: self._apply_relay_credentials(client)
+            else:
+                message = "未登录，已跳过口播检测"
 
-            async def skipped() -> tuple[list[RawHit], str]:
-                await on_speech(SpeechProgress(stage="skipped", message=message, hits=[], ratio=1))
-                return [], message
+                async def skipped() -> tuple[list[RawHit], str]:
+                    await on_speech(SpeechProgress(stage="skipped", message=message, hits=[], ratio=1))
+                    return [], message
 
-            return asyncio.create_task(skipped(), name=f"speech-{state.id}")
+                return asyncio.create_task(skipped(), name=f"speech-{state.id}")
         holder["asr"] = asr
         return asyncio.create_task(
-            self._speech_job(state, asr, recognizer, holder, on_speech),
+            self._speech_job(state, asr, recognizer, holder, on_speech, prepare),
             name=f"speech-{state.id}",
         )
 
-    async def _speech_job(self, state, asr, recognizer, holder, on_speech) -> tuple[list[RawHit], str]:
+    async def _apply_relay_credentials(self, asr: TencentAsrClient) -> None:
+        token = str(self._settings.get("relay_access_token") or "").strip()
+        data = await self.relay.asr_credentials(token)
+        secret_id = str(data.get("tmp_secret_id") or "").strip()
+        secret_key = str(data.get("tmp_secret_key") or "").strip()
+        session = str(data.get("token") or "").strip()
+        region = str(data.get("region") or "").strip()
+        if not secret_id or not secret_key or not session:
+            raise RelayError("中转站没有返回口播凭证", 502)
+        asr.apply_credentials(secret_id, secret_key, region, session)
+
+    async def _speech_job(self, state, asr, recognizer, holder, on_speech, prepare=None) -> tuple[list[RawHit], str]:
         try:
             async with asr:
                 hits = await run_speech(
@@ -1121,6 +1158,7 @@ class JobManager:
                     on_speech,
                     lambda proc: holder.__setitem__("audio_proc", proc),
                     resume=self._resume,
+                    prepare=prepare,
                 )
             return hits, ""
         except asyncio.CancelledError:
@@ -1130,6 +1168,11 @@ class JobManager:
         except NoAudio as exc:
             await on_speech(SpeechProgress(stage="skipped", message=str(exc), hits=[], ratio=1))
             return [], str(exc)
+        except RelayError as exc:
+            message = str(exc)[:500] or "暂时取不到口播凭证"
+            log.warning("speech %s skipped: %s", state.id, message)
+            await on_speech(SpeechProgress(stage="failed", message=message, hits=[], ratio=1))
+            return [], message
         except Exception as exc:
             log.exception("speech %s failed", state.id)
             message = str(exc)[:500] or "口播检测失败"
