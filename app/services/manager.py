@@ -19,11 +19,14 @@ from app.core.aggregate import aggregate, refold_findings
 from app.core.deepseek import build_recognizer
 from app.core.relay import (
     CHAT_BASE,
-    KEY_GROUP_ID,
     KEY_NAME,
     RelayClient,
     RelayError,
     configured_model,
+    groups_lookup_failed_message,
+    relay_group_id_fallback,
+    relay_group_name,
+    resolve_relay_group_id,
     usable_api_key,
 )
 from app.logging_setup import redact
@@ -1515,14 +1518,15 @@ class JobManager:
                 raise RelayError("还没有登录", 400)
             profile = await self._call_authed(self.relay.profile)
             self._apply_profile(profile if isinstance(profile, dict) else {})
-            if not str(self._settings.get("relay_api_key") or "").strip():
-                await self._ensure_relay_key()
             try:
                 stats = await self._call_authed(self.relay.usage)
                 self._apply_usage(stats if isinstance(stats, dict) else {})
             except RelayError:
                 pass
-            await self.db.save_settings(self._settings)
+            try:
+                await self._ensure_relay_key()
+            finally:
+                await self.db.save_settings(self._settings)
             return AccountAction(settings=self.public_settings(), message="已更新余额")
 
     async def recharge_info(self) -> RechargeInfo:
@@ -1660,35 +1664,81 @@ class JobManager:
         if total is not None:
             self._settings["relay_total_cost"] = total
 
+    def _forget_local_relay_key(self) -> None:
+        """丢掉本机记下的密钥指针。中转站上的密钥保留，不删除、不改分组。"""
+        self._settings.pop("relay_api_key", None)
+        self._settings.pop("relay_api_key_id", None)
+
+    async def _resolve_relay_group_id(self) -> int:
+        name = relay_group_name()
+        fallback = relay_group_id_fallback()
+        try:
+            groups = await self._call_authed(self.relay.list_groups)
+        except RelayError as exc:
+            if exc.status == 401 or fallback is None:
+                if exc.status == 401:
+                    raise
+                raise RelayError(groups_lookup_failed_message(name), 502) from None
+            return fallback
+        if not isinstance(groups, list):
+            groups = []
+        return resolve_relay_group_id(groups, name=name, fallback_id=fallback)
+
     async def _ensure_relay_key(self) -> None:
+        try:
+            group_id = await self._resolve_relay_group_id()
+        except RelayError as exc:
+            if exc.status == 403:
+                self._forget_local_relay_key()
+            raise
         listed = await self._call_authed(self.relay.list_keys)
         if not isinstance(listed, list):
             listed = []
-        chosen = self._pick_key(listed)
+        chosen = self._pick_key(listed, group_id)
         if chosen is None:
-            created = await self._call_authed(self.relay.create_key)
+            try:
+                created = await self._call_authed(lambda token: self.relay.create_key(token, group_id))
+            except RelayError:
+                self._forget_local_relay_key()
+                raise
             if not isinstance(created, dict):
                 created = {}
             secret = str(created.get("key") or "")
             if not usable_api_key(secret):
+                self._forget_local_relay_key()
                 raise RelayError("中转站没有返回可用的调用密钥", 502)
             if created.get("ip_whitelist"):
+                self._forget_local_relay_key()
                 raise RelayError("新密钥带了 IP 限制，家庭网络会变动，不能用来识别", 502)
-            if created.get("id") is not None and not _same_id(created.get("group_id"), KEY_GROUP_ID):
-                await self._call_authed(lambda token: self.relay.update_key_group(token, int(created["id"])))
+            created_id = created.get("id")
+            if created_id is not None and not _same_id(created.get("group_id"), group_id):
+                try:
+                    updated = await self._call_authed(
+                        lambda token: self.relay.update_key_group(token, int(created_id), group_id)
+                    )
+                except RelayError:
+                    self._forget_local_relay_key()
+                    raise
+                if isinstance(updated, dict) and updated.get("group_id") is not None:
+                    created["group_id"] = updated.get("group_id")
+            if not _same_id(created.get("group_id"), group_id):
+                self._forget_local_relay_key()
+                raise RelayError(
+                    "新建的密钥没有绑到指定分组。已有密钥未改动、未删除。请确认该账号已被分配此专属分组。",
+                    502,
+                )
             self._settings["relay_api_key"] = secret.strip()
-            if created.get("id") is not None:
-                self._settings["relay_api_key_id"] = created.get("id")
+            if created_id is not None:
+                self._settings["relay_api_key_id"] = created_id
             return
-        if not _same_id(chosen.get("group_id"), KEY_GROUP_ID):
-            await self._call_authed(lambda token: self.relay.update_key_group(token, int(chosen["id"])))
         self._settings["relay_api_key"] = chosen["key"]
         self._settings["relay_api_key_id"] = chosen["id"]
 
-    def _pick_key(self, listed: list[dict]) -> dict | None:
+    def _pick_key(self, listed: list[dict], group_id: int) -> dict | None:
+        """只选用已经绑在目标分组上的同名密钥。其他分组的密钥留在原处。"""
         local_key = str(self._settings.get("relay_api_key") or "").strip()
         local_id = self._settings.get("relay_api_key_id")
-        fallback: dict | None = None
+        first: dict | None = None
         for item in listed:
             if str(item.get("name") or "").strip() != KEY_NAME:
                 continue
@@ -1696,12 +1746,23 @@ class JobManager:
                 continue
             if item.get("ip_whitelist"):
                 continue
+            if not _same_id(item.get("group_id"), group_id):
+                continue
             secret = str(item.get("key") or "")
-            if usable_api_key(secret):
-                return {"key": secret.strip(), "id": item.get("id"), "group_id": item.get("group_id")}
-            if usable_api_key(local_key) and _same_id(item.get("id"), local_id):
-                fallback = {"key": local_key, "id": local_id, "group_id": item.get("group_id")}
-        return fallback
+            usable = usable_api_key(secret)
+            local_match = usable_api_key(local_key) and _same_id(item.get("id"), local_id)
+            if not usable and not local_match:
+                continue
+            record = {
+                "key": secret.strip() if usable else local_key,
+                "id": item.get("id"),
+                "group_id": item.get("group_id"),
+            }
+            if local_match:
+                return record
+            if first is None and usable:
+                first = record
+        return first
 
     async def _token(self) -> str:
         token = str(self._settings.get("relay_access_token") or "").strip()

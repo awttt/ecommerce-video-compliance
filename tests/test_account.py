@@ -4,7 +4,16 @@ import httpx
 from fastapi.testclient import TestClient
 
 from app.core.deepseek import chat_url
-from app.core.relay import CHAT_BASE, DEEPSEEK_FLASH_MODEL, RelayClient, explain_error, usable_api_key
+from app.core.relay import (
+    CHAT_BASE,
+    DEFAULT_RELAY_GROUP_NAME,
+    DEEPSEEK_FLASH_MODEL,
+    RelayClient,
+    RelayError,
+    explain_error,
+    resolve_relay_group_id,
+    usable_api_key,
+)
 from app.factory import create_app
 from app.logging_setup import redact
 from app.services.manager import JobState, get_manager
@@ -16,6 +25,9 @@ REFRESH = "refresh-token-value-hidden"
 TEMP = "temp-2fa-session-secret"
 RELAY_KEY = "sk-relay-account-key-4242"
 SAVED_KEY = "sk-saved-4321"
+OLD_KEY = "sk-old-group-key-1414"
+TARGET_GROUP_ID = 21
+OLD_GROUP_ID = 14
 
 
 def envelope(data: object, status: int = 200) -> httpx.Response:
@@ -32,7 +44,25 @@ class Upstream:
         self.create_body: dict | None = None
         self.create_key_header = ""
         self.group_updates: list[dict] = []
+        self.updated_key_ids: list[str] = []
+        self.verbs: list[str] = []
+        self.deletes = 0
         self.list_mode = "empty"
+        self.groups_status = 200
+        self.created_group_override: int | None = None
+        self.created_items: list[dict] = []
+        self.create_failure: tuple[int, str, str] | None = None
+        self.groups = [
+            {"id": OLD_GROUP_ID, "name": "国产模型-bot创建", "status": "active", "is_exclusive": False},
+            {
+                "id": TARGET_GROUP_ID,
+                "name": DEFAULT_RELAY_GROUP_NAME,
+                "status": "active",
+                "is_exclusive": True,
+                "subscription_type": "standard",
+                "rate_multiplier": 1.8,
+            },
+        ]
         self.login_mode = "ok"
         self.profile_unauthorized = False
         self.forwarded_temp = False
@@ -56,6 +86,10 @@ class Upstream:
         if request.content:
             body = json.loads(request.content.decode())
         self.calls.append((path, body))
+        self.verbs.append(request.method)
+        if request.method == "DELETE":
+            self.deletes += 1
+            return failure(405, "NOT_ALLOWED", "delete is not used")
         if path.endswith("/settings/public"):
             return envelope(self.public)
         if path.endswith("/auth/send-verify-code"):
@@ -82,24 +116,33 @@ class Upstream:
             return envelope({"email": EMAIL, "balance": 8.5, "frozen_balance": 0.1})
         if path.endswith("/usage/dashboard/stats"):
             return envelope({"today_actual_cost": 0.125, "total_actual_cost": 3.5})
+        if path.endswith("/groups/available") and request.method == "GET":
+            if self.groups_status >= 400:
+                return failure(self.groups_status, "UPSTREAM", "groups unavailable")
+            return envelope(self.groups)
         if path.endswith("/keys") and request.method == "GET":
             return envelope({"items": self._keys(), "total": 1, "page": 1, "page_size": 100, "pages": 1})
         if path.endswith("/keys") and request.method == "POST":
             self.creates += 1
             self.create_body = body
             self.create_key_header = request.headers.get("idempotency-key", "")
-            return envelope(
-                {
-                    "id": 9,
-                    "name": "电商视频合规",
-                    "key": RELAY_KEY,
-                    "status": "active",
-                    "ip_whitelist": [],
-                    "group_id": 14,
-                }
-            )
+            if self.create_failure is not None:
+                status, reason, message = self.create_failure
+                return failure(status, reason, message)
+            group_id = self.created_group_override if self.created_group_override is not None else body.get("group_id")
+            created = {
+                "id": 9,
+                "name": "电商视频合规",
+                "key": RELAY_KEY,
+                "status": "active",
+                "ip_whitelist": [],
+                "group_id": group_id,
+            }
+            self.created_items.append(created)
+            return envelope(created)
         if request.method == "PUT" and "/keys/" in path:
             self.group_updates.append(body)
+            self.updated_key_ids.append(path.rstrip("/").split("/")[-1])
             return envelope({"id": 9, "name": "电商视频合规", "status": "active", "group_id": body.get("group_id")})
         if path.endswith("/payment/checkout-info"):
             if self.payment_disabled:
@@ -236,13 +279,32 @@ class Upstream:
         }
 
     def _keys(self) -> list[dict]:
+        named = {"name": "电商视频合规", "status": "active", "ip_whitelist": []}
         if self.list_mode == "full":
-            return [{"id": 9, "name": "电商视频合规", "key": RELAY_KEY, "status": "active", "ip_whitelist": []}]
-        if self.list_mode == "masked":
-            return [{"id": 9, "name": "电商视频合规", "key": "****4242", "status": "active", "ip_whitelist": []}]
-        if self.list_mode == "whitelist":
-            return [{"id": 3, "name": "电商视频合规", "key": RELAY_KEY, "status": "active", "ip_whitelist": ["203.0.113.8"]}]
-        return []
+            base = [{**named, "id": 9, "key": RELAY_KEY, "group_id": TARGET_GROUP_ID}]
+        elif self.list_mode == "masked":
+            base = [{**named, "id": 9, "key": "****4242", "group_id": TARGET_GROUP_ID}]
+        elif self.list_mode == "whitelist":
+            base = [
+                {
+                    **named,
+                    "id": 3,
+                    "key": RELAY_KEY,
+                    "group_id": TARGET_GROUP_ID,
+                    "ip_whitelist": ["203.0.113.8"],
+                }
+            ]
+        elif self.list_mode == "legacy":
+            base = [{**named, "id": 3, "key": OLD_KEY, "group_id": OLD_GROUP_ID}]
+        elif self.list_mode == "both":
+            base = [
+                {**named, "id": 3, "key": OLD_KEY, "group_id": OLD_GROUP_ID},
+                {**named, "id": 8, "key": RELAY_KEY, "group_id": TARGET_GROUP_ID},
+            ]
+        else:
+            base = []
+        seen = {item.get("id") for item in base}
+        return base + [item for item in self.created_items if item.get("id") not in seen]
 
 
 def attach(upstream: Upstream) -> None:
@@ -292,6 +354,10 @@ def test_explain_error_uses_chinese_and_hides_secrets():
     assert "sk-super-secret-value" not in str(leaked)
     assert usable_api_key("****4242") is False
     assert usable_api_key(RELAY_KEY) is True
+    denied = explain_error(403, {"reason": "GROUP_NOT_ALLOWED", "message": "user is not allowed to bind this group"})
+    assert denied.status == 403
+    assert "专属分组" in str(denied)
+    assert "sk-" not in str(denied)
     token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signaturevalue"
     assert token not in redact(f"header {token}")
 
@@ -329,8 +395,10 @@ def test_login_pins_picture_calls_to_the_account_key(monkeypatch):
         for secret in (PASSWORD, ACCESS, REFRESH, RELAY_KEY, SAVED_KEY):
             assert secret not in text
         assert upstream.creates == 1
-        assert upstream.create_body == {"name": "电商视频合规", "group_id": 14}
+        assert upstream.create_body == {"name": "电商视频合规", "group_id": TARGET_GROUP_ID}
         assert upstream.group_updates == []
+        assert upstream.deletes == 0
+        assert any(path.endswith("/groups/available") for path, _ in upstream.calls)
         assert upstream.create_key_header
         config = get_manager()._config_for(queued_state())
         assert config.api_key == RELAY_KEY
@@ -374,14 +442,247 @@ def test_existing_named_key_is_reused_without_a_whitelist():
         body = login(client)
         assert body["settings"]["api_key_source"] == "account"
         assert upstream.creates == 0
-        assert upstream.group_updates == [{"group_id": 14}]
+        assert upstream.group_updates == []
+        assert upstream.deletes == 0
         upstream.list_mode = "whitelist"
         client.post("/api/account/logout")
         created = login(client)
         assert created["settings"]["api_key_masked"].endswith("4242")
         assert upstream.creates == 1
-        assert upstream.create_body is not None
+        assert upstream.create_body == {"name": "电商视频合规", "group_id": TARGET_GROUP_ID}
         assert "ip_whitelist" not in upstream.create_body
+        assert upstream.deletes == 0
+
+
+def test_resolve_relay_group_id_prefers_the_exclusive_name():
+    groups = [
+        {"id": OLD_GROUP_ID, "name": "国产模型-bot创建", "status": "active"},
+        {"id": str(TARGET_GROUP_ID), "name": f"  {DEFAULT_RELAY_GROUP_NAME}  ", "status": "active"},
+        {"id": 30, "name": DEFAULT_RELAY_GROUP_NAME, "status": "inactive"},
+    ]
+    assert resolve_relay_group_id(groups, name=DEFAULT_RELAY_GROUP_NAME, fallback_id=OLD_GROUP_ID) == TARGET_GROUP_ID
+    assert resolve_relay_group_id(groups, name="国产模型-bot创建", fallback_id=None) == OLD_GROUP_ID
+    try:
+        resolve_relay_group_id(
+            [{"id": 30, "name": DEFAULT_RELAY_GROUP_NAME, "status": "inactive"}],
+            name=DEFAULT_RELAY_GROUP_NAME,
+            fallback_id=99,
+        )
+    except RelayError as exc:
+        assert exc.status == 403
+        assert "专属分组" in str(exc)
+        assert "99" in str(exc)
+    else:
+        raise AssertionError("missing group should fail")
+    try:
+        resolve_relay_group_id(
+            [
+                {"id": 7, "name": DEFAULT_RELAY_GROUP_NAME, "status": "active"},
+                {"id": 8, "name": DEFAULT_RELAY_GROUP_NAME, "status": "active"},
+            ],
+            name=DEFAULT_RELAY_GROUP_NAME,
+            fallback_id=None,
+        )
+    except RelayError as exc:
+        assert "多个" in str(exc)
+    else:
+        raise AssertionError("duplicate names should fail")
+
+
+def test_existing_key_in_another_group_is_left_alone():
+    upstream = Upstream()
+    upstream.list_mode = "legacy"
+    with TestClient(create_app()) as client:
+        attach(upstream)
+        manager = get_manager()
+        manager._settings["relay_email"] = EMAIL
+        manager._settings["relay_api_key"] = OLD_KEY
+        manager._settings["relay_api_key_id"] = 3
+        body = login(client)
+        assert body["settings"]["api_key_source"] == "account"
+        assert body["settings"]["api_key_masked"].endswith("4242")
+        assert upstream.creates == 1
+        assert upstream.create_body == {"name": "电商视频合规", "group_id": TARGET_GROUP_ID}
+        assert upstream.group_updates == []
+        assert upstream.deletes == 0
+        assert "DELETE" not in upstream.verbs
+        assert manager._settings["relay_api_key"] == RELAY_KEY
+        assert manager._settings["relay_api_key_id"] == 9
+        again = login(client)
+        assert again["settings"]["api_key_source"] == "account"
+        assert upstream.creates == 1
+        assert upstream.deletes == 0
+
+
+def test_key_already_in_the_target_group_is_reused():
+    upstream = Upstream()
+    upstream.list_mode = "both"
+    with TestClient(create_app()) as client:
+        attach(upstream)
+        body = login(client)
+        assert body["settings"]["api_key_masked"].endswith("4242")
+        assert upstream.creates == 0
+        assert upstream.group_updates == []
+        assert upstream.updated_key_ids == []
+        assert upstream.deletes == 0
+        assert get_manager()._settings["relay_api_key"] == RELAY_KEY
+        assert get_manager()._settings["relay_api_key_id"] == 8
+
+
+def test_new_key_group_is_corrected_without_touching_other_keys():
+    upstream = Upstream()
+    upstream.list_mode = "legacy"
+    upstream.created_group_override = OLD_GROUP_ID
+    with TestClient(create_app()) as client:
+        attach(upstream)
+        body = login(client)
+        assert body["settings"]["api_key_source"] == "account"
+        assert upstream.creates == 1
+        assert upstream.create_body == {"name": "电商视频合规", "group_id": TARGET_GROUP_ID}
+        assert upstream.group_updates == [{"group_id": TARGET_GROUP_ID}]
+        assert upstream.updated_key_ids == ["9"]
+        assert upstream.deletes == 0
+
+
+def test_group_not_allowed_on_create_keeps_existing_keys(monkeypatch):
+    monkeypatch.delenv("EVC_RELAY_GROUP_ID", raising=False)
+    upstream = Upstream()
+    upstream.create_failure = (403, "GROUP_NOT_ALLOWED", "user is not allowed to bind this group")
+    with TestClient(create_app()) as client:
+        attach(upstream)
+        manager = get_manager()
+        manager._settings["relay_email"] = EMAIL
+        manager._settings["relay_api_key"] = OLD_KEY
+        manager._settings["relay_api_key_id"] = 3
+        body = login(client)
+        assert body["settings"]["account_logged_in"] is True
+        assert body["settings"]["has_api_key"] is False
+        assert "专属分组" in body["message"]
+        assert "不会改用其他分组" in body["message"]
+        assert upstream.creates == 1
+        assert upstream.create_body == {"name": "电商视频合规", "group_id": TARGET_GROUP_ID}
+        assert upstream.group_updates == []
+        assert upstream.deletes == 0
+        assert manager._settings.get("relay_api_key") in (None, "")
+        assert OLD_KEY not in body["message"]
+
+
+def test_missing_exclusive_group_is_a_clear_error_and_creates_nothing(monkeypatch):
+    monkeypatch.delenv("EVC_RELAY_GROUP_ID", raising=False)
+    upstream = Upstream()
+    upstream.groups = [{"id": OLD_GROUP_ID, "name": "国产模型-bot创建", "status": "active", "is_exclusive": False}]
+    with TestClient(create_app()) as client:
+        attach(upstream)
+        manager = get_manager()
+        manager._settings["relay_email"] = EMAIL
+        manager._settings["relay_api_key"] = OLD_KEY
+        manager._settings["relay_api_key_id"] = 3
+        body = login(client)
+        assert body["settings"]["account_logged_in"] is True
+        assert body["settings"]["has_api_key"] is False
+        assert body["settings"]["api_key_source"] == "none"
+        assert DEFAULT_RELAY_GROUP_NAME in body["message"]
+        assert "专属分组" in body["message"]
+        assert "分配" in body["message"]
+        assert "不会改用其他分组" in body["message"]
+        assert upstream.creates == 0
+        assert upstream.group_updates == []
+        assert upstream.deletes == 0
+        assert "DELETE" not in upstream.verbs
+        assert manager._settings.get("relay_api_key") in (None, "")
+        assert OLD_KEY not in json.dumps(body, ensure_ascii=False)
+
+
+def test_configured_group_id_does_not_override_a_resolved_name(monkeypatch):
+    monkeypatch.setenv("EVC_RELAY_GROUP_ID", str(OLD_GROUP_ID))
+    upstream = Upstream()
+    with TestClient(create_app()) as client:
+        attach(upstream)
+        login(client)
+        assert upstream.create_body == {"name": "电商视频合规", "group_id": TARGET_GROUP_ID}
+        assert upstream.deletes == 0
+
+
+def test_configured_group_id_is_used_when_the_name_is_not_listed(monkeypatch):
+    monkeypatch.setenv("EVC_RELAY_GROUP_NAME", "不存在的分组")
+    monkeypatch.setenv("EVC_RELAY_GROUP_ID", str(OLD_GROUP_ID))
+    upstream = Upstream()
+    upstream.groups = [{"id": OLD_GROUP_ID, "name": "国产模型-bot创建", "status": "active"}]
+    with TestClient(create_app()) as client:
+        attach(upstream)
+        body = login(client)
+        assert body["settings"]["api_key_source"] == "account"
+        assert upstream.create_body == {"name": "电商视频合规", "group_id": OLD_GROUP_ID}
+        assert upstream.deletes == 0
+
+
+def test_configured_group_id_that_is_not_available_does_not_create_a_key(monkeypatch):
+    monkeypatch.setenv("EVC_RELAY_GROUP_ID", "99")
+    upstream = Upstream()
+    upstream.groups = [{"id": OLD_GROUP_ID, "name": "国产模型-bot创建", "status": "active"}]
+    with TestClient(create_app()) as client:
+        attach(upstream)
+        body = login(client)
+        assert body["settings"]["has_api_key"] is False
+        assert "99" in body["message"]
+        assert "专属分组" in body["message"]
+        assert upstream.creates == 0
+        assert upstream.deletes == 0
+
+
+def test_group_lookup_failure_can_use_a_numeric_fallback(monkeypatch):
+    monkeypatch.setenv("EVC_RELAY_GROUP_ID", str(TARGET_GROUP_ID))
+    upstream = Upstream()
+    upstream.groups_status = 500
+    with TestClient(create_app()) as client:
+        attach(upstream)
+        body = login(client)
+        assert body["settings"]["api_key_source"] == "account"
+        assert upstream.create_body == {"name": "电商视频合规", "group_id": TARGET_GROUP_ID}
+
+
+def test_group_lookup_failure_without_a_fallback_does_not_create_a_key():
+    upstream = Upstream()
+    upstream.groups_status = 500
+    with TestClient(create_app()) as client:
+        attach(upstream)
+        body = login(client)
+        assert body["settings"]["has_api_key"] is False
+        assert "无法查询" in body["message"]
+        assert DEFAULT_RELAY_GROUP_NAME in body["message"]
+        assert upstream.creates == 0
+        assert upstream.deletes == 0
+
+
+def test_invalid_group_id_is_reported(monkeypatch):
+    monkeypatch.setenv("EVC_RELAY_GROUP_ID", "abc")
+    upstream = Upstream()
+    with TestClient(create_app()) as client:
+        attach(upstream)
+        body = login(client)
+        assert "正整数" in body["message"]
+        assert upstream.creates == 0
+        assert upstream.deletes == 0
+
+
+def test_refresh_creates_a_target_group_key_when_the_saved_one_is_missing():
+    upstream = Upstream()
+    upstream.list_mode = "full"
+    with TestClient(create_app()) as client:
+        attach(upstream)
+        login(client)
+        assert upstream.creates == 0
+        get_manager()._settings.pop("relay_api_key", None)
+        get_manager()._settings.pop("relay_api_key_id", None)
+        upstream.list_mode = "legacy"
+        refreshed = client.post("/api/account/refresh")
+        assert refreshed.status_code == 200, refreshed.text
+        assert refreshed.json()["settings"]["api_key_source"] == "account"
+        assert upstream.creates == 1
+        assert upstream.create_body == {"name": "电商视频合规", "group_id": TARGET_GROUP_ID}
+        assert upstream.group_updates == []
+        assert upstream.deletes == 0
+        assert OLD_KEY not in refreshed.text
 
 
 def test_bad_login_and_two_factor_do_not_store_a_session():

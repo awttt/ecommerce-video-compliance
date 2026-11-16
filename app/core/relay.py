@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import uuid
 from typing import Any
@@ -13,8 +14,9 @@ from app.logging_setup import redact
 AUTH_ROOT = "https://token4u.cc/api/v1"
 CHAT_BASE = "https://token4u.cc/v1"
 KEY_NAME = "电商视频合规"
-# 用户可见分组「国产模型-bot创建」。Key 不绑这个分组时，中转站不会给它分配渠道。
-KEY_GROUP_ID = 14
+# 专属分组，余额计费，1.8 倍（含口播）。用户令牌只有被管理员分配后才能在可用分组里看到它。
+# 编号尚未固定，默认按名称解析；EVC_RELAY_GROUP_ID 只在名称对不上时作备用。
+DEFAULT_RELAY_GROUP_NAME = "电商审核专属-bot创建"
 # 画面模型只有这两个。DeepSeek 4.1 Flash 的接口名是 deepseek-flash。
 PICTURE_MODEL = "glm-5.3-flash"
 DEEPSEEK_FLASH_MODEL = "deepseek-flash"
@@ -72,6 +74,10 @@ _REASON = {
     "DAILY_LIMIT_EXCEEDED": (429, "今天的充值额度已用完"),
     "WECHAT_PAYMENT_MP_NOT_CONFIGURED": (502, "微信支付还没配好"),
     "USER_INACTIVE": (403, "这个账号已停用"),
+    "GROUP_NOT_ALLOWED": (
+        403,
+        "当前账号不能使用这个分组。专属分组需要管理员先分配给该账号，程序不会改用其他分组",
+    ),
 }
 
 _TEXT = (
@@ -91,6 +97,11 @@ _TEXT = (
     ("amount out of range", 400, "充值金额不在允许范围内"),
     ("amount must be a positive number", 400, "请填写大于 0 的充值金额"),
     ("order not found", 404, "订单不存在"),
+    (
+        "not allowed to bind this group",
+        403,
+        "当前账号不能使用这个分组。专属分组需要管理员先分配给该账号，程序不会改用其他分组",
+    ),
 )
 
 _CJK = re.compile(r"[\u4e00-\u9fff]")
@@ -100,6 +111,82 @@ class RelayError(Exception):
     def __init__(self, message: str, status: int = 400):
         super().__init__(message)
         self.status = status if 400 <= status <= 599 else 502
+
+
+def relay_group_name() -> str:
+    """目标分组名称。空的环境变量沿用专属分组「电商审核专属-bot创建」。"""
+    text = os.environ.get("EVC_RELAY_GROUP_NAME", "").strip()
+    return text or DEFAULT_RELAY_GROUP_NAME
+
+
+def relay_group_id_fallback() -> int | None:
+    """名称解析失败时的数字分组编号。未配置则只按名称解析。"""
+    raw = os.environ.get("EVC_RELAY_GROUP_ID", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RelayError("EVC_RELAY_GROUP_ID 必须是正整数", 400) from exc
+    if value <= 0:
+        raise RelayError("EVC_RELAY_GROUP_ID 必须是正整数", 400)
+    return value
+
+
+def group_unavailable_message(name: str, fallback_id: int | None = None) -> str:
+    text = (
+        f"分组「{name}」不在当前账号的可用分组中。"
+        "这是专属分组，管理员需要先在 token4u 把该分组分配给这个账号。"
+        "未分配时不会改用其他分组，也不会删除已有密钥。"
+    )
+    if fallback_id is not None:
+        text += f"配置的分组编号 {fallback_id} 同样不在可用分组中。"
+    return text
+
+
+def groups_lookup_failed_message(name: str) -> str:
+    return (
+        f"无法查询当前账号的可用分组，因此不能确认「{name}」。"
+        "请稍后再试，或在 EVC_RELAY_GROUP_ID 中填写该分组编号。"
+    )
+
+
+def _group_id(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str) and value.strip().isdigit():
+        number = int(value.strip())
+        return number if number > 0 else None
+    return None
+
+
+def resolve_relay_group_id(groups: list[dict], *, name: str, fallback_id: int | None) -> int:
+    """在用户令牌可见的分组里按名称取编号。名称对不上时，才采用仍在该列表中的备用编号。"""
+    wanted = name.strip()
+    named: list[int] = []
+    available: set[int] = set()
+    for item in groups:
+        if not isinstance(item, dict):
+            continue
+        gid = _group_id(item.get("id"))
+        if gid is None:
+            continue
+        status = str(item.get("status") or "active").strip().lower()
+        if status not in {"", "active"}:
+            continue
+        available.add(gid)
+        if str(item.get("name") or "").strip() == wanted:
+            named.append(gid)
+    unique = list(dict.fromkeys(named))
+    if len(unique) == 1:
+        return unique[0]
+    if len(unique) > 1:
+        raise RelayError(f"可用分组里有多个名为「{wanted}」的分组，无法确定绑定哪一个", 502)
+    if fallback_id is not None and fallback_id in available:
+        return fallback_id
+    raise RelayError(group_unavailable_message(wanted, fallback_id), 403)
 
 
 def usable_api_key(value: object) -> bool:
@@ -234,12 +321,23 @@ class RelayClient:
         data = await self._request("GET", "/usage/dashboard/stats", token=token)
         return data if isinstance(data, dict) else {}
 
-    async def update_key_group(self, token: str, key_id: int) -> dict:
+    async def list_groups(self, token: str) -> list[dict]:
+        """当前用户令牌可以绑定的分组。专属分组未分配时不会出现在这里。"""
+        data = await self._request("GET", "/groups/available", token=token)
+        if isinstance(data, list):
+            raw = data
+        elif isinstance(data, dict) and isinstance(data.get("items"), list):
+            raw = data["items"]
+        else:
+            raw = []
+        return [item for item in raw if isinstance(item, dict)]
+
+    async def update_key_group(self, token: str, key_id: int, group_id: int) -> dict:
         data = await self._request(
             "PUT",
             f"/keys/{key_id}",
             token=token,
-            json={"group_id": KEY_GROUP_ID},
+            json={"group_id": group_id},
         )
         return data if isinstance(data, dict) else {}
 
@@ -250,12 +348,12 @@ class RelayClient:
             return []
         return [item for item in raw if isinstance(item, dict)]
 
-    async def create_key(self, token: str) -> dict:
+    async def create_key(self, token: str, group_id: int) -> dict:
         data = await self._request(
             "POST",
             "/keys",
             token=token,
-            json={"name": KEY_NAME, "group_id": KEY_GROUP_ID},
+            json={"name": KEY_NAME, "group_id": group_id},
             headers={"Idempotency-Key": uuid.uuid4().hex},
         )
         return data if isinstance(data, dict) else {}

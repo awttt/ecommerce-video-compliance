@@ -73,7 +73,11 @@ ecommerce-video-compliance/
 - 口播检测还要能访问 `https://asr.tencentcloudapi.com`，并准备腾讯云 SecretId / SecretKey
 - Windows 桌面窗口使用系统 WebView2（Win10/11 一般已经带了）
 
-登录 token4u.cc 账号后，程序用该账号的密钥调用画面模型。视觉请求使用 Chat Completions，图片用 base64 data URL，不带 `detail`。`glm-5.3-flash` 不能关闭思考；思考开关关闭时用 `reasoning_effort: low`，避免默认的 `max`。
+登录 token4u.cc 账号后，程序用该账号的密钥调用画面模型。注册或登录时会列出这个账号的可用分组（`GET /api/v1/groups/available`），按名称「电商审核专属-bot创建」解析出分组编号，再创建或复用一把名为「电商视频合规」的密钥并绑到该分组。这是专属分组，余额计费，费率 1.8 倍，含口播费用。管理员没有把分组分配给账号时，它不会出现在可用分组里，登录会提示需要分配，不会改用其他分组，也不会删除已有密钥。已经绑在别的分组上的同名密钥会留在原处，程序另用新分组里的密钥。
+
+分组名称可以用 `EVC_RELAY_GROUP_NAME` 覆盖，默认就是「电商审核专属-bot创建」。名称对不上时，如果 `EVC_RELAY_GROUP_ID` 填了编号，并且该编号也在当前账号的可用分组里，才改用这个编号。编号还不确定时留空。查询可用分组失败、又配置了编号时，会直接用该编号创建；中转站拒绝绑定则同样报错。
+
+视觉请求使用 Chat Completions，图片用 base64 data URL，不带 `detail`。`glm-5.3-flash` 不能关闭思考；思考开关关闭时用 `reasoning_effort: low`，避免默认的 `max`。
 
 ## 开发运行
 
@@ -151,6 +155,8 @@ TENCENTCLOUD_SECRET_KEY=...
 TENCENTCLOUD_REGION=ap-shanghai
 EVC_FFMPEG=C:\ffmpeg\bin\ffmpeg.exe
 EVC_FFPROBE=C:\ffmpeg\bin\ffprobe.exe
+# EVC_RELAY_GROUP_NAME=电商审核专属-bot创建
+# EVC_RELAY_GROUP_ID=
 ```
 
 设置里保存的密钥优先于环境变量。界面上只显示末四位。

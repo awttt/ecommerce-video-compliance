@@ -12,6 +12,8 @@ def isolate_env(tmp_path, monkeypatch):
     monkeypatch.delenv("EVC_INLINE_JOBS", raising=False)
     monkeypatch.delenv("EVC_KEEP_FRAMES", raising=False)
     monkeypatch.delenv("EVC_MCP", raising=False)
+    monkeypatch.delenv("EVC_RELAY_GROUP_NAME", raising=False)
+    monkeypatch.delenv("EVC_RELAY_GROUP_ID", raising=False)
     import app.factory as factory
     from app.logging_setup import reset_logging
     from app.paths import reset_paths_cache
