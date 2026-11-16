@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import sys
 
+from app.core.relay import configure_tls
 from app.logging_setup import ensure_stdio
 
 ensure_stdio()
+configure_tls()
 
 from app.desktop import main
 

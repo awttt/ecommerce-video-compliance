@@ -59,7 +59,9 @@ jobs:
               try {
                 $resp = Invoke-WebRequest -Uri "http://127.0.0.1:8765/api/health" -UseBasicParsing -TimeoutSec 2
                 if ($resp.StatusCode -eq 200 -and $resp.Content -match '"ok"\s*:\s*true' -and $resp.Content -match '"ffmpeg"\s*:\s*true') {
-                  Write-Host $resp.Content
+                  $options = Invoke-WebRequest -Uri "http://127.0.0.1:8765/api/account/options" -UseBasicParsing -TimeoutSec 20
+                  if ($options.StatusCode -ne 200) { throw "account options returned $($options.StatusCode)" }
+                  Write-Host "health and token4u public settings ok"
                   $ok = $true
                   break
                 }

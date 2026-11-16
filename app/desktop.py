@@ -12,6 +12,7 @@ import webbrowser
 
 import uvicorn
 
+from app.core.relay import configure_tls
 from app.factory import create_app
 from app.logging_setup import ensure_stdio
 from app.paths import load_project_dotenv
@@ -65,6 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     ensure_stdio()
+    configure_tls()
     load_project_dotenv()
     _configure_loop()
     args = build_parser().parse_args(argv)

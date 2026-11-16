@@ -346,6 +346,22 @@ def queued_state() -> JobState:
     )
 
 
+def test_frozen_app_points_tls_at_the_bundled_certificate(monkeypatch, tmp_path):
+    import os
+    import sys
+
+    from app.core.relay import configure_tls
+
+    cafile = tmp_path / "certifi" / "cacert.pem"
+    cafile.parent.mkdir()
+    cafile.write_text("bundle", encoding="utf-8")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    configure_tls()
+    assert os.environ["SSL_CERT_FILE"] == str(cafile)
+
+
 def test_explain_error_uses_chinese_and_hides_secrets():
     error = explain_error(401, {"reason": "INVALID_CREDENTIALS", "message": "invalid email or password"})
     assert str(error) == "邮箱或密码不正确"

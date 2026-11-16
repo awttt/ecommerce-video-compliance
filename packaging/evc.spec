@@ -9,6 +9,7 @@ ROOT = Path(SPECPATH).resolve().parent
 
 datas = [(str(ROOT / "frontend" / "dist"), "frontend/dist")]
 datas += collect_data_files("webview")
+datas += collect_data_files("certifi")
 
 hidden = (
     collect_submodules("uvicorn")
@@ -30,6 +31,7 @@ hidden = (
         "app.core.editor",
         "app.core.aggregate",
         "app.core.parsing",
+        "certifi",
     ]
 )
 

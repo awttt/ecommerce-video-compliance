@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import uuid
+from pathlib import Path
 from typing import Any
 
 import httpx
+import logging
 
 from app.logging_setup import redact
+
+log = logging.getLogger(__name__)
 
 AUTH_ROOT = "https://token4u.cc/api/v1"
 CHAT_BASE = "https://token4u.cc/v1"
@@ -225,6 +230,16 @@ def explain_error(status: int, body: object) -> RelayError:
     return RelayError("中转站拒绝了这次请求", status if status >= 400 else 400)
 
 
+def configure_tls() -> None:
+    """打包后的程序用随包的 CA 证书。否则 https 会在校验证书时失败，界面只显示连不上。"""
+    if not getattr(sys, "frozen", False):
+        return
+    root = getattr(sys, "_MEIPASS", "")
+    cafile = Path(root) / "certifi" / "cacert.pem"
+    if cafile.is_file():
+        os.environ.setdefault("SSL_CERT_FILE", str(cafile))
+
+
 class RelayClient:
     def __init__(self, transport: httpx.AsyncBaseTransport | None = None, auth_root: str = AUTH_ROOT):
         self._transport = transport
@@ -264,8 +279,10 @@ class RelayClient:
                     headers=header_map,
                 )
         except httpx.TimeoutException as exc:
+            log.warning("relay timeout: %s", type(exc).__name__)
             raise RelayError("连接 token4u.cc 超时，请稍后再试", 504) from exc
         except httpx.HTTPError as exc:
+            log.warning("relay connection failed: %s", type(exc).__name__)
             raise RelayError("连不上 token4u.cc，请检查网络", 502) from exc
         try:
             body = response.json()
