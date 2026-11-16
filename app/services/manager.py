@@ -35,7 +35,15 @@ from app.core.ffmpeg import FFmpegError, extract_strip, probe_video
 from app.core.pipeline import JobCancelled, Progress, run_pipeline, run_selected_frames
 from app.core.speech import NoAudio, SpeechProgress, run_speech
 from app.core.asr_engine import configured_engine
-from app.core.tencent_asr import MockAsrClient, TencentAsrClient
+from app.core.tencent_asr import (
+    ASR_MAX_RETRIES,
+    AsrCredentials,
+    MockAsrClient,
+    TencentAsrClient,
+    parse_relay_credentials,
+    retry_backoff_seconds,
+    wait_backoff,
+)
 from app.core.timeutil import utcnow
 from app.db import Database
 from app.exporting import BatchExportJob, batch_export_file, export_file, write_batch_xlsx, write_json, write_xlsx
@@ -64,7 +72,16 @@ log = logging.getLogger(__name__)
 TERMINAL = {"done", "failed", "cancelled"}
 _PREVIEWABLE = {".mp4", ".webm", ".m4v"}
 _MAX_QUEUE = 20
+_RELAY_RETRY_STATUSES = {408, 429, 500, 502, 503, 504}
 _strip_locks: dict[str, asyncio.Lock] = {}
+
+
+def _relay_credential_retryable(exc: RelayError) -> bool:
+    """中转站临时故障可以重试。401 和 403（没有口播分组）不行。"""
+    status = int(exc.status)
+    if status in {401, 403}:
+        return False
+    return status in _RELAY_RETRY_STATUSES or status >= 500
 
 
 class JobNotFound(Exception):
@@ -1119,8 +1136,9 @@ class JobManager:
                     config.tencent_region,
                     config.asr_engine,
                     timeout=max(30.0, config.timeout_sec),
+                    credential_provider=lambda: self._load_asr_credentials(state.cancel_event),
                 )
-                prepare = lambda client=asr: self._apply_relay_credentials(client)
+                prepare = lambda client=asr: self._apply_relay_credentials(client, state.cancel_event)
             else:
                 message = "未登录，已跳过口播检测"
 
@@ -1135,16 +1153,51 @@ class JobManager:
             name=f"speech-{state.id}",
         )
 
-    async def _apply_relay_credentials(self, asr: TencentAsrClient) -> None:
+    async def _load_asr_credentials(self, cancel: asyncio.Event | None = None) -> AsrCredentials:
+        """向中转站要临时凭证。网络、5xx 和 429 最多再试 5 次。密钥不落盘、不写日志。"""
         token = str(self._settings.get("relay_access_token") or "").strip()
-        data = await self.relay.asr_credentials(token)
-        secret_id = str(data.get("tmp_secret_id") or "").strip()
-        secret_key = str(data.get("tmp_secret_key") or "").strip()
-        session = str(data.get("token") or "").strip()
-        region = str(data.get("region") or "").strip()
-        if not secret_id or not secret_key or not session:
-            raise RelayError("中转站没有返回口播凭证", 502)
-        asr.apply_credentials(secret_id, secret_key, region, session)
+        if not token:
+            raise RelayError("未登录，已跳过口播检测", 401)
+        last: RelayError | None = None
+        for attempt in range(ASR_MAX_RETRIES + 1):
+            if attempt:
+                await wait_backoff(retry_backoff_seconds(attempt), cancel, self._resume)
+            try:
+                data = await self.relay.asr_credentials(token)
+            except RelayError as exc:
+                last = exc
+                if not _relay_credential_retryable(exc) or attempt >= ASR_MAX_RETRIES:
+                    raise
+                log.warning(
+                    "asr credential fetch will retry %s/%s status=%s",
+                    attempt + 1,
+                    ASR_MAX_RETRIES,
+                    exc.status,
+                )
+                continue
+            try:
+                return parse_relay_credentials(data)
+            except ValueError:
+                last = RelayError("中转站没有返回口播凭证", 502)
+                if attempt >= ASR_MAX_RETRIES:
+                    raise last
+                log.warning(
+                    "asr credential fetch will retry %s/%s status=502",
+                    attempt + 1,
+                    ASR_MAX_RETRIES,
+                )
+        assert last is not None
+        raise last
+
+    async def _apply_relay_credentials(self, asr: TencentAsrClient, cancel: asyncio.Event | None = None) -> None:
+        creds = await self._load_asr_credentials(cancel)
+        asr.apply_credentials(
+            creds.secret_id,
+            creds.secret_key,
+            creds.region,
+            creds.token,
+            expired_at=creds.expired_at,
+        )
 
     async def _speech_job(self, state, asr, recognizer, holder, on_speech, prepare=None) -> tuple[list[RawHit], str]:
         try:
