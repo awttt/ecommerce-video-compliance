@@ -229,6 +229,7 @@ function McpDrawer({
 export function Shell() {
   const { message } = AntApp.useApp();
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [keyNotice, setKeyNotice] = useState("");
   const [authPage, setAuthPage] = useState<"login" | "register">("login");
   const [refreshingAccount, setRefreshingAccount] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
@@ -818,9 +819,14 @@ export function Shell() {
     try {
       const result = await accountRefresh();
       setSettings(result.settings);
+      if (result.settings.has_api_key) setKeyNotice("");
       message.success(result.message || "已更新余额");
     } catch (error) {
       const text = error instanceof Error ? error.message : "刷新失败";
+      if (text.includes("分组") || text.includes("画面识别密钥") || text.includes("专属")) {
+        setKeyNotice(text);
+        refreshSettings().catch(() => undefined);
+      }
       message.error(text);
       if (text.includes("请重新登录") || text.includes("请先登录") || text.includes("还没有登录")) {
         refreshSettings().catch(() => undefined);
@@ -863,14 +869,21 @@ export function Shell() {
   if (!settings.account_logged_in) {
     return authPage === "register" ? (
       <RegisterPage
-        onRegistered={(next) => {
+        onRegistered={(next, notice) => {
           setSettings(next);
+          setKeyNotice(notice && notice.includes("画面识别密钥") ? notice : "");
           setAuthPage("login");
         }}
         onGoLogin={() => setAuthPage("login")}
       />
     ) : (
-      <LoginPage onLoggedIn={setSettings} onGoRegister={() => setAuthPage("register")} />
+      <LoginPage
+        onLoggedIn={(next, notice) => {
+          setSettings(next);
+          setKeyNotice(notice && notice.includes("画面识别密钥") ? notice : "");
+        }}
+        onGoRegister={() => setAuthPage("register")}
+      />
     );
   }
 
@@ -940,7 +953,10 @@ export function Shell() {
               {settings?.mock_mode ? (
                 <Alert type="warning" showIcon style={{ marginBottom: 12 }} message="模拟识别已打开，不会调用模型。" />
               ) : null}
-              {!settings.has_api_key && !settings.mock_mode ? (
+              {keyNotice ? (
+                <Alert type="error" showIcon style={{ marginBottom: 12 }} message={keyNotice} />
+              ) : null}
+              {!keyNotice && !settings.has_api_key && !settings.mock_mode ? (
                 <Alert
                   type="info"
                   showIcon

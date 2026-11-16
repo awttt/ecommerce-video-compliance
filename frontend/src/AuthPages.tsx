@@ -101,7 +101,7 @@ export function LoginPage({
   onLoggedIn,
   onGoRegister,
 }: {
-  onLoggedIn: (settings: Settings) => void;
+  onLoggedIn: (settings: Settings, message?: string) => void;
   onGoRegister: () => void;
 }) {
   const { options, optionsError } = useSiteOptions();
@@ -120,7 +120,7 @@ export function LoginPage({
       setMasked(result.email_masked);
       return;
     }
-    if (result.settings.account_logged_in) onLoggedIn(result.settings);
+    if (result.settings.account_logged_in) onLoggedIn(result.settings, result.message);
   }
 
   return (
@@ -208,7 +208,7 @@ export function RegisterPage({
   onRegistered,
   onGoLogin,
 }: {
-  onRegistered: (settings: Settings) => void;
+  onRegistered: (settings: Settings, message?: string) => void;
   onGoLogin: () => void;
 }) {
   const { options, optionsError } = useSiteOptions();
@@ -256,7 +256,7 @@ export function RegisterPage({
             const result = await accountRegister(values.email, values.password, values.verify_code || "");
             setNoticeError(false);
             setNotice(result.message);
-            if (result.settings.account_logged_in) onRegistered(result.settings);
+            if (result.settings.account_logged_in) onRegistered(result.settings, result.message);
           } catch (error) {
             setNoticeError(true);
             setNotice(error instanceof Error ? error.message : "注册失败");
