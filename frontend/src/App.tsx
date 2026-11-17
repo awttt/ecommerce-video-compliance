@@ -34,13 +34,11 @@ import {
   Switch,
   Popover,
   Spin,
-  Table,
   Tooltip,
   Typography,
   Upload,
   App as AntApp,
 } from "antd";
-import type { ColumnsType } from "antd/es/table";
 import { useEffect, useRef, useState } from "react";
 import {
   accountLogout,
@@ -83,6 +81,8 @@ import {
 } from "./dropVideos";
 import { RechargePage } from "./RechargePage";
 import { batchElapsed, jobElapsed } from "./elapsed";
+import { FindingsTable, type FindingsTableHandle } from "./FindingsTable";
+import { findingKey } from "./findingsView";
 import { draftsFromPhrases, groupKey, phrasesFromDrafts, RULE_GROUPS } from "./ruleForm";
 import { CATEGORY_COLOR, TERMINAL, type CutSpan, type Finding, type Job, type Settings } from "./types";
 import { VideoPane, type PlayerControls } from "./VideoPane";
@@ -111,13 +111,6 @@ const ASR_ENGINE_OPTIONS = [
   { value: "16k_zh", label: "通用引擎 16k_zh（免费资源包）" },
   { value: "16k_zh_en_2.0", label: "大模型 2.0（16k_zh_en_2.0）" },
 ];
-
-const CATEGORY_PILL: Record<string, string> = {
-  价格: "pill--price",
-  规格: "pill--spec",
-  品牌: "pill--brand",
-  夸大宣传: "pill--hype",
-};
 
 export function BrandMark() {
   return <img className="brand-logo" src="/logo.png" alt="" />;
@@ -291,6 +284,7 @@ export function Shell() {
   const [ruleNote, setRuleNote] = useState("");
   const [source, setSource] = useState<"media" | "output">("media");
   const [activeKey, setActiveKey] = useState("");
+  const findingsRef = useRef<FindingsTableHandle>(null);
   const [editorOn, setEditorOn] = useState(false);
   const [cuts, setCuts] = useState<CutSpan[]>([]);
   const [previewMode, setPreviewMode] = useState<"original" | "segment" | "keep">("keep");
@@ -453,6 +447,7 @@ export function Shell() {
     if (seenJob.current === job.id) return;
     seenJob.current = job.id;
     window.clearTimeout(saveTimer.current);
+    setActiveKey("");
     setPreviewMode("keep");
     setSelectedCut(null);
     setCurrentTime(0);
@@ -698,10 +693,6 @@ export function Shell() {
     }
   }
 
-  function findingKey(finding: Finding) {
-    return `${finding.start_sec}-${finding.来源}-${finding.类别}-${finding.原文}`;
-  }
-
   function seekOriginal(sec: number, play = false) {
     if (play) {
       scrubRef.current = true;
@@ -814,40 +805,9 @@ export function Shell() {
     seekOriginal(finding.start_sec, true);
   }
 
-  const columns: ColumnsType<Finding> = [
-    { title: "时间点", dataIndex: "时间点", width: 130 },
-    {
-      title: "类别",
-      dataIndex: "类别",
-      width: 80,
-      render: (value: string) => <span className={`pill ${CATEGORY_PILL[value] ?? "pill--neutral"}`}>{value}</span>,
-    },
-    {
-      title: "来源",
-      dataIndex: "来源",
-      width: 80,
-      render: (value: string) => <span className={`pill ${value === "口播" ? "pill--speech" : "pill--neutral"}`}>{value || "画面"}</span>,
-    },
-    { title: "原文", dataIndex: "原文", width: 160 },
-    { title: "位置", dataIndex: "位置", width: 180 },
-    {
-      title: "置信度",
-      dataIndex: "置信度",
-      width: 90,
-      render: (value: string) => <span className={`pill ${value === "确定" ? "pill--confirmed" : "pill--pending"}`}>{value}</span>,
-    },
-    {
-      title: "判定理由",
-      dataIndex: "判定理由",
-      ellipsis: { showTitle: false },
-      render: (value: string) => (
-        <Tooltip title={value}>
-          <span>{value}</span>
-        </Tooltip>
-      ),
-    },
-    { title: "备注", dataIndex: "备注", width: 160, ellipsis: true },
-  ];
+  function revealFinding(finding: Finding) {
+    findingsRef.current?.reveal(finding);
+  }
 
   async function saveTestFlag(patch: Record<string, boolean>) {
     try {
@@ -1296,7 +1256,7 @@ export function Shell() {
                         onGesture={(active) => {
                           scrubRef.current = active;
                         }}
-                        onSelectFinding={seekTo}
+                        onSelectFinding={revealFinding}
                         onSelect={setSelectedCut}
                         onActivate={(cut) => {
                           if (previewRef.current === "segment") seekOriginal(cut.start_sec, true);
@@ -1323,7 +1283,7 @@ export function Shell() {
                               }}
                               onClick={(event) => {
                                 event.stopPropagation();
-                                seekTo(finding);
+                                revealFinding(finding);
                               }}
                             />
                           </Tooltip>
@@ -1346,15 +1306,13 @@ export function Shell() {
                         ) : null}
                       </div>
                     ) : null}
-                    <Table
-                      size="small"
-                      rowKey={(record) => findingKey(record)}
-                      columns={columns}
-                      dataSource={job.findings}
-                      pagination={{ pageSize: 8, hideOnSinglePage: true }}
-                      rowClassName="click-row"
-                      onRow={(record) => ({ onClick: () => seekTo(record) })}
-                      locale={{ emptyText: running ? "识别进行中，命中会陆续出现" : "没有发现画面或口播中的价格、规格、品牌或夸大宣传" }}
+                    <FindingsTable
+                      ref={findingsRef}
+                      jobId={job.id}
+                      findings={job.findings}
+                      running={running}
+                      activeKey={activeKey}
+                      onOpen={seekTo}
                     />
                     <div className="toolbar">
                       {SHOW_JSON_EXPORT ? (
