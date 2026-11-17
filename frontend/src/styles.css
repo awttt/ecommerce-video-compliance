@@ -682,6 +682,43 @@ body {
   background: var(--brand-soft) !important;
 }
 
+.findings-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 12px;
+  margin: 2px 0 12px;
+}
+
+.findings-filter-label {
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.findings-table tr {
+  scroll-margin-top: 84px;
+  scroll-margin-bottom: 24px;
+}
+
+.app-shell tr.finding-row-active > td {
+  background: #fff7e6 !important;
+  animation: finding-row-flash 0.6s ease;
+}
+
+.app-shell tr.finding-row-active > td:first-child {
+  box-shadow: inset 3px 0 0 #d48806;
+}
+
+.app-shell tr.finding-row-active.click-row:hover > td {
+  background: #ffe7ba !important;
+}
+
+@keyframes finding-row-flash {
+  from { background: #ffe7ba; }
+  to { background: #fff7e6; }
+}
+
 .pill {
   display: inline-flex;
   align-items: center;
