@@ -45,6 +45,31 @@ jobs:
           if (-not (Test-Path $ffprobe)) { throw "ffprobe.exe was not next to ffmpeg.exe" }
           Copy-Item $ffmpeg.FullName, $ffprobe -Destination "dist\VideoCompliance\"
 
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed" }
+
+      - name: Build the installer
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\build_installer.ps1 -SkipAppBuild
+
+      - name: Install the package silently
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $setup = Get-ChildItem "dist\VideoCompliance-*-Setup.exe" | Select-Object -First 1
+          if (-not $setup) { throw "installer was not produced" }
+          $target = Join-Path $env:LOCALAPPDATA "Programs\VideoCompliance"
+          $installArgs = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
+          $proc = Start-Process -FilePath $setup.FullName -ArgumentList $installArgs -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "installer exited with code $($proc.ExitCode)" }
+          foreach ($name in @("VideoCompliance.exe", "ffmpeg.exe", "ffprobe.exe")) {
+            if (-not (Test-Path (Join-Path $target $name))) { throw "$name missing after install" }
+          }
+          Write-Host "installer deployed to $target"
+
       - name: Start the package and check health
         shell: pwsh
         run: |
@@ -82,5 +107,13 @@ jobs:
         with:
           name: VideoCompliance-windows
           path: dist/VideoCompliance
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: VideoCompliance-windows-setup
+          path: dist/VideoCompliance-*-Setup.exe
           if-no-files-found: error
           retention-days: 14

@@ -30,7 +30,9 @@ ecommerce-video-compliance/
 │   └── exporting.py
 ├── frontend/                   # React + Ant Design + Video.js
 ├── packaging/evc.spec          # PyInstaller
+├── packaging/installer.iss     # Inno Setup 安装包
 ├── scripts/build_windows.ps1
+├── scripts/build_installer.ps1
 └── tests/
 ```
 
@@ -184,6 +186,32 @@ powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
 产物在 `dist\VideoCompliance\VideoCompliance.exe`。把 `ffmpeg.exe` 和 `ffprobe.exe` 放在 exe 旁边，或者保证它们在 PATH 里。程序会先找环境变量 `EVC_FFMPEG` / `EVC_FFPROBE`，再找 exe 同目录，最后找 PATH。
 
 打包是窗口程序，没有黑色控制台。出错时看 `%APPDATA%\EcommerceVideoCompliance\logs\app.log`。开发时用 `python run.py` 可以直接看到报错。
+
+### 打成安装包
+
+先生成上面的目录，再编译安装包：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build_installer.ps1
+```
+
+脚本会依次做：构建程序 → 缺 FFmpeg 时自动下载到 `dist\VideoCompliance\` → 编译 `packaging\installer.iss`。产物是单个 `dist\VideoCompliance-<版本>-Setup.exe`，用户双击安装即可。需要 [Inno Setup](https://jrsoftware.org/isdl.php)（6.0 或更新版本），没有时会提示安装命令。
+
+安装行为：
+
+- 装到 `%LOCALAPPDATA%\Programs\VideoCompliance`，按当前用户安装，不需要管理员权限。
+- `AppId` 固定，重复运行新版本安装包会直接覆盖旧版本，不会出现两份；安装前会自动关闭正在运行的程序。
+- 旧版本的 `_internal` 目录会先删掉，避免残留的旧模块被加载。
+- 数据在 `%APPDATA%\EcommerceVideoCompliance`，在安装目录之外，升级和卸载都不动它。
+- 安装包自带 `ffmpeg.exe` 和 `ffprobe.exe`，用户不用自己装 FFmpeg。
+- 静默安装：`VideoCompliance-<版本>-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`，静默模式装完不会自动启动程序。
+- Win10 缺少 WebView2 时，安装程序会提示并打开微软下载页。
+
+程序图标和安装包图标都用 `packaging/app.ico`，由 `frontend/public/logo.png` 生成；换 logo 后重新生成这个 ico 即可。
+
+版本号取自 `app/__init__.py` 的 `__version__`，发新版本前先改这里。没有代码签名证书时，用户首次运行安装包会看到 SmartScreen 提示，点「更多信息 → 仍要运行」可以继续。
+
+GitHub Actions 的 `Windows package` 工作流会顺带编译安装包，并静默安装一次做冒烟检查，产物名为 `VideoCompliance-windows-setup`。
 
 ## macOS 打包
 

@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>evc-admin 后台原型 · 多商户管理平台</title>
+<style>
+:root{
+  --primary:#1677ff;--bg:#f4f6f9;--card:#fff;--text:#1f2937;--muted:#6b7280;
+  --line:#e5e7eb;--nav:#0f172a;--green:#16a34a;--orange:#ea580c;--red:#dc2626;
+}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text);font-size:13px;line-height:1.6}
+.hidden{display:none!important}
+.app{display:flex;min-height:100vh}
+
+/* sidebar */
+.sidebar{width:218px;flex:0 0 218px;background:var(--nav);color:#cbd5e1;height:100vh;position:sticky;top:0;display:flex;flex-direction:column;overflow-y:auto}
+.brand{display:flex;align-items:center;gap:10px;padding:18px 18px 14px;border-bottom:1px solid rgba(255,255,255,.08)}
+.brand .logo{width:32px;height:32px;border-radius:9px;background:linear-gradient(135deg,#4096ff,#1677ff);display:grid;place-items:center;color:#fff;font-weight:700;font-size:15px}
+.brand b{color:#fff;font-size:15px;display:block;line-height:1.2}
+.brand small{font-size:10.5px;color:#64748b}
+.rolebox{padding:14px 14px 10px;border-bottom:1px solid rgba(255,255,255,.08)}
+.rolebox .lb{font-size:10.5px;color:#64748b;margin-bottom:8px;letter-spacing:.5px}
+.rolebtn{display:block;width:100%;text-align:left;border:1px solid transparent;background:rgba(255,255,255,.04);color:#94a3b8;border-radius:7px;padding:7px 10px;margin-bottom:5px;cursor:pointer;font-size:12px;font-family:inherit}
+.rolebtn:hover{background:rgba(255,255,255,.09)}
+.rolebtn.on{background:rgba(22,119,255,.18);border-color:rgba(22,119,255,.6);color:#91caff}
+.rolebtn span{float:right;font-size:10px;opacity:.7}
+.nav{flex:1;padding:10px 10px 20px}
+.nav .group{font-size:10.5px;color:#475569;padding:12px 10px 5px;letter-spacing:.5px}
+.nav a{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:7px;color:#94a3b8;text-decoration:none;cursor:pointer;margin-bottom:2px;font-size:12.5px}
+.nav a:hover{background:rgba(255,255,255,.07);color:#e2e8f0}
+.nav a.on{background:var(--primary);color:#fff}
+.nav a .ic{width:16px;text-align:center;font-size:13px;opacity:.9}
+.nav a .badge{margin-left:auto;background:#dc2626;color:#fff;font-size:10px;border-radius:9px;padding:0 6px;line-height:17px}
+
+/* main */
+.main{flex:1;min-width:0;display:flex;flex-direction:column}
+.topbar{height:56px;background:#fff;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:14px;padding:0 22px;position:sticky;top:0;z-index:5}
+.topbar .crumb{color:var(--muted);font-size:12px}
+.topbar .crumb b{color:var(--text);font-weight:600}
+.topbar .spacer{flex:1}
+.tenantchip{background:#eef4ff;color:#1d4ed8;border:1px solid #c7d7fe;border-radius:20px;padding:3px 11px;font-size:11.5px}
+.search{border:1px solid var(--line);border-radius:6px;padding:6px 10px;font-size:12px;width:170px;outline:none;font-family:inherit}
+.search:focus{border-color:var(--primary)}
+.avatar{width:28px;height:28px;border-radius:50%;background:#e0e7ff;color:#3730a3;display:grid;place-items:center;font-size:11px;font-weight:600}
+.content{padding:20px 22px 50px;max-width:1440px;width:100%;margin:0 auto}
+
+/* view head */
+.vhead{display:flex;align-items:flex-end;gap:12px;margin-bottom:16px;flex-wrap:wrap}
+.vhead h1{font-size:19px;margin:0;font-weight:600}
+.vhead p{margin:0;color:var(--muted);font-size:12px}
+.vhead .spacer{flex:1}
+
+/* buttons */
+.btn{border:1px solid var(--line);background:#fff;color:var(--text);border-radius:6px;padding:6px 13px;cursor:pointer;font-size:12px;font-family:inherit}
+.btn:hover{border-color:var(--primary);color:var(--primary)}
+.btn.primary{background:var(--primary);border-color:var(--primary);color:#fff}
+.btn.primary:hover{background:#4096ff;color:#fff}
+.btn.danger{color:var(--red)}
+.btn.sm{padding:3px 9px;font-size:11.5px}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+
+/* cards */
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px;box-shadow:0 1px 2px rgba(16,24,40,.03)}
+.card h3{margin:0 0 12px;font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px}
+.card h3 small{font-weight:400;color:var(--muted);font-size:11.5px}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:16px}
+.grid2{display:grid;grid-template-columns:1.4fr 1fr;gap:14px;margin-bottom:16px}
+.stat .k{color:var(--muted);font-size:12px}
+.stat .v{font-size:24px;font-weight:600;margin:4px 0 2px;letter-spacing:-.5px}
+.stat .d{font-size:11px;color:var(--muted)}
+.stat .d.up{color:var(--green)}
+.stat .bar{height:4px;border-radius:3px;background:#eef2f7;margin-top:10px;overflow:hidden}
+.stat .bar i{display:block;height:100%;background:var(--primary);border-radius:3px}
+
+/* banner */
+.banner{display:flex;align-items:center;gap:10px;border-radius:9px;padding:11px 15px;margin-bottom:16px;font-size:12px}
+.banner.ok{background:#f0fdf4;border:1px solid #bbf7d0;color:#166534}
+.banner.warn{background:#fffbeb;border:1px solid #fde68a;color:#92400e}
+.banner.info{background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af}
+.banner b{font-weight:600}
+.banner .spacer{flex:1}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#f1f5f9;border-radius:4px;padding:1px 5px;font-size:11.5px;color:#334155}
+
+/* tables */
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:left;color:var(--muted);font-weight:500;background:#fafbfc;padding:9px 11px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:10px 11px;border-bottom:1px solid #f0f2f5;vertical-align:middle}
+tr:last-child td{border-bottom:none}
+tbody tr:hover{background:#fafcff}
+.tw{overflow-x:auto}
+.tag{display:inline-block;border-radius:4px;padding:1px 8px;font-size:11px;line-height:19px}
+.tag.g{background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0}
+.tag.r{background:#fef2f2;color:#b91c1c;border:1px solid #fecaca}
+.tag.o{background:#fff7ed;color:#c2410c;border:1px solid #fed7aa}
+.tag.b{background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe}
+.tag.gray{background:#f1f5f9;color:#64748b;border:1px solid #e2e8f0}
+.ops{display:flex;gap:10px;white-space:nowrap}
+.ops a{color:var(--primary);cursor:pointer;text-decoration:none;font-size:11.5px}
+.ops a.red{color:var(--red)}
+.muted{color:var(--muted)}
+.mini{font-size:11px;color:var(--muted)}
+
+/* tabs */
+.tabs{display:flex;gap:22px;border-bottom:1px solid var(--line);margin-bottom:14px}
+.tabs span{padding:0 1px 10px;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;font-size:12.5px}
+.tabs span.on{color:var(--primary);border-bottom-color:var(--primary);font-weight:600}
+.tabs em{font-style:normal;background:#f1f5f9;border-radius:9px;padding:0 6px;font-size:10.5px;margin-left:4px}
+
+/* forms */
+.form{display:grid;grid-template-columns:repeat(2,1fr);gap:12px 18px}
+.fi label{display:block;font-size:11.5px;color:var(--muted);margin-bottom:5px}
+.fi input,.fi select,.fi textarea{width:100%;border:1px solid var(--line);border-radius:6px;padding:7px 10px;font-size:12px;outline:none;font-family:inherit;background:#fff}
+.fi input:focus,.fi select:focus,.fi textarea:focus{border-color:var(--primary)}
+.fi textarea{resize:vertical;min-height:60px}
+.form-actions{display:flex;gap:8px;margin-top:14px;align-items:center}
+.form-actions .hint{color:var(--muted);font-size:11.5px;margin-left:auto}
+
+/* charts */
+.chart{height:150px;display:flex;align-items:flex-end;gap:10px;padding:6px 4px 0;border-bottom:1px solid var(--line)}
+.chart .col{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;gap:5px}
+.chart .col i{display:block;width:60%;max-width:34px;background:linear-gradient(180deg,#69b1ff,#1677ff);border-radius:4px 4px 0 0}
+.chart .col span{font-size:10px;color:var(--muted)}
+.chart-lb{display:flex;gap:10px;padding-top:6px}
+.chart-lb span{flex:1;text-align:center;font-size:10.5px;color:var(--muted)}
+.pbar{height:6px;background:#eef2f7;border-radius:4px;width:90px;overflow:hidden;display:inline-block;vertical-align:middle}
+.pbar i{display:block;height:100%;background:var(--primary)}
+
+/* flow diagrams */
+.flow-box{border:1px solid var(--line);border-radius:10px;background:#fff;padding:16px 18px;margin-bottom:14px}
+.flow-box h3{margin:0 0 13px;font-size:13.5px;display:flex;align-items:center;gap:9px}
+.flow-box h3 i{width:21px;height:21px;border-radius:6px;background:#eef4ff;color:#1d4ed8;font-style:normal;font-size:11px;display:grid;place-items:center;font-weight:600}
+.flow-row{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.step{border:1px solid #c7d7fe;background:#eef4ff;color:#1e40af;border-radius:7px;padding:8px 11px;font-size:11.5px;text-align:center;min-width:96px;line-height:1.5}
+.step small{display:block;font-size:10px;opacity:.75;margin-top:1px}
+.step.g{border-color:#bbf7d0;background:#f0fdf4;color:#166534}
+.step.o{border-color:#fed7aa;background:#fff7ed;color:#9a3412}
+.step.gray{border-color:#e2e8f0;background:#f8fafc;color:#475569}
+.step.r{border-color:#fecaca;background:#fef2f2;color:#991b1b}
+.ar{color:#94a3b8;font-size:15px}
+.flow-note{margin-top:10px;font-size:11px;color:var(--muted);background:#f8fafc;border-left:2px solid #cbd5e1;padding:6px 10px;border-radius:0 5px 5px 0}
+.branchline{display:flex;gap:14px;margin:10px 0 0 20px;flex-wrap:wrap}
+.branchline .b{border-left:2px solid #cbd5e1;padding-left:12px}
+.branchline .b .t{font-size:11px;color:var(--muted);margin-bottom:6px}
+
+/* modal / toast */
+.mask{position:fixed;inset:0;background:rgba(15,23,42,.45);display:grid;place-items:center;z-index:50}
+.modal{background:#fff;border-radius:12px;width:min(480px,92vw);box-shadow:0 24px 60px rgba(0,0,0,.25);overflow:hidden}
+.modal .hd{padding:15px 20px;border-bottom:1px solid var(--line);font-weight:600;font-size:14px;display:flex;justify-content:space-between;align-items:center}
+.modal .hd .x{cursor:pointer;color:var(--muted);font-size:18px;line-height:1}
+.modal .bd{padding:18px 20px}
+.modal .ft{padding:12px 20px;border-top:1px solid var(--line);display:flex;justify-content:flex-end;gap:8px}
+.toast{position:fixed;right:22px;bottom:22px;background:#1f2937;color:#fff;border-radius:8px;padding:10px 16px;font-size:12px;z-index:60;box-shadow:0 10px 30px rgba(0,0,0,.25);animation:tin .2s ease}
+@keyframes tin{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+
+@media(max-width:980px){
+  .sidebar{width:64px;flex-basis:64px}
+  .brand b,.brand small,.rolebox,.nav .group,.nav a span.t,.nav a .badge{display:none}
+  .brand{padding:16px 14px}
+  .nav a{justify-content:center}
+  .grid4,.grid2{grid-template-columns:1fr 1fr}
+}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ============ SIDEBAR ============ -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo">E</div>
+      <div><b>evc-admin</b><small>多商户管理平台</small></div>
+    </div>
+    <div class="rolebox">
+      <div class="lb">切换角色预览</div>
+      <button class="rolebtn on" data-role="platform">平台管理员（你）<span>全局</span></button>
+      <button class="rolebtn" data-role="tenant">公司管理员<span>本公司</span></button>
+      <button class="rolebtn" data-role="member">普通用户<span>客户端</span></button>
+    </div>
+    <nav class="nav">
+      <div class="group">工作台</div>
+      <a data-view="dashboard" data-roles="platform,tenant,member" class="on"><i class="ic">▦</i><span class="t">总览</span></a>
+      <a data-view="flow" data-roles="platform,tenant,member"><i class="ic">⇄</i><span class="t">流程图与权限</span></a>
+      <div class="group">业务管理</div>
+      <a data-view="tenants" data-roles="platform"><i class="ic">▣</i><span class="t">租户管理</span></a>
+      <a data-view="members" data-roles="platform,tenant"><i class="ic">♙</i><span class="t">成员管理</span></a>
+      <a data-view="quota" data-roles="platform,tenant"><i class="ic">¥</i><span class="t">额度分配</span></a>
+      <a data-view="keywords" data-roles="platform,tenant,member"><i class="ic">✎</i><span class="t">关键词审批</span><span class="badge" id="navKwBadge">3</span></a>
+      <a data-view="usage" data-roles="platform,tenant"><i class="ic">▤</i><span class="t">用量看板</span></a>
+      <a data-view="audit" data-roles="platform,tenant"><i class="ic">◷</i><span class="t">审计日志</span></a>
+      <div class="group">系统</div>
+      <a data-view="settings" data-roles="platform"><i class="ic">⚙</i><span class="t">接入设置</span></a>
+    </nav>
+  </aside>
+
+  <!-- ============ MAIN ============ -->
+  <div class="main">
+    <header class="topbar">
+      <div class="crumb">evc-admin / <b id="crumb">总览</b></div>
+      <div class="spacer"></div>
+      <div class="tenantchip" id="tenantChip">全平台视角</div>
+      <input class="search" placeholder="搜索成员 / 关键词…">
+      <div class="avatar" id="avatar">平</div>
+    </header>
+
+    <div class="content">
+
+      <!-- ---------- 总览 ---------- -->
+      <section class="view" id="v-dashboard">
+        <div class="vhead">
+          <div><h1>总览</h1><p>公司池、额度分配与实际消耗的对账情况</p></div>
+          <div class="spacer"></div>
+          <button class="btn" onclick="toast('已刷新（原型：数据为演示值）')">刷新数据</button>
+        </div>
+
+        <div class="banner ok" id="reconcileBanner">
+          <b>对账状态：正常</b>
+          <span>公司池总额 ¥50,000 = 成员余额合计 ¥23,573.50 + 本月已消耗 ¥8,426.50 + 已回收 ¥18,000</span>
+          <div class="spacer"></div><span class="mini">每日 02:00 自动对账</span>
+        </div>
+
+        <div class="grid4">
+          <div class="card stat"><div class="k">公司池总额</div><div class="v">¥50,000</div><div class="d">2 家在营公司</div><div class="bar"><i style="width:100%"></i></div></div>
+          <div class="card stat"><div class="k">已分配额度</div><div class="v">¥32,000</div><div class="d">占用率 64%</div><div class="bar"><i style="width:64%"></i></div></div>
+          <div class="card stat"><div class="k">本月消耗</div><div class="v">¥8,426.50</div><div class="d up">较上月 +12.4%</div><div class="bar"><i style="width:26%;background:#52c41a"></i></div></div>
+          <div class="card stat"><div class="k">待审关键词</div><div class="v">3</div><div class="d">其中 2 条公司自定义词</div><div class="bar"><i style="width:30%;background:#faad14"></i></div></div>
+        </div>
+
+        <div class="grid2">
+          <div class="card">
+            <h3>近 7 日消耗趋势 <small>单位：元 · 读自 usage_snapshots</small></h3>
+            <div class="chart">
+              <div class="col"><i style="height:52%"></i><span>680</span></div>
+              <div class="col"><i style="height:71%"></i><span>930</span></div>
+              <div class="col"><i style="height:43%"></i><span>560</span></div>
+              <div class="col"><i style="height:88%"></i><span>1150</span></div>
+              <div class="col"><i style="height:64%"></i><span>840</span></div>
+              <div class="col"><i style="height:96%"></i><span>1260</span></div>
+              <div class="col"><i style="height:38%"></i><span>496</span></div>
+            </div>
+            <div class="chart-lb"><span>11/11</span><span>11/12</span><span>11/13</span><span>11/14</span><span>11/15</span><span>11/16</span><span>11/17</span></div>
+          </div>
+          <div class="card">
+            <h3>最近操作 <small>来自 audit_logs</small></h3>
+            <table>
+              <tr><td>分配 ¥500 给 张剪辑</td><td class="mini">2 分钟前</td></tr>
+              <tr><td>通过关键词「家居好物」</td><td class="mini">18 分钟前</td></tr>
+              <tr><td>开通成员 李运营</td><td class="mini">1 小时前</td></tr>
+              <tr><td>回收上月未用额度 ¥320</td><td class="mini">昨天 02:00</td></tr>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>待处理 <small>点击右侧跳转</small></h3>
+          <table>
+            <tr><td><span class="tag o">待审</span></td><td>关键词「厨房清洁神器」</td><td class="muted">锦程商贸 · 公司自定义词</td><td>今天 09:12</td><td style="text-align:right"><a class="btn sm primary" onclick="go('keywords')">去审批</a></td></tr>
+            <tr><td><span class="tag o">待审</span></td><td>关键词「冬季保暖」</td><td class="muted">锦程商贸 · 公司自定义词</td><td>今天 08:40</td><td style="text-align:right"><a class="btn sm primary" onclick="go('keywords')">去审批</a></td></tr>
+            <tr><td><span class="tag b">待审</span></td><td>关键词「品质生活」</td><td class="muted">全局词库</td><td>昨天 17:30</td><td style="text-align:right"><a class="btn sm primary" onclick="go('keywords')">去审批</a></td></tr>
+          </table>
+        </div>
+      </section>
+
+      <!-- ---------- 租户管理 ---------- -->
+      <section class="view hidden" id="v-tenants">
+        <div class="vhead">
+          <div><h1>租户管理</h1><p>一个租户 = 一家入驻公司；中转站不感知公司概念</p></div>
+          <div class="spacer"></div>
+          <button class="btn primary" onclick="openModal('新建公司',[
+            {k:'公司名称',p:'例如：锦程商贸'},
+            {k:'管理员邮箱',p:'用于登录 evc-admin'},
+            {k:'初始公司池',p:'5000'},
+            {k:'席位数',p:'10'}] )">+ 新建公司</button>
+        </div>
+        <div class="card">
+          <table>
+            <thead><tr><th>公司</th><th>状态</th><th>成员 / 席位</th><th>中转站分组</th><th>公司池</th><th>本月消耗</th><th>创建时间</th><th>操作</th></tr></thead>
+            <tbody>
+              <tr><td><b>锦程商贸</b><div class="mini">关键词：公司自定义词库</div></td><td><span class="tag g">在营</span></td><td>6 / 10</td><td><code>电商审核专属-bot创建</code></td><td>¥30,000</td><td>¥6,218.00</td><td class="mini">2026-09-12</td><td><div class="ops"><a onclick="go('members')">成员</a><a onclick="toast('原型：停用需二次确认')">停用</a></div></td></tr>
+              <tr><td><b>优品优选</b><div class="mini">关键词：公司自定义词库</div></td><td><span class="tag g">在营</span></td><td>3 / 5</td><td><code>电商审核专属-bot创建</code></td><td>¥20,000</td><td>¥2,208.50</td><td class="mini">2026-10-03</td><td><div class="ops"><a onclick="go('members')">成员</a><a onclick="toast('原型：停用需二次确认')">停用</a></div></td></tr>
+              <tr><td><b>测试公司</b></td><td><span class="tag gray">已停用</span></td><td>0 / 2</td><td>—</td><td>¥0</td><td>¥0</td><td class="mini">2026-08-21</td><td><div class="ops"><a onclick="toast('原型：启用')">启用</a></div></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="banner info" style="margin-top:14px">新建公司时会同时创建公司管理员账号，并绑定一个中转站分组。第二版建议每家公司独立分组，统计可以用 <code>/groups/usage-summary</code> 一次拿到公司总量。</div>
+      </section>
+
+      <!-- ---------- 成员管理 ---------- -->
+      <section class="view hidden" id="v-members">
+        <div class="vhead">
+          <div><h1>成员管理</h1><p>每个成员对应一个中转站 user（tenant_members.relay_user_id）</p></div>
+          <div class="spacer"></div>
+          <button class="btn primary" onclick="openModal('邀请成员',[
+            {k:'姓名',p:'例如：张剪辑'},
+            {k:'邮箱',p:'name@company.com'},
+            {k:'角色',p:'公司管理员 / 普通用户'},
+            {k:'初始额度',p:'500'}] )">+ 邀请成员</button>
+        </div>
+        <div class="banner warn" id="memberWarn"><b>开通前请确认：</b>中转站的「后台模式」必须关闭，且自助注册已关闭。后台模式开启时非 admin 账号登录会直接 403，客户端将无法使用。</div>
+        <div class="card">
+          <table>
+            <thead><tr><th>成员</th><th>角色</th><th>中转站用户</th><th>可用分组</th><th>状态</th><th>本月消耗</th><th>设备</th><th>操作</th></tr></thead>
+            <tbody>
+              <tr><td><b>张剪辑</b><div class="mini">zhang@jiecheng.com</div></td><td><span class="tag gray">普通用户</span></td><td><code>user_1042</code></td><td>专属分组</td><td><span class="tag g">正常</span></td><td>¥1,842.00</td><td>2 台</td><td><div class="ops"><a onclick="toast('原型：重置密码')">重置密码</a><a class="red" onclick="toast('原型：会同时禁用中转站账号、吊销密钥、解绑设备')">禁用</a></div></td></tr>
+              <tr><td><b>李运营</b><div class="mini">li@jiecheng.com</div></td><td><span class="tag b">公司管理员</span></td><td><code>user_1043</code></td><td>专属分组</td><td><span class="tag g">正常</span></td><td>¥2,310.50</td><td>1 台</td><td><div class="ops"><a onclick="toast('原型：重置密码')">重置密码</a><a class="red" onclick="toast('原型：三件事一起做')">禁用</a></div></td></tr>
+              <tr><td><b>王审核</b><div class="mini">wang@jiecheng.com</div></td><td><span class="tag gray">普通用户</span></td><td><code>user_1044</code></td><td>专属分组</td><td><span class="tag g">正常</span></td><td>¥1,105.00</td><td>1 台</td><td><div class="ops"><a onclick="toast('原型：重置密码')">重置密码</a><a class="red" onclick="toast('原型：三件事一起做')">禁用</a></div></td></tr>
+              <tr><td><b>赵兼职</b><div class="mini">zhao@jiecheng.com</div></td><td><span class="tag gray">普通用户</span></td><td><code>user_1045</code></td><td>专属分组</td><td><span class="tag r">已停用</span></td><td>¥960.50</td><td>0 台</td><td><div class="ops"><a onclick="toast('原型：恢复')">恢复</a></div></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="banner info" style="margin-top:14px">禁用成员必须同时做三件事：中转站 <code>UpdateUser status=disabled</code> → 吊销该用户的 key → 解绑设备令牌。只禁用一边会留下可用密钥。</div>
+      </section>
+
+      <!-- ---------- 额度分配 ---------- -->
+      <section class="view hidden" id="v-quota">
+        <div class="vhead"><div><h1>额度分配</h1><p>从公司池分配到成员中转站余额，全程带幂等键</p></div></div>
+        <div class="grid2">
+          <div class="card">
+            <h3>锦程商贸 · 公司池</h3>
+            <div class="grid4" style="margin:0">
+              <div class="stat"><div class="k">池总额</div><div class="v" style="font-size:19px">¥30,000</div></div>
+              <div class="stat"><div class="k">已分配</div><div class="v" style="font-size:19px">¥22,000</div></div>
+              <div class="stat"><div class="k">可分配</div><div class="v" style="font-size:19px;color:#16a34a">¥8,000</div></div>
+              <div class="stat"><div class="k">本月消耗</div><div class="v" style="font-size:19px">¥6,218</div></div>
+            </div>
+          </div>
+          <div class="card">
+            <h3>分配额度 <small>服务端先校验公司池剩余</small></h3>
+            <div class="form" style="grid-template-columns:1fr">
+              <div class="fi"><label>选择成员</label><select><option>张剪辑（user_1042）</option><option>李运营（user_1043）</option><option>王审核（user_1044）</option></select></div>
+              <div class="fi"><label>金额（元）</label><input value="500"></div>
+              <div class="fi"><label>备注</label><input placeholder="例如：11 月额度"></div>
+            </div>
+            <div class="form-actions"><button class="btn primary" onclick="toast('原型：已提交，服务端会带 idempotency_key 调用中转站')">确认分配</button><span class="hint">失败重试不会重复加钱</span></div>
+          </div>
+        </div>
+        <div class="card">
+          <h3>分配记录 <small>quota_allocations</small></h3>
+          <table>
+            <thead><tr><th>时间</th><th>成员</th><th>金额</th><th>周期</th><th>操作人</th><th>幂等键</th><th>状态</th></tr></thead>
+            <tbody>
+              <tr><td class="mini">今天 14:22</td><td>张剪辑</td><td>¥500</td><td>11 月</td><td>李运营</td><td><code>qa_8f2c…</code></td><td><span class="tag g">成功</span></td></tr>
+              <tr><td class="mini">11-01 09:00</td><td>全体 4 人</td><td>¥4,000</td><td>11 月</td><td>李运营</td><td><code>qa_7b19…</code></td><td><span class="tag g">成功</span></td></tr>
+              <tr><td class="mini">10-01 09:00</td><td>全体 4 人</td><td>¥4,000</td><td>10 月</td><td>李运营</td><td><code>qa_5e03…</code></td><td><span class="tag g">成功</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ---------- 关键词审批 ---------- -->
+      <section class="view hidden" id="v-keywords">
+        <div class="vhead"><div><h1>关键词审批</h1><p>全局词库由平台管理员审，公司自定义词由公司管理员审；不允许审批自己提交的词</p></div><div class="spacer"></div><button class="btn primary" onclick="openModal('新增关键词',[{k:'关键词',p:'例如：家居好物'},{k:'作用域',p:'全局 / 本公司'},{k:'备注',p:'可选'}])">+ 新增</button></div>
+        <div class="card">
+          <div class="tabs">
+            <span class="on" data-ktab="pending">待审 <em id="tabPending">3</em></span>
+            <span data-ktab="approved">已通过 <em>24</em></span>
+            <span data-ktab="rejected">已驳回 <em>2</em></span>
+          </div>
+          <table id="kwTable">
+            <thead><tr><th>关键词</th><th>提交人</th><th>来源</th><th>词库</th><th>提交时间</th><th>状态</th><th>操作</th></tr></thead>
+            <tbody>
+              <tr data-kw="pending"><td><b>厨房清洁神器</b></td><td>张剪辑</td><td>锦程商贸</td><td><span class="tag o">公司自定义</span></td><td class="mini">今天 09:12</td><td><span class="tag o">待审</span></td><td><div class="ops"><a onclick="approve(this)">通过</a><a class="red" onclick="reject(this)">驳回</a></div></td></tr>
+              <tr data-kw="pending"><td><b>冬季保暖</b></td><td>李运营</td><td>锦程商贸</td><td><span class="tag o">公司自定义</span></td><td class="mini">今天 08:40</td><td><span class="tag o">待审</span></td><td><div class="ops"><a onclick="approve(this)">通过</a><a class="red" onclick="reject(this)">驳回</a></div></td></tr>
+              <tr data-kw="pending"><td><b>品质生活</b></td><td>平台运营</td><td>—</td><td><span class="tag b">全局词库</span></td><td class="mini">昨天 17:30</td><td><span class="tag o">待审</span></td><td><div class="ops"><a onclick="approve(this)">通过</a><a class="red" onclick="reject(this)">驳回</a></div></td></tr>
+              <tr data-kw="approved" class="hidden"><td><b>家居好物</b></td><td>王审核</td><td>锦程商贸</td><td><span class="tag o">公司自定义</span></td><td class="mini">昨天 15:02</td><td><span class="tag g">已通过</span></td><td><div class="ops"><a onclick="toast('原型：软删除')">删除</a></div></td></tr>
+              <tr data-kw="rejected" class="hidden"><td><b>违规词示例</b></td><td>张剪辑</td><td>锦程商贸</td><td><span class="tag o">公司自定义</span></td><td class="mini">11-14</td><td><span class="tag r">已驳回</span></td><td><div class="ops"><a onclick="toast('原型：重新提交')">重新提交</a></div></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="banner info" style="margin-top:14px">通过后词库版本号 +1，客户端用 <code>GET /v1/keywords?since=&lt;version&gt;</code> 拉增量（支持 ETag）。删除一律软删除，界面不提供物理删除。</div>
+      </section>
+
+      <!-- ---------- 用量看板 ---------- -->
+      <section class="view hidden" id="v-usage">
+        <div class="vhead"><div><h1>用量看板</h1><p>读本地 usage_snapshots，不实时打中转站；日期按 Asia/Shanghai 切分</p></div><div class="spacer"></div><select class="search" style="width:auto"><option>2026-11-01 ~ 11-30</option><option>2026-10-01 ~ 10-31</option></select><button class="btn" onclick="toast('原型：导出 CSV')">导出</button></div>
+        <div class="grid4">
+          <div class="card stat"><div class="k">请求数</div><div class="v">12,486</div><div class="d">本月累计</div></div>
+          <div class="card stat"><div class="k">Token 消耗</div><div class="v">28.4M</div><div class="d">输入 19.2M / 输出 9.2M</div></div>
+          <div class="card stat"><div class="k">实际扣费</div><div class="v">¥8,426.50</div><div class="d">已含分组倍率 1.8×</div></div>
+          <div class="card stat"><div class="k">人均消耗</div><div class="v">¥2,106</div><div class="d">4 名活跃成员</div></div>
+        </div>
+        <div class="card" style="margin-bottom:14px">
+          <h3>按成员</h3>
+          <table>
+            <thead><tr><th>成员</th><th>中转站用户</th><th>请求数</th><th>Token</th><th>消耗（元）</th><th>占比</th></tr></thead>
+            <tbody>
+              <tr><td>李运营</td><td><code>user_1043</code></td><td>4,102</td><td>9.4M</td><td>¥2,310.50</td><td><span class="pbar"><i style="width:100%"></i></span> 27.4%</td></tr>
+              <tr><td>张剪辑</td><td><code>user_1042</code></td><td>3,268</td><td>7.5M</td><td>¥1,842.00</td><td><span class="pbar"><i style="width:80%"></i></span> 21.9%</td></tr>
+              <tr><td>王审核</td><td><code>user_1044</code></td><td>1,961</td><td>4.5M</td><td>¥1,105.00</td><td><span class="pbar"><i style="width:48%"></i></span> 13.1%</td></tr>
+              <tr><td>赵兼职</td><td><code>user_1045</code></td><td>1,705</td><td>3.9M</td><td>¥960.50</td><td><span class="pbar"><i style="width:42%"></i></span> 11.4%</td></tr>
+              <tr><td>已回收 / 未分配</td><td class="muted">—</td><td class="muted">—</td><td class="muted">—</td><td>¥2,208.50</td><td class="muted">26.2%</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="banner warn"><b>口径提醒：</b><code>usage_logs.cost</code> 已经是按分组倍率算完的实际扣费，evc-admin 不要再次乘倍率，否则对账永远不平。</div>
+      </section>
+
+      <!-- ---------- 审计日志 ---------- -->
+      <section class="view hidden" id="v-audit">
+        <div class="vhead"><div><h1>审计日志</h1><p>只追加，不修改不删除；额度操作和关键词审核必须留痕</p></div></div>
+        <div class="card">
+          <table>
+            <thead><tr><th>时间</th><th>操作人</th><th>角色</th><th>公司</th><th>动作</th><th>对象</th><th>变更</th><th>IP</th></tr></thead>
+            <tbody>
+              <tr><td class="mini">11-17 14:22:08</td><td>李运营</td><td><span class="tag b">公司管理员</span></td><td>锦程商贸</td><td><code>quota.allocate</code></td><td>张剪辑</td><td class="mini">0 → 500</td><td class="mini">192.168.1.22</td></tr>
+              <tr><td class="mini">11-17 13:41:55</td><td>李运营</td><td><span class="tag b">公司管理员</span></td><td>锦程商贸</td><td><code>keyword.approve</code></td><td>家居好物</td><td class="mini">pending → approved</td><td class="mini">192.168.1.22</td></tr>
+              <tr><td class="mini">11-17 11:08:31</td><td>平台管理员</td><td><span class="tag g">平台管理员</span></td><td>—</td><td><code>tenant.create</code></td><td>优品优选</td><td class="mini">—</td><td class="mini">192.168.1.9</td></tr>
+              <tr><td class="mini">11-17 09:30:12</td><td>平台管理员</td><td><span class="tag g">平台管理员</span></td><td>—</td><td><code>member.create</code></td><td>李运营</td><td class="mini">relay_user=1043</td><td class="mini">192.168.1.9</td></tr>
+              <tr><td class="mini">11-16 02:00:04</td><td>系统</td><td><span class="tag gray">system</span></td><td>全部</td><td><code>quota.recycle</code></td><td>10 月额度</td><td class="mini">回收 ¥320</td><td class="mini">—</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ---------- 接入设置 ---------- -->
+      <section class="view hidden" id="v-settings">
+        <div class="vhead"><div><h1>接入设置</h1><p>中转站连接参数与开关自检；管理密钥只存服务端，不下发客户端</p></div></div>
+        <div class="grid2">
+          <div class="card">
+            <h3>中转站连接</h3>
+            <div class="form">
+              <div class="fi"><label>API 地址</label><input value="https://token4u.cc/api/v1"></div>
+              <div class="fi"><label>Gateway 地址</label><input value="https://token4u.cc/v1"></div>
+              <div class="fi"><label>专属分组名称</label><input value="电商审核专属-bot创建"></div>
+              <div class="fi"><label>分组 ID（备用）</label><input placeholder="名称对不上时才填"></div>
+            </div>
+            <div class="form-actions"><button class="btn primary" onclick="toast('原型：已保存')">保存</button><button class="btn" onclick="toast('原型：正在测试连通性')">测试连接</button></div>
+          </div>
+          <div class="card">
+            <h3>中转站服务密钥</h3>
+            <div class="fi"><label>自定义管理密钥（仅存服务端环境变量）</label><input value="sk_admin_****************" readonly></div>
+            <div class="banner warn" style="margin-top:12px">权限范围：<code>users.read</code> · <code>users.write</code> · <code>users.balance.write</code> · <code>usage.read</code>。绝不下发客户端，公司管理员也看不到。</div>
+            <h3 style="margin-top:16px">客户端待改造</h3>
+            <div class="mini">当前 <code>app/core/relay.py:19-20</code> 写死了 token4u.cc 地址，需要改为配置化；模型名、HTTPS 证书一起确认。</div>
+          </div>
+        </div>
+        <div class="card">
+          <h3>开关自检 <small>这两项直接决定成员能不能用</small></h3>
+          <table>
+            <tr><td>后台模式 backend_mode_enabled</td><td><span class="tag r">必须关闭</span></td><td class="muted">开启时非 admin 登录返回 403（auth_handler.go:149-156）</td></tr>
+            <tr><td>自助注册 registration</td><td><span class="tag r">必须关闭</span></td><td class="muted">否则员工可自行注册，绕过公司归属</td></tr>
+            <tr><td>邮箱验证 email_verify</td><td><span class="tag g">管理员建号不受影响</span></td><td class="muted">建议成员使用真实企业邮箱</td></tr>
+          </table>
+        </div>
+      </section>
+
+      <!-- ---------- 普通用户视图 ---------- -->
+      <section class="view hidden" id="v-member">
+        <div class="vhead"><div><h1>我的关键词提交</h1><p>普通用户实际在客户端操作，这里只展示提交记录</p></div></div>
+        <div class="banner info"><b>角色说明：</b>普通用户不登录管理后台，通过客户端的「设备令牌」证明身份，只有「提交关键词」和「查看自己提交记录」两项权限。</div>
+        <div class="card">
+          <div class="vhead"><div></div><div class="spacer"></div><button class="btn primary" onclick="toast('原型：实际在客户端提交')">+ 提交关键词</button></div>
+          <table>
+            <thead><tr><th>关键词</th><th>词库</th><th>提交时间</th><th>状态</th><th>审核备注</th></tr></thead>
+            <tbody>
+              <tr><td>厨房清洁神器</td><td>公司自定义</td><td class="mini">今天 09:12</td><td><span class="tag o">待审</span></td><td class="muted">—</td></tr>
+              <tr><td>家居好物</td><td>公司自定义</td><td class="mini">昨天 15:02</td><td><span class="tag g">已通过</span></td><td class="muted">—</td></tr>
+              <tr><td>违规词示例</td><td>公司自定义</td><td class="mini">11-14</td><td><span class="tag r">已驳回</span></td><td class="muted">不符合品类规范</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ---------- 流程图与权限 ---------- -->
+      <section class="view hidden" id="v-flow">
+        <div class="vhead"><div><h1>流程图与权限</h1><p>五个关键流程 + 三角色权限矩阵</p></div></div>
+
+        <div class="flow-box">
+          <h3><i>1</i>开通成员 <small>公司管理员在 evc-admin 点击邀请 → 中转站代建账号</small></h3>
+          <div class="flow-row">
+            <div class="step">公司管理员<br><small>填邮箱 / 角色</small></div><span class="ar">→</span>
+            <div class="step gray">evc-admin<br><small>校验席位数</small></div><span class="ar">→</span>
+            <div class="step o">POST /users<br><small>email + password<br>allowed_groups</small></div><span class="ar">→</span>
+            <div class="step gray">写入<br><small>relay_user_id</small></div><span class="ar">→</span>
+            <div class="step g">发送凭据<br><small>邮箱 + 初始密码</small></div>
+          </div>
+          <div class="flow-note">员工不经过自助注册；账号密码由 evc-admin 生成。客户端登录后自动建 key（<code>relay.py:373</code>），也可手动填 api_key。</div>
+        </div>
+
+        <div class="flow-box">
+          <h3><i>2</i>分配额度 <small>先校验公司池，再调中转站，全程带幂等键</small></h3>
+          <div class="flow-row">
+            <div class="step">提交分配<br><small>成员 + 金额</small></div><span class="ar">→</span>
+            <div class="step gray">校验公司池<br><small>剩余 ≥ 金额</small></div><span class="ar">→</span>
+            <div class="step o">POST /users/:id/balance<br><small>idempotency_key</small></div><span class="ar">→</span>
+            <div class="step gray">写 quota_allocations</div><span class="ar">→</span>
+            <div class="step g">写 audit_logs</div>
+          </div>
+          <div class="flow-note">失败重试凭幂等键不会重复加钱。对账等式：<code>池总额 = 成员余额合计 + 本月消耗 + 已回收</code>。</div>
+        </div>
+
+        <div class="flow-box">
+          <h3><i>3</i>关键词生命周期 <small>提交 → 待审 → 通过/驳回 → 版本 +1 → 客户端增量拉取</small></h3>
+          <div class="flow-row">
+            <div class="step g">客户端提交<br><small>POST /submissions</small></div><span class="ar">→</span>
+            <div class="step gray">待审队列</div><span class="ar">→</span>
+            <div class="step">管理员审批<br><small>不可审自己的词</small></div>
+          </div>
+          <div class="branchline">
+            <div class="b"><div class="t">通过</div><div class="flow-row"><div class="step g">状态 = approved</div><span class="ar">→</span><div class="step g">版本号 +1</div><span class="ar">→</span><div class="step gray">since 拉增量（ETag）</div></div></div>
+            <div class="b"><div class="t">驳回 / 删除</div><div class="flow-row"><div class="step r">状态 = rejected</div><span class="ar">/</span><div class="step r">软删除</div><span class="ar">→</span><div class="step gray">写审计</div></div></div>
+          </div>
+          <div class="flow-note">全局词由平台管理员审，公司自定义词由公司管理员审；第二家公司入驻不会打架。</div>
+        </div>
+
+        <div class="flow-box">
+          <h3><i>4</i>用量归集与对账 <small>看板只读本地快照</small></h3>
+          <div class="flow-row">
+            <div class="step o">每日 02:00 cron</div><span class="ar">→</span>
+            <div class="step gray">逐成员拉<br><small>GET /usage/stats</small></div><span class="ar">→</span>
+            <div class="step">写 usage_snapshots<br><small>tenant + member + date</small></div><span class="ar">→</span>
+            <div class="step g">看板聚合<br><small>只读本地表</small></div><span class="ar">→</span>
+            <div class="step gray">对账状态条</div>
+          </div>
+          <div class="flow-note">日期必须传 <code>timezone=Asia/Shanghai</code>，否则跨日错位。<code>cost</code> 已含 1.8 倍分组倍率，不可再次乘。</div>
+        </div>
+
+        <div class="flow-box">
+          <h3><i>5</i>登录与算力链路 <small>业务和算力互不代理</small></h3>
+          <div class="flow-row">
+            <div class="step g">客户端</div><span class="ar">→</span>
+            <div class="step o">/auth/login<br><small>邮箱 + 密码</small></div><span class="ar">→</span>
+            <div class="step gray">/keys 建或复用 key</div><span class="ar">→</span>
+            <div class="step o">gateway<br><small>/v1/chat/completions</small></div>
+          </div>
+          <div class="flow-note">算力请求完全绕过 evc-admin；关键词提交/拉取才走 evc-admin。中转站服务密钥只在服务端使用。</div>
+        </div>
+
+        <div class="card">
+          <h3>角色权限矩阵</h3>
+          <table>
+            <thead><tr><th>操作</th><th>平台管理员</th><th>公司管理员</th><th>普通用户</th></tr></thead>
+            <tbody>
+              <tr><td>建 / 停用公司、设席位</td><td><span class="tag g">✓</span></td><td class="muted">—</td><td class="muted">—</td></tr>
+              <tr><td>邀请 / 禁用成员</td><td><span class="tag g">✓</span></td><td><span class="tag b">✓ 本公司</span></td><td class="muted">—</td></tr>
+              <tr><td>分配 / 回收额度</td><td><span class="tag g">✓</span></td><td><span class="tag b">✓ 不超公司池</span></td><td class="muted">—</td></tr>
+              <tr><td>查看用量</td><td><span class="tag g">全部</span></td><td><span class="tag b">本公司</span></td><td><span class="tag gray">仅自己</span></td></tr>
+              <tr><td>提交关键词</td><td><span class="tag g">✓</span></td><td><span class="tag g">✓</span></td><td><span class="tag g">✓</span></td></tr>
+              <tr><td>审核关键词</td><td><span class="tag g">全局 + 任意公司</span></td><td><span class="tag b">仅本公司自定义词</span></td><td class="muted">—</td></tr>
+              <tr><td>查看审计日志</td><td><span class="tag g">全部</span></td><td><span class="tag b">本公司</span></td><td><span class="tag gray">仅自己的提交</span></td></tr>
+              <tr><td>改中转站地址 / 密钥</td><td><span class="tag g">✓</span></td><td class="muted">—</td><td class="muted">—</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+    </div>
+  </div>
+</div>
+
+<div id="modalRoot"></div>
+<div id="toastRoot"></div>
+
+<script>
+(function(){
+  var ROLE={
+    platform:{name:'平台管理员（你）',chip:'全平台视角',avatar:'平'},
+    tenant:{name:'公司管理员',chip:'锦程商贸',avatar:'公'},
+    member:{name:'普通用户',chip:'客户端身份',avatar:'用'}
+  };
+  var VIEW={
+    dashboard:'总览',flow:'流程图与权限',tenants:'租户管理',members:'成员管理',
+    quota:'额度分配',keywords:'关键词审批',usage:'用量看板',audit:'审计日志',
+    settings:'接入设置',member:'我的关键词提交'
+  };
+  var current='platform';
+
+  function toast(msg){
+    var root=document.getElementById('toastRoot');
+    root.innerHTML='<div class="toast">'+msg+'</div>';
+    clearTimeout(root._t);
+    root._t=setTimeout(function(){root.innerHTML='';},2400);
+  }
+  function go(id){
+    var link=document.querySelector('.nav a[data-view="'+id+'"]');
+    if(link && !allowed(link)){toast('当前角色无权访问');return;}
+    document.querySelectorAll('.view').forEach(function(v){v.classList.add('hidden');});
+    var el=document.getElementById('v-'+id);
+    if(el) el.classList.remove('hidden');
+    document.querySelectorAll('.nav a').forEach(function(a){a.classList.toggle('on',a.dataset.view===id);});
+    document.getElementById('crumb').textContent=VIEW[id]||id;
+    window.scrollTo({top:0,behavior:'smooth'});
+  }
+  function allowed(link){
+    if(current==='member') return link.dataset.view==='dashboard'||link.dataset.view==='keywords'||link.dataset.view==='flow'||link.dataset.view==='member';
+    return (link.dataset.roles||'').split(',').indexOf(current)>=0;
+  }
+  function applyRole(r){
+    current=r;
+    var cfg=ROLE[r];
+    document.querySelectorAll('.rolebtn').forEach(function(b){b.classList.toggle('on',b.dataset.role===r);});
+    document.getElementById('tenantChip').textContent=cfg.chip;
+    document.getElementById('avatar').textContent=cfg.avatar;
+    document.querySelectorAll('.nav a').forEach(function(a){a.classList.toggle('hidden',!allowed(a));});
+    document.querySelectorAll('[data-role-only]').forEach(function(e){e.classList.toggle('hidden',e.dataset.roleOnly!==r);});
+    var memberView=document.getElementById('v-member');
+    if(r==='member'){
+      document.querySelectorAll('.view').forEach(function(v){v.classList.add('hidden');});
+      memberView.classList.remove('hidden');
+      document.getElementById('crumb').textContent='我的关键词提交';
+      document.querySelectorAll('.nav a').forEach(function(a){a.classList.remove('on');});
+    }else{
+      memberView.classList.add('hidden');
+      go('dashboard');
+    }
+    toast('已切换到「'+cfg.name+'」视角');
+  }
+  function openModal(title,fields){
+    var body='';
+    fields.forEach(function(f){
+      var input = f.p===undefined||f.k.indexOf('角色')>=0||f.k.indexOf('作用域')>=0||f.k.indexOf('周期')>=0
+        ? '<select><option>'+f.p+'</option><option>其他</option></select>'
+        : '<input placeholder="'+f.p+'">';
+      body+='<div class="fi"><label>'+f.k+'</label>'+input+'</div>';
+    });
+    document.getElementById('modalRoot').innerHTML=
+      '<div class="mask" onclick="if(event.target===this)closeModal()"><div class="modal">'+
+      '<div class="hd">'+title+'<span class="x" onclick="closeModal()">×</span></div>'+
+      '<div class="bd"><div class="form">'+body+'</div></div>'+
+      '<div class="ft"><button class="btn" onclick="closeModal()">取消</button>'+
+      '<button class="btn primary" onclick="closeModal();toast(\'原型：已提交\')">确定</button></div></div></div>';
+  }
+  function closeModal(){document.getElementById('modalRoot').innerHTML='';}
+  function setKwTab(t){
+    document.querySelectorAll('.tabs span').forEach(function(s){s.classList.toggle('on',s.dataset.ktab===t);});
+    document.querySelectorAll('#kwTable tbody tr').forEach(function(tr){tr.classList.toggle('hidden',tr.dataset.kw!==t);});
+  }
+  function changeStatus(a,status){
+    var tr=a.closest('tr');
+    tr.querySelector('td:nth-child(6)').innerHTML='<span class="tag '+(status==='approved'?'g':'r')+'">'+(status==='approved'?'已通过':'已驳回')+'</span>';
+    tr.dataset.kw=status;
+    tr.querySelector('td:last-child').innerHTML='<div class="ops"><a onclick="toast(\'原型：软删除\')">删除</a></div>';
+    var left=document.querySelectorAll('[data-kw="pending"]').length;
+    document.getElementById('tabPending').textContent=left;
+    document.getElementById('navKwBadge').textContent=left;
+    toast(status==='approved'?'已通过：版本号 +1，客户端可按 since 拉取':'已驳回：已写审计日志');
+    setKwTab('pending');
+  }
+  window.toast=toast; window.go=go; window.openModal=openModal;
+  window.closeModal=closeModal; window.approve=function(a){changeStatus(a,'approved');};
+  window.reject=function(a){changeStatus(a,'rejected');};
+
+  document.querySelectorAll('.nav a').forEach(function(a){a.addEventListener('click',function(){go(a.dataset.view);});});
+  document.querySelectorAll('.rolebtn').forEach(function(b){b.addEventListener('click',function(){applyRole(b.dataset.role);});});
+  document.querySelectorAll('.tabs span').forEach(function(s){s.addEventListener('click',function(){setKwTab(s.dataset.ktab);});});
+  document.addEventListener('keydown',function(e){if(e.key==='Escape')closeModal();});
+})();
+</script>
+</body>
+</html>

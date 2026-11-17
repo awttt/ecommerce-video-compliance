@@ -72,6 +72,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,
+    icon=(str(ROOT / "packaging" / "app.ico") if sys.platform == "win32" else None),
 )
 coll = COLLECT(
     exe,

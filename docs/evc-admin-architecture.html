@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>evc-admin 架构图</title>
+<style>
+  :root{
+    --bg:#0b1020;
+    --panel:#131a2b;
+    --panel-2:#182036;
+    --line:#2a3550;
+    --line-soft:rgba(255,255,255,.08);
+    --text:#e8eefc;
+    --muted:#93a1bd;
+    --dim:#6b7a99;
+    --web:#5b8cff;
+    --api:#a78bfa;
+    --relay:#f0a35e;
+    --client:#34d399;
+    --db:#38bdf8;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:
+      radial-gradient(900px 500px at 12% -10%, rgba(91,140,255,.16), transparent 60%),
+      radial-gradient(800px 480px at 92% 4%, rgba(240,163,94,.12), transparent 60%),
+      var(--bg);
+    color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    font-size:14px;
+    line-height:1.6;
+    padding:40px 28px 72px;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1240px;margin:0 auto}
+
+  /* ---------- header ---------- */
+  header{margin-bottom:34px}
+  h1{font-size:26px;line-height:1.3;margin:0 0 8px;letter-spacing:.3px}
+  h1 small{font-size:14px;font-weight:400;color:var(--muted);margin-left:10px;letter-spacing:0}
+  .sub{color:var(--muted);font-size:13px;margin:0}
+  .legend{display:flex;flex-wrap:wrap;gap:16px;margin-top:18px}
+  .legend span{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted)}
+  .dot{width:9px;height:9px;border-radius:3px;display:inline-block}
+
+  /* ---------- layout ---------- */
+  .stage{display:flex;flex-direction:column}
+
+  /* ---------- nodes ---------- */
+  .node{
+    position:relative;
+    background:linear-gradient(180deg, rgba(255,255,255,.045), rgba(255,255,255,.012));
+    border:1px solid var(--line);
+    border-radius:14px;
+    padding:16px 18px;
+    box-shadow:0 18px 40px -28px rgba(0,0,0,.9);
+  }
+  .node::before{
+    content:"";position:absolute;inset:0;border-radius:14px;pointer-events:none;
+    border-top:1px solid rgba(255,255,255,.06);
+  }
+  .node-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:4px}
+  .node-title{font-size:15px;font-weight:600;letter-spacing:.2px}
+  .node-tag{font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:1px 9px;line-height:1.7}
+  .node-desc{font-size:12px;color:var(--dim);margin:0 0 12px}
+
+  .node.web{border-color:rgba(91,140,255,.42);background:linear-gradient(180deg, rgba(91,140,255,.13), rgba(91,140,255,.03))}
+  .node.web .node-title{color:#a9c2ff}
+  .node.api{border-color:rgba(167,139,250,.42);background:linear-gradient(180deg, rgba(167,139,250,.12), rgba(167,139,250,.03))}
+  .node.api .node-title{color:#c9b8ff}
+  .node.relay{border-color:rgba(240,163,94,.42);background:linear-gradient(180deg, rgba(240,163,94,.12), rgba(240,163,94,.03))}
+  .node.relay .node-title{color:#f7c48f}
+  .node.client{border-color:rgba(52,211,153,.42);background:linear-gradient(180deg, rgba(52,211,153,.11), rgba(52,211,153,.03))}
+  .node.client .node-title{color:#8ee9c8}
+
+  /* ---------- chips ---------- */
+  .chips{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+  .chip{
+    background:rgba(255,255,255,.05);
+    border:1px solid rgba(255,255,255,.09);
+    border-radius:9px;
+    padding:8px 10px;
+    font-size:12.5px;
+    color:#dbe5f8;
+    text-align:center;
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+  }
+  .chip .m{display:block;font-size:10.5px;color:var(--dim);margin-top:1px}
+
+  /* ---------- modules inside api ---------- */
+  .mods{display:flex;flex-direction:column;gap:7px}
+  .mod{
+    display:grid;grid-template-columns:104px 1fr;gap:12px;align-items:start;
+    background:rgba(255,255,255,.035);
+    border:1px solid rgba(255,255,255,.07);
+    border-left:2px solid rgba(167,139,250,.55);
+    border-radius:8px;padding:8px 11px;
+  }
+  .mod-k{font-size:11.5px;font-weight:600;color:#c9b8ff;letter-spacing:.3px;padding-top:1px}
+  .mod-v{font-size:11.5px;color:#b9c6de;line-height:1.75}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:#dbe5f8;background:rgba(255,255,255,.06);border-radius:4px;padding:0 4px}
+
+  .dbstrip{
+    display:flex;gap:10px;flex-wrap:wrap;margin-top:9px;
+  }
+  .db{
+    flex:1;min-width:180px;
+    border:1px dashed rgba(56,189,248,.45);
+    background:rgba(56,189,248,.07);
+    border-radius:9px;padding:8px 11px;
+  }
+  .db b{font-size:11.5px;color:#8fd8fb;font-weight:600;display:block}
+  .db i{font-style:normal;font-size:11px;color:var(--dim)}
+
+  /* ---------- connectors ---------- */
+  .conn{position:relative;height:54px;display:flex;justify-content:center}
+  .conn::before{content:"";width:2px;height:100%;background:linear-gradient(180deg,rgba(120,140,180,.10),rgba(120,140,180,.55))}
+  .conn::after{
+    content:"";position:absolute;bottom:-1px;left:50%;transform:translateX(-50%);
+    border-left:5px solid transparent;border-right:5px solid transparent;border-top:7px solid rgba(150,168,205,.85);
+  }
+  .conn .lbl{
+    position:absolute;left:calc(50% + 13px);top:50%;transform:translateY(-50%);
+    font-size:11.5px;color:var(--muted);white-space:nowrap;
+  }
+  .conn.up::before{background:linear-gradient(0deg,rgba(120,140,180,.10),rgba(120,140,180,.55))}
+  .conn.up::after{
+    bottom:auto;top:-1px;
+    border-top:none;border-bottom:7px solid rgba(150,168,205,.85);
+  }
+  .conn.dashed::before{
+    width:0;height:100%;background:none;
+    border-left:2px dashed rgba(52,211,153,.6);
+  }
+  .conn.dashed.up::after{border-bottom-color:rgba(52,211,153,.9)}
+  .conn.dashed .lbl{color:#7fe0bd}
+
+  /* ---------- split row ---------- */
+  .split{display:grid;grid-template-columns:1.42fr 118px 1fr;gap:0;align-items:stretch}
+  .split .conn-row{display:grid;grid-template-columns:1.42fr 118px 1fr;align-items:end}
+
+  .hlink{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:0 4px}
+  .hlink .lbl{font-size:10.5px;color:var(--relay);text-align:center;line-height:1.5;letter-spacing:.2px}
+  .hlink .bar{position:relative;width:100%;height:2px;background:linear-gradient(90deg,rgba(240,163,94,.2),rgba(240,163,94,.75))}
+  .hlink .bar::after{
+    content:"";position:absolute;right:-1px;top:50%;transform:translateY(-50%);
+    border-top:5px solid transparent;border-bottom:5px solid transparent;border-left:7px solid rgba(240,163,94,.9);
+  }
+
+  /* ---------- users ---------- */
+  .users{display:flex;justify-content:center;gap:14px;flex-wrap:wrap}
+  .pill{
+    display:flex;align-items:center;gap:9px;
+    border:1px solid var(--line);border-radius:999px;
+    background:rgba(255,255,255,.045);
+    padding:9px 18px;font-size:13px;
+  }
+  .pill .av{
+    width:22px;height:22px;border-radius:50%;
+    background:rgba(91,140,255,.18);border:1px solid rgba(91,140,255,.5);
+    display:grid;place-items:center;font-size:10.5px;color:#a9c2ff;
+  }
+  .pill em{font-style:normal;color:var(--dim);font-size:11.5px}
+
+  /* ---------- sections ---------- */
+  section{margin-top:52px}
+  h2{font-size:16px;margin:0 0 16px;display:flex;align-items:center;gap:10px}
+  h2::before{content:"";width:3px;height:15px;border-radius:2px;background:linear-gradient(180deg,var(--web),var(--api))}
+
+  .flows{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
+  .flow{
+    background:linear-gradient(180deg,rgba(255,255,255,.04),rgba(255,255,255,.012));
+    border:1px solid var(--line);border-radius:12px;padding:15px 17px;
+    display:flex;gap:13px;align-items:flex-start;
+  }
+  .flow .n{
+    flex:0 0 24px;height:24px;border-radius:8px;display:grid;place-items:center;
+    font-size:12px;font-weight:600;color:#0b1020;
+    background:linear-gradient(135deg,#a9c2ff,#5b8cff);
+  }
+  .flow h3{margin:1px 0 5px;font-size:13px;font-weight:600}
+  .flow p{margin:0;font-size:12px;color:var(--muted);line-height:1.8}
+  .flow p b{color:#dbe5f8;font-weight:500}
+
+  .rules{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  .rule{
+    border:1px solid rgba(248,113,113,.28);
+    background:linear-gradient(180deg,rgba(248,113,113,.09),rgba(248,113,113,.02));
+    border-radius:12px;padding:14px 16px;
+  }
+  .rule b{display:block;font-size:12.5px;color:#fca5a5;margin-bottom:4px}
+  .rule span{font-size:11.5px;color:var(--muted);line-height:1.75}
+
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line)}
+  th{font-size:11.5px;color:var(--dim);font-weight:500;text-transform:none}
+  td:first-child{color:#dbe5f8}
+  .yes{color:#7fe0bd}
+  .no{color:#4a5878}
+  .part{color:#f7c48f}
+
+  footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);font-size:11.5px;color:var(--dim);display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
+
+  @media (max-width:900px){
+    .split{grid-template-columns:1fr}
+    .hlink{padding:16px 0}
+    .hlink .bar{width:2px;height:40px;background:linear-gradient(180deg,rgba(240,163,94,.2),rgba(240,163,94,.75))}
+    .hlink .bar::after{right:auto;left:50%;top:auto;bottom:-1px;transform:translateX(-50%);border-left:5px solid transparent;border-right:5px solid transparent;border-top:7px solid rgba(240,163,94,.9);border-bottom:none}
+    .split .conn-row{grid-template-columns:1fr 1fr}
+    .chips{grid-template-columns:repeat(2,1fr)}
+    .flows,.rules{grid-template-columns:1fr}
+    .mod{grid-template-columns:1fr;gap:2px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>evc-admin 架构<small>多商户业务层 · 与 token4u 中转站解耦</small></h1>
+    <p class="sub">中转站只做算力与计费，业务侧（租户 / 成员 / 额度 / 关键词）全部放在 evc-admin，中转站零改动。</p>
+    <div class="legend">
+      <span><i class="dot" style="background:#5b8cff"></i>浏览器后台</span>
+      <span><i class="dot" style="background:#a78bfa"></i>业务服务</span>
+      <span><i class="dot" style="background:#f0a35e"></i>中转站（不改）</span>
+      <span><i class="dot" style="background:#34d399"></i>客户端</span>
+      <span><i class="dot" style="background:#38bdf8"></i>数据</span>
+    </div>
+  </header>
+
+  <div class="stage">
+
+    <!-- 使用者 -->
+    <div class="users">
+      <div class="pill"><i class="av">平</i>平台管理员 <em>（你 · 全局）</em></div>
+      <div class="pill"><i class="av">公</i>公司管理员 <em>（本公司）</em></div>
+    </div>
+
+    <div class="conn"><span class="lbl">HTTPS</span></div>
+
+    <!-- web -->
+    <div class="node web">
+      <div class="node-head">
+        <span class="node-title">evc-admin-web</span>
+        <span class="node-tag">React 18 · AntD 5 · Vite · TanStack Query</span>
+      </div>
+      <p class="node-desc">管理后台，按角色渲染菜单；普通用户不登录，只用客户端。</p>
+      <div class="chips">
+        <div class="chip">登录 / 会话<span class="m">JWT + refresh</span></div>
+        <div class="chip">租户与席位<span class="m">平台管理员</span></div>
+        <div class="chip">成员与邀请<span class="m">开通 / 禁用</span></div>
+        <div class="chip">额度分配<span class="m">公司池 → 成员</span></div>
+        <div class="chip">关键词审批<span class="m">通过 / 驳回 / 软删</span></div>
+        <div class="chip">用量看板<span class="m">读本地快照</span></div>
+        <div class="chip">审计日志<span class="m">只读</span></div>
+        <div class="chip" style="opacity:.45">设备令牌<span class="m">吊销</span></div>
+      </div>
+    </div>
+
+    <div class="conn"><span class="lbl">REST · JWT · 租户作用域校验</span></div>
+
+    <!-- api + relay -->
+    <div class="split">
+
+      <div class="node api">
+        <div class="node-head">
+          <span class="node-title">evc-admin-api</span>
+          <span class="node-tag">FastAPI · SQLAlchemy 2.0 async · Alembic</span>
+        </div>
+        <p class="node-desc">多租户业务服务，所有查询强制带 tenant_id；不代理算力请求。</p>
+        <div class="mods">
+          <div class="mod">
+            <div class="mod-k">api/v1</div>
+            <div class="mod-v">auth · tenants · members · invites · quotas · keywords · usage · audit · device-tokens<br>对外给客户端：<code>/v1/keywords?since=</code> · <code>/v1/keywords/submissions</code></div>
+          </div>
+          <div class="mod">
+            <div class="mod-k">core</div>
+            <div class="mod-v">config · security（JWT + Argon2）· deps（权限校验 + 租户作用域）· errors · logging</div>
+          </div>
+          <div class="mod">
+            <div class="mod-k">services</div>
+            <div class="mod-v">tenant · member · quota · keyword · usage_sync</div>
+          </div>
+          <div class="mod">
+            <div class="mod-k">repositories</div>
+            <div class="mod-v">统一租户过滤，跨租户越权有测试锁住</div>
+          </div>
+          <div class="mod">
+            <div class="mod-k">clients / workers</div>
+            <div class="mod-v">relay_client（余额操作带幂等键）· 每日用量快照 · 月度额度回收</div>
+          </div>
+        </div>
+        <div class="dbstrip">
+          <div class="db"><b>PostgreSQL · evc_admin</b><i>独立库、独立账号，与中转站共实例不共库</i></div>
+          <div class="db" style="flex:0 0 168px"><b>Redis（可选）</b><i>限流 · 词表版本缓存</i></div>
+        </div>
+      </div>
+
+      <div class="hlink">
+        <span class="lbl">受限<br>管理密钥</span>
+        <span class="bar"></span>
+      </div>
+
+      <div class="node relay">
+        <div class="node-head">
+          <span class="node-title">token4u 中转站</span>
+          <span class="node-tag">Go · Ent · Gin</span>
+          <span class="node-tag" style="color:#7fe0bd;border-color:rgba(52,211,153,.4)">零改动</span>
+        </div>
+        <p class="node-desc">只负责账号、密钥、计费与模型转发。</p>
+        <div class="mods">
+          <div class="mod" style="border-left-color:rgba(240,163,94,.6)">
+            <div class="mod-k" style="color:#f7c48f">admin API</div>
+            <div class="mod-v"><code>POST /users</code><br><code>POST /users/:id/balance</code><br><code>GET /users/:id/usage</code><br><code>GET /users/:id/balance-history</code></div>
+          </div>
+          <div class="mod" style="border-left-color:rgba(240,163,94,.6)">
+            <div class="mod-k" style="color:#f7c48f">gateway</div>
+            <div class="mod-v"><code>/v1/chat/completions</code> → 上游模型</div>
+          </div>
+          <div class="mod" style="border-left-color:rgba(240,163,94,.6)">
+            <div class="mod-k" style="color:#f7c48f">数据</div>
+            <div class="mod-v">users · api_keys · usage_logs · groups</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- 双向箭头 -->
+    <div class="split">
+      <div class="conn up dashed"><span class="lbl">关键词提交 / 增量拉取</span></div>
+      <div></div>
+      <div class="conn up"><span class="lbl">算力直连（不经 evc-admin）</span></div>
+    </div>
+
+    <!-- client -->
+    <div class="node client">
+      <div class="node-head">
+        <span class="node-title">EVC 客户端</span>
+        <span class="node-tag">现有 Python 应用 · 运营 / 剪辑使用</span>
+      </div>
+      <p class="node-desc" style="margin-bottom:8px">视频审核走中转站算力；关键词走 evc-admin 业务接口。两条链路互不代理。</p>
+      <div class="chips">
+        <div class="chip">算力请求<span class="m">直连 gateway</span></div>
+        <div class="chip">关键词提交<span class="m">POST 到 api</span></div>
+        <div class="chip">词表增量同步<span class="m">since + ETag</span></div>
+        <div class="chip" style="border-color:rgba(248,113,113,.35);color:#fca5a5">待改造：relay 地址<span class="m" style="color:#c98b8b">写死在 app/core/relay.py</span></div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- 关键链路 -->
+  <section>
+    <h2>四条关键链路</h2>
+    <div class="flows">
+      <div class="flow">
+        <div class="n">1</div>
+        <div>
+          <h3>开通成员</h3>
+          <p>公司管理员提交 → api 校验席位数 → <b>POST /users</b> 建中转站账号并绑专属分组 → 回写 <b>tenant_members.relay_user_id</b>。</p>
+        </div>
+      </div>
+      <div class="flow">
+        <div class="n">2</div>
+        <div>
+          <h3>分配额度</h3>
+          <p>先校验公司池剩余 → <b>POST /users/:id/balance</b>（带幂等键）→ 记 <b>quota_allocations</b>。失败重试不会重复加钱。</p>
+        </div>
+      </div>
+      <div class="flow">
+        <div class="n">3</div>
+        <div>
+          <h3>关键词流转</h3>
+          <p>客户端提交 → 待审 → 公司管理员审（平台管理员可审全局词）→ 版本号 +1 → 客户端按 <b>since</b> 拉增量。</p>
+        </div>
+      </div>
+      <div class="flow">
+        <div class="n">4</div>
+        <div>
+          <h3>用量归集</h3>
+          <p>每日 cron 拉 <b>/users/:id/usage</b> 落到 <b>usage_snapshots</b>；看板只读本地表，不实时打中转站。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 角色 -->
+  <section>
+    <h2>角色与权限</h2>
+    <table>
+      <thead>
+        <tr><th>操作</th><th>平台管理员</th><th>公司管理员</th><th>普通用户</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>建 / 停用公司、设席位</td><td class="yes">✓</td><td class="no">—</td><td class="no">—</td></tr>
+        <tr><td>邀请 / 禁用成员</td><td class="yes">✓</td><td class="part">✓ 本公司</td><td class="no">—</td></tr>
+        <tr><td>分配 / 回收额度</td><td class="yes">✓</td><td class="part">✓ 不超公司池</td><td class="no">—</td></tr>
+        <tr><td>查看用量</td><td class="yes">全部</td><td class="part">本公司</td><td class="part">仅自己</td></tr>
+        <tr><td>提交关键词</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td></tr>
+        <tr><td>审核关键词</td><td class="yes">全局 + 任意公司</td><td class="part">仅本公司自定义词</td><td class="no">—</td></tr>
+        <tr><td>查看审计日志</td><td class="yes">全部</td><td class="part">本公司</td><td class="part">仅自己的提交</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- 边界 -->
+  <section>
+    <h2>三条硬边界</h2>
+    <div class="rules">
+      <div class="rule">
+        <b>不代理算力</b>
+        <span>客户端直连 gateway，evc-admin 只处理业务数据。链路短、故障面小，也不会成为带宽瓶颈。</span>
+      </div>
+      <div class="rule">
+        <b>管理密钥只在服务端</b>
+        <span>受限密钥仅存 evc-admin 环境变量，公司管理员永远看不到，也无法直接调用中转站管理接口。</span>
+      </div>
+      <div class="rule">
+        <b>tenant_id 只从 token 取</b>
+        <span>绝不读请求体里的租户参数；所有查询走带租户过滤的 Repository，并配跨租户越权测试。</span>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>evc-admin · 架构草案 v1</span>
+    <span>另需确认：中转站自助注册是否关闭，否则员工可绕过公司归属自行注册。</span>
+  </footer>
+
+</div>
+</body>
+</html>
