@@ -1,0 +1,127 @@
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+.page {
+  max-width: 1440px;
+  margin: 0 auto;
+}
+
+.page-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.page-head h4 {
+  margin-bottom: 0;
+}
+
+.page-extra {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 64px;
+  padding: 0 16px;
+  overflow: hidden;
+}
+
+.brand b {
+  display: block;
+  line-height: 1.25;
+  color: rgba(0, 0, 0, 0.88);
+}
+
+.brand small {
+  color: rgba(0, 0, 0, 0.45);
+  font-size: 12px;
+}
+
+.logo-mark {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: #000;
+  display: grid;
+  place-items: center;
+  flex: 0 0 32px;
+}
+
+.logo-mark img {
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+}
+
+.login-screen {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.login-card {
+  width: min(420px, 100%);
+}
+
+.trend {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.trend-col {
+  flex: 1;
+  min-height: 148px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.trend-col i {
+  display: block;
+  width: 58%;
+  max-width: 28px;
+  border-radius: 4px 4px 0 0;
+}
+
+.trend-label,
+.trend-value {
+  font-size: 12px;
+  color: rgba(0, 0, 0, 0.45);
+}
+
+.row-selected > td {
+  background: #e6f4ff !important;
+}
+
+.video-stage {
+  height: 220px;
+  border-radius: 8px;
+  background: #141414;
+  color: rgba(255, 255, 255, 0.65);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.video-stage video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}

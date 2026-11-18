@@ -1,0 +1,1156 @@
+"""租户、成员、额度、命中词和用量。租户范围以登录账号为准，不读请求体里的租户来放权。"""
+
+import re
+from datetime import timedelta
+from pathlib import Path
+
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from app.errors import DomainError
+from app.models import (
+    AppMeta,
+    AppSetting,
+    AuditLog,
+    Device,
+    Finding,
+    Invite,
+    KeywordEntry,
+    KeywordSubmission,
+    Member,
+    MemberToken,
+    QuotaAllocation,
+    ReviewJob,
+    SessionToken,
+    Tenant,
+    TenantRules,
+    UsageSnapshot,
+)
+from app.money import to_cents, yuan
+from app.permissions import ROLE_LABEL, has_perm
+from app.relay import get_relay
+from app.security import hash_password, new_invite_token, sha256_text
+from app.timeutil import iso, shanghai_now, utcnow
+
+CATEGORIES = ("价格", "规格", "品牌", "夸大宣传")
+SOURCES = ("口播", "画面")
+DEFAULT_CATEGORIES = ["价格", "规格", "品牌", "夸大宣传"]
+_NOTE_BLOCK = ("允许推测", "可以推测", "允许猜测", "可以猜测")
+_REGISTERED = "已登记。画面和口播识别在御镜桌面客户端完成，这里不调用模型，也不代理算力。"
+_ALLOWED_VIDEO = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".flv", ".wmv", ".mpeg", ".mpg", ".ts"}
+_MAX_VIDEO = 2 * 1024 * 1024 * 1024
+
+
+def audit(
+    db: Session,
+    actor: Member | None,
+    action: str,
+    obj: str,
+    summary: str,
+    *,
+    tenant_id: int | None = None,
+    before: dict | None = None,
+    after: dict | None = None,
+    ip: str = "",
+) -> None:
+    db.add(
+        AuditLog(
+            tenant_id=tenant_id if tenant_id is not None else (actor.tenant_id if actor else None),
+            actor_id=actor.id if actor else None,
+            role=actor.role if actor else "",
+            action=action,
+            object=obj,
+            summary=summary,
+            before=before,
+            after=after,
+            ip=ip or "",
+        )
+    )
+
+
+def _require(actor: Member, perm: str) -> None:
+    if not has_perm(actor.role, perm):
+        raise DomainError(403, "没有权限")
+
+
+def resolve_tenant(actor: Member, requested: int | None) -> int | None:
+    """平台管理员可以指定公司。其他角色只能看自己的公司，传别人的编号直接拒绝。"""
+    if actor.role == "platform_admin":
+        return requested
+    if actor.tenant_id is None:
+        raise DomainError(403, "没有公司范围")
+    if requested is not None and requested != actor.tenant_id:
+        raise DomainError(403, "不能查看或修改其他公司的数据")
+    return actor.tenant_id
+
+
+def _tenant(db: Session, tenant_id: int) -> Tenant:
+    tenant = db.get(Tenant, tenant_id)
+    if tenant is None:
+        raise DomainError(404, "公司不存在")
+    return tenant
+
+
+def seats_used(db: Session, tenant_id: int) -> int:
+    return (
+        db.query(Member)
+        .filter(
+            Member.tenant_id == tenant_id,
+            Member.status == "active",
+            Member.deleted_at.is_(None),
+            Member.role != "platform_admin",
+        )
+        .count()
+    )
+
+
+def _clean_phrase(text: str) -> str:
+    cleaned = re.sub(r"\s+", "", (text or "").strip())
+    if not cleaned or len(cleaned) > 40:
+        raise DomainError(400, "规则文字需要在 1 到 40 个字之间")
+    return cleaned
+
+
+def _check_phrase(text: str, category: str, source: str) -> str:
+    cleaned = _clean_phrase(text)
+    if category not in CATEGORIES:
+        raise DomainError(400, "类别只能是价格、规格、品牌、夸大宣传")
+    if source not in SOURCES:
+        raise DomainError(400, "来源只能是口播或画面")
+    if category == "夸大宣传" and source != "口播":
+        raise DomainError(400, "夸大宣传只看口播，画面不报这一类")
+    return cleaned
+
+
+def _next_version(db: Session) -> int:
+    row = db.get(AppMeta, "rules_version")
+    if row is None:
+        row = AppMeta(key="rules_version", value="0")
+        db.add(row)
+        db.flush()
+    current = int(row.value or "0") + 1
+    row.value = str(current)
+    return current
+
+
+def _period() -> str:
+    return shanghai_now().strftime("%Y-%m")
+
+
+def _password_ok(password: str) -> None:
+    if len(password or "") < 8 or len(password) > 72:
+        raise DomainError(400, "密码需要在 8 到 72 位之间")
+
+
+def create_tenant(
+    db: Session,
+    actor: Member,
+    *,
+    name: str,
+    admin_email: str,
+    admin_name: str,
+    pool: object,
+    seats: int,
+    ip: str = "",
+) -> tuple[Tenant, str]:
+    _require(actor, "tenant.manage")
+    cleaned = name.strip()
+    if not cleaned or len(cleaned) > 40:
+        raise DomainError(400, "公司名称需要在 1 到 40 个字之间")
+    email = admin_email.strip().lower()
+    if "@" not in email or len(email) > 120:
+        raise DomainError(400, "管理员邮箱不正确")
+    if db.query(Tenant).filter(Tenant.name == cleaned).first():
+        raise DomainError(400, "已经有这家公司")
+    if db.query(Member).filter(Member.email == email).first():
+        raise DomainError(400, "这个邮箱已经开通")
+    if seats < 1 or seats > 10000:
+        raise DomainError(400, "席位数需要在 1 到 10000 之间")
+    cents = to_cents(pool)
+    if cents < 0:
+        raise DomainError(400, "公司池不能是负数")
+    from app.relay import group_id_of, group_name_of
+
+    tenant = Tenant(
+        name=cleaned,
+        status="active",
+        seat_quota=seats,
+        relay_group_id=group_id_of(db),
+        relay_group_name=group_name_of(db),
+        pool_balance_cents=cents,
+        pool_total_cents=cents,
+        allocated_total_cents=0,
+    )
+    db.add(tenant)
+    db.flush()
+    db.add(
+        TenantRules(
+            tenant_id=tenant.id,
+            categories=list(DEFAULT_CATEGORIES),
+            ignore_phrases=[],
+            note="",
+            version=1,
+        )
+    )
+    token = new_invite_token()
+    db.add(
+        Invite(
+            tenant_id=tenant.id,
+            token_hash=sha256_text(token),
+            email=email,
+            name=(admin_name or email.split("@", 1)[0])[:40],
+            role="tenant_admin",
+            initial_amount_cents=0,
+            expires_at=utcnow() + timedelta(days=7),
+        )
+    )
+    audit(db, actor, "tenant.create", cleaned, f"新建公司 {cleaned}", tenant_id=tenant.id, ip=ip)
+    db.commit()
+    db.refresh(tenant)
+    return tenant, token
+
+
+def set_tenant_status(
+    db: Session,
+    actor: Member,
+    tenant_id: int,
+    status: str,
+    *,
+    disable_members: bool = False,
+    ip: str = "",
+) -> Tenant:
+    _require(actor, "tenant.manage")
+    if status not in ("active", "disabled"):
+        raise DomainError(400, "状态不正确")
+    tenant = _tenant(db, tenant_id)
+    before = tenant.status
+    tenant.status = status
+    audit(
+        db,
+        actor,
+        "tenant.status",
+        tenant.name,
+        f"{tenant.name} {before} → {status}",
+        tenant_id=tenant.id,
+        before={"status": before},
+        after={"status": status},
+        ip=ip,
+    )
+    db.commit()
+    if status == "disabled" and disable_members:
+        members = (
+            db.query(Member)
+            .filter(Member.tenant_id == tenant.id, Member.status == "active", Member.deleted_at.is_(None))
+            .all()
+        )
+        for member in members:
+            disable_member(db, actor, member.id, ip=ip)
+        tenant = _tenant(db, tenant_id)
+    return tenant
+
+
+def _pending_invites(db: Session, tenant_id: int) -> int:
+    now = utcnow()
+    return (
+        db.query(Invite)
+        .filter(Invite.tenant_id == tenant_id, Invite.used_at.is_(None), Invite.expires_at > now)
+        .count()
+    )
+
+
+def invite_member(
+    db: Session,
+    actor: Member,
+    *,
+    email: str,
+    name: str,
+    role: str,
+    tenant_id: int | None,
+    initial_amount: object = 0,
+    ip: str = "",
+) -> tuple[Invite, str]:
+    _require(actor, "member.manage")
+    if role not in ("tenant_admin", "member"):
+        raise DomainError(400, "角色只能是公司管理员或普通用户")
+    target = resolve_tenant(actor, tenant_id)
+    if target is None:
+        raise DomainError(400, "请选择公司")
+    tenant = _tenant(db, target)
+    if tenant.status != "active":
+        raise DomainError(400, "公司已停用")
+    address = email.strip().lower()
+    if "@" not in address:
+        raise DomainError(400, "邮箱不正确")
+    if db.query(Member).filter(Member.email == address).first():
+        raise DomainError(400, "这个邮箱已经开通")
+    if seats_used(db, tenant.id) + _pending_invites(db, tenant.id) >= tenant.seat_quota:
+        raise DomainError(400, "席位已满，不能再邀请")
+    cents = to_cents(initial_amount)
+    if cents < 0:
+        raise DomainError(400, "初始额度不能是负数")
+    token = new_invite_token()
+    row = Invite(
+        tenant_id=tenant.id,
+        token_hash=sha256_text(token),
+        email=address,
+        name=(name or address.split("@", 1)[0]).strip()[:40] or address,
+        role=role,
+        initial_amount_cents=cents,
+        expires_at=utcnow() + timedelta(days=7),
+    )
+    db.add(row)
+    audit(db, actor, "member.invite", address, f"邀请 {address}", tenant_id=tenant.id, ip=ip)
+    db.commit()
+    db.refresh(row)
+    return row, token
+
+
+def accept_invite(db: Session, token: str, password: str, name: str = "") -> tuple[Member, str]:
+    _password_ok(password)
+    row = db.query(Invite).filter(Invite.token_hash == sha256_text(token or "")).one_or_none()
+    if row is None or row.used_at is not None or row.expires_at < utcnow():
+        raise DomainError(400, "邀请链接无效或已过期")
+    tenant = _tenant(db, row.tenant_id)
+    if tenant.status != "active":
+        raise DomainError(400, "公司已停用")
+    if seats_used(db, tenant.id) >= tenant.seat_quota:
+        raise DomainError(400, "席位已满")
+    if db.query(Member).filter(Member.email == row.email).first():
+        raise DomainError(400, "这个邮箱已经开通")
+    relay = get_relay(db)
+    relay_user_id = relay.create_user(row.email, password)
+    member = Member(
+        tenant_id=tenant.id,
+        email=row.email,
+        name=(name or row.name or row.email.split("@", 1)[0])[:40],
+        role=row.role,
+        password_hash=hash_password(password),
+        relay_user_id=relay_user_id,
+        status="active",
+    )
+    row.used_at = utcnow()
+    db.add(member)
+    audit(
+        db,
+        member,
+        "member.create",
+        member.email,
+        f"开通成员 {member.name}",
+        tenant_id=tenant.id,
+        after={"relay_user_id": relay_user_id, "role": member.role},
+    )
+    db.commit()
+    db.refresh(member)
+    warning = ""
+    if row.initial_amount_cents > 0:
+        try:
+            allocate(
+                db,
+                member if member.role == "tenant_admin" else _first_admin(db, tenant.id) or member,
+                member_id=member.id,
+                amount=yuan(row.initial_amount_cents),
+                idempotency_key=f"invite-{row.id}",
+                remark="开通时的初始额度",
+                period=_period(),
+                direction="add",
+            )
+        except DomainError as exc:
+            warning = exc.detail
+    return member, warning
+
+
+def _first_admin(db: Session, tenant_id: int) -> Member | None:
+    return (
+        db.query(Member)
+        .filter(Member.tenant_id == tenant_id, Member.role == "tenant_admin", Member.status == "active")
+        .order_by(Member.id)
+        .first()
+    )
+
+
+def _managed_member(db: Session, actor: Member, member_id: int) -> Member:
+    _require(actor, "member.manage")
+    member = db.get(Member, member_id)
+    if member is None or member.deleted_at is not None:
+        raise DomainError(404, "成员不存在")
+    if member.role == "platform_admin":
+        raise DomainError(403, "不能在这里改平台管理员")
+    resolve_tenant(actor, member.tenant_id)
+    return member
+
+
+def disable_member(db: Session, actor: Member, member_id: int, ip: str = "") -> Member:
+    member = _managed_member(db, actor, member_id)
+    if member.id == actor.id:
+        raise DomainError(400, "不能禁用自己")
+    if member.status == "disabled":
+        return member
+    before_seats = seats_used(db, member.tenant_id or 0)
+    relay = get_relay(db)
+    if member.relay_user_id:
+        relay.set_status(member.relay_user_id, "disabled")
+    now = utcnow()
+    member.status = "disabled"
+    db.query(Device).filter(Device.member_id == member.id, Device.revoked_at.is_(None)).update(
+        {Device.revoked_at: now}
+    )
+    db.query(MemberToken).filter(MemberToken.member_id == member.id, MemberToken.revoked_at.is_(None)).update(
+        {MemberToken.revoked_at: now}
+    )
+    db.query(SessionToken).filter(SessionToken.member_id == member.id, SessionToken.revoked_at.is_(None)).update(
+        {SessionToken.revoked_at: now}
+    )
+    after_seats = before_seats - 1
+    audit(
+        db,
+        actor,
+        "member.disable",
+        member.name,
+        f"停用 {member.name}，席位 {before_seats} → {after_seats}",
+        tenant_id=member.tenant_id,
+        before={"seats": before_seats},
+        after={"seats": after_seats, "relay_user_id": member.relay_user_id},
+        ip=ip,
+    )
+    db.commit()
+    db.refresh(member)
+    return member
+
+
+def enable_member(db: Session, actor: Member, member_id: int, ip: str = "") -> Member:
+    member = _managed_member(db, actor, member_id)
+    if member.status == "active":
+        return member
+    tenant = _tenant(db, member.tenant_id or 0)
+    if tenant.status != "active":
+        raise DomainError(400, "公司已停用")
+    if seats_used(db, tenant.id) >= tenant.seat_quota:
+        raise DomainError(400, "席位已满")
+    if member.relay_user_id:
+        get_relay(db).set_status(member.relay_user_id, "active")
+    member.status = "active"
+    audit(db, actor, "member.enable", member.name, f"恢复 {member.name}", tenant_id=tenant.id, ip=ip)
+    db.commit()
+    db.refresh(member)
+    return member
+
+
+def revoke_device(db: Session, actor: Member, device_id: int, ip: str = "") -> Device:
+    _require(actor, "member.manage")
+    device = db.get(Device, device_id)
+    if device is None:
+        raise DomainError(404, "设备不存在")
+    member = db.get(Member, device.member_id)
+    if member is None:
+        raise DomainError(404, "成员不存在")
+    resolve_tenant(actor, member.tenant_id)
+    if device.revoked_at is None:
+        device.revoked_at = utcnow()
+        db.query(MemberToken).filter(
+            MemberToken.device_id == device.id, MemberToken.revoked_at.is_(None)
+        ).update({MemberToken.revoked_at: device.revoked_at})
+        audit(
+            db,
+            actor,
+            "device.revoke",
+            device.name,
+            f"下线 {member.name} 的 {device.name}",
+            tenant_id=member.tenant_id,
+            ip=ip,
+        )
+        db.commit()
+    db.refresh(device)
+    return device
+
+
+def _member_for_quota(db: Session, actor: Member, member_id: int) -> Member:
+    _require(actor, "quota.allocate")
+    member = db.get(Member, member_id)
+    if member is None or member.deleted_at is not None or member.tenant_id is None:
+        raise DomainError(404, "成员不存在")
+    resolve_tenant(actor, member.tenant_id)
+    if not member.relay_user_id:
+        raise DomainError(400, "这个成员还没有中转站账号")
+    return member
+
+
+def allocate(
+    db: Session,
+    actor: Member,
+    *,
+    member_id: int,
+    amount: object,
+    idempotency_key: str,
+    remark: str = "",
+    period: str = "",
+    direction: str = "add",
+    ip: str = "",
+) -> QuotaAllocation:
+    _require(actor, "quota.allocate")
+    key = (idempotency_key or "").strip()
+    if not key or len(key) > 80:
+        raise DomainError(400, "缺少幂等键")
+    if direction not in ("add", "subtract"):
+        raise DomainError(400, "方向不正确")
+    cents = to_cents(amount)
+    if cents <= 0:
+        raise DomainError(400, "金额需要大于 0")
+    if cents > 100_000_000:
+        raise DomainError(400, "单笔金额过大")
+    existing = db.query(QuotaAllocation).filter(QuotaAllocation.idempotency_key == key).one_or_none()
+    if existing is not None:
+        if existing.member_id != member_id or existing.amount_cents != cents or existing.direction != direction:
+            raise DomainError(409, "这个幂等键已经用于另一笔额度")
+        if existing.status == "success":
+            return existing
+        existing.status = "processing"
+        db.commit()
+        return _finish_quota(db, actor, existing, ip)
+    member = _member_for_quota(db, actor, member_id)
+    row = QuotaAllocation(
+        tenant_id=member.tenant_id,
+        member_id=member.id,
+        amount_cents=cents,
+        direction=direction,
+        period=(period or _period())[:16],
+        remark=(remark or "").strip()[:200],
+        idempotency_key=key,
+        operator_id=actor.id,
+        status="processing",
+        relay_applied=False,
+    )
+    db.add(row)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        existing = db.query(QuotaAllocation).filter(QuotaAllocation.idempotency_key == key).one()
+        if existing.status == "success":
+            return existing
+        return _finish_quota(db, actor, existing, ip)
+    db.refresh(row)
+    return _finish_quota(db, actor, row, ip)
+
+
+def _finish_quota(db: Session, actor: Member, row: QuotaAllocation, ip: str) -> QuotaAllocation:
+    if row.status == "success":
+        return row
+    member = db.get(Member, row.member_id or 0)
+    tenant = db.get(Tenant, row.tenant_id)
+    if member is None or tenant is None:
+        raise DomainError(404, "额度记录缺少成员或公司")
+    relay = get_relay(db)
+    if row.direction == "add" and member.status != "active":
+        row.status = "failed"
+        db.commit()
+        raise DomainError(400, "成员已停用，不能再分配")
+    if row.direction == "add" and tenant.pool_balance_cents < row.amount_cents:
+        row.status = "failed"
+        db.commit()
+        raise DomainError(400, "公司池剩余不足")
+    if row.direction == "subtract" and row.amount_cents > max(member.balance_cents, 0):
+        row.status = "failed"
+        db.commit()
+        raise DomainError(400, "成员可退回的余额不足")
+    try:
+        applied = bool(row.relay_applied) or relay.was_applied(row.idempotency_key, member.relay_user_id)
+        if not applied:
+            if row.direction == "add":
+                relay.add_balance(member.relay_user_id, row.amount_cents, row.idempotency_key)
+            else:
+                relay.subtract_balance(member.relay_user_id, row.amount_cents, row.idempotency_key)
+            row.relay_applied = True
+        if row.direction == "add":
+            tenant.pool_balance_cents -= row.amount_cents
+            tenant.allocated_total_cents += row.amount_cents
+            member.balance_cents += row.amount_cents
+            if member.balance_cents >= 0:
+                member.overdraft = False
+            summary = f"分配 ¥{yuan(row.amount_cents):.2f} 给 {member.name}"
+            action = "quota.allocate"
+        else:
+            member.balance_cents -= row.amount_cents
+            tenant.pool_balance_cents += row.amount_cents
+            tenant.allocated_total_cents -= row.amount_cents
+            summary = f"从 {member.name} 退回 ¥{yuan(row.amount_cents):.2f}"
+            action = "quota.reclaim"
+        row.status = "success"
+        row.summary = summary
+        audit(
+            db,
+            actor,
+            action,
+            member.name,
+            summary,
+            tenant_id=tenant.id,
+            after={"amount": yuan(row.amount_cents), "direction": row.direction},
+            ip=ip,
+        )
+        db.commit()
+        db.refresh(row)
+        return row
+    except DomainError:
+        db.rollback()
+        fresh = db.get(QuotaAllocation, row.id)
+        if fresh is not None and fresh.status != "success":
+            fresh.status = "failed"
+            db.commit()
+        raise
+    except Exception as exc:
+        db.rollback()
+        fresh = db.get(QuotaAllocation, row.id)
+        member = db.get(Member, row.member_id or 0)
+        applied_now = relay.was_applied(row.idempotency_key, member.relay_user_id if member else "")
+        if applied_now and fresh is not None:
+            fresh.relay_applied = True
+            fresh.status = "processing"
+            db.commit()
+            raise DomainError(503, "中转站已处理这笔额度，本地记账未完成。请用同一个幂等键重试，不会再次动账。") from exc
+        if fresh is not None and fresh.status != "success":
+            fresh.status = "failed"
+            db.commit()
+        raise DomainError(502, "中转站额度操作失败") from exc
+
+
+def _active_phrase_count(db: Session, tenant_id: int | None) -> int:
+    global_count = (
+        db.query(KeywordEntry)
+        .filter(KeywordEntry.tenant_id.is_(None), KeywordEntry.deleted_at.is_(None))
+        .count()
+    )
+    if tenant_id is None:
+        return global_count
+    local = (
+        db.query(KeywordEntry)
+        .filter(KeywordEntry.tenant_id == tenant_id, KeywordEntry.deleted_at.is_(None))
+        .count()
+    )
+    return global_count + local
+
+
+def submit_keyword(
+    db: Session,
+    actor: Member,
+    *,
+    text: str,
+    category: str,
+    source: str,
+    scope: str,
+    tenant_id: int | None,
+    ip: str = "",
+) -> KeywordSubmission:
+    _require(actor, "keyword.submit")
+    cleaned = _check_phrase(text, category, source)
+    if scope not in ("global", "tenant"):
+        raise DomainError(400, "作用域只能是全局或本公司")
+    if scope == "global":
+        if actor.role != "platform_admin":
+            raise DomainError(403, "只有平台管理员可以提交全局命中词")
+        target = None
+    else:
+        target = resolve_tenant(actor, tenant_id)
+        if target is None:
+            raise DomainError(400, "请选择公司")
+    _ensure_unique_phrase(db, cleaned, category, source, target)
+    row = KeywordSubmission(
+        tenant_id=target,
+        member_id=actor.id,
+        text=cleaned,
+        category=category,
+        source=source,
+        scope=scope,
+        status="pending",
+    )
+    db.add(row)
+    audit(db, actor, "keyword.submit", cleaned, f"提交命中词「{cleaned}」", tenant_id=target, ip=ip)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def _ensure_unique_phrase(db: Session, text: str, category: str, source: str, tenant_id: int | None) -> None:
+    entry = (
+        db.query(KeywordEntry)
+        .filter(
+            KeywordEntry.text == text,
+            KeywordEntry.category == category,
+            KeywordEntry.source == source,
+            KeywordEntry.deleted_at.is_(None),
+            KeywordEntry.tenant_id.is_(None) if tenant_id is None else KeywordEntry.tenant_id == tenant_id,
+        )
+        .first()
+    )
+    pending = (
+        db.query(KeywordSubmission)
+        .filter(
+            KeywordSubmission.text == text,
+            KeywordSubmission.category == category,
+            KeywordSubmission.source == source,
+            KeywordSubmission.status == "pending",
+            KeywordSubmission.tenant_id.is_(None) if tenant_id is None else KeywordSubmission.tenant_id == tenant_id,
+        )
+        .first()
+    )
+    if entry or pending:
+        raise DomainError(400, "已经有一条相同的命中词")
+
+
+def _load_submission(db: Session, actor: Member, submission_id: int) -> KeywordSubmission:
+    row = db.get(KeywordSubmission, submission_id)
+    if row is None:
+        raise DomainError(404, "提交不存在")
+    if actor.role == "member" and row.member_id != actor.id:
+        raise DomainError(403, "只能查看自己的提交")
+    if actor.role == "tenant_admin":
+        resolve_tenant(actor, row.tenant_id if row.scope == "tenant" else actor.tenant_id)
+        if row.scope == "global":
+            raise DomainError(403, "公司管理员不能审批全局词")
+    return row
+
+
+def approve_keyword(
+    db: Session,
+    actor: Member,
+    submission_id: int,
+    *,
+    remark: str = "",
+    force: bool = False,
+    ip: str = "",
+) -> KeywordSubmission:
+    _require(actor, "keyword.review")
+    row = _load_submission(db, actor, submission_id)
+    if row.status != "pending":
+        raise DomainError(400, "这条已经审过了")
+    if row.scope == "global" and not has_perm(actor.role, "keyword.review.global"):
+        raise DomainError(403, "公司管理员不能审批全局词")
+    note = (remark or "").strip()[:200]
+    if row.member_id == actor.id:
+        if not (force and actor.role == "platform_admin"):
+            raise DomainError(403, "不能审批自己提交的词")
+        if not note:
+            raise DomainError(400, "强制通过需要填写备注")
+    if _active_phrase_count(db, row.tenant_id) >= 300:
+        raise DomainError(400, "通过的命中词全局加公司不能超过 300 条")
+    version = _next_version(db)
+    entry = KeywordEntry(
+        tenant_id=row.tenant_id,
+        text=row.text,
+        category=row.category,
+        source=row.source,
+        version=version,
+    )
+    db.add(entry)
+    db.flush()
+    row.status = "approved"
+    row.reviewer_id = actor.id
+    row.reviewed_at = utcnow()
+    row.remark = note
+    row.entry_id = entry.id
+    rules = db.get(TenantRules, row.tenant_id) if row.tenant_id else None
+    if rules is not None:
+        rules.version = version
+        rules.updated_at = utcnow()
+    audit(
+        db,
+        actor,
+        "keyword.approve",
+        row.text,
+        f"通过命中词「{row.text}」",
+        tenant_id=row.tenant_id,
+        before={"status": "pending"},
+        after={"status": "approved", "version": version, "force": force},
+        ip=ip,
+    )
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def reject_keyword(db: Session, actor: Member, submission_id: int, remark: str, ip: str = "") -> KeywordSubmission:
+    _require(actor, "keyword.review")
+    row = _load_submission(db, actor, submission_id)
+    if row.status != "pending":
+        raise DomainError(400, "这条已经审过了")
+    if row.member_id == actor.id and actor.role != "platform_admin":
+        raise DomainError(403, "不能审批自己提交的词")
+    note = (remark or "").strip()
+    if not note:
+        raise DomainError(400, "驳回需要填写备注")
+    row.status = "rejected"
+    row.reviewer_id = actor.id
+    row.reviewed_at = utcnow()
+    row.remark = note[:200]
+    audit(
+        db,
+        actor,
+        "keyword.reject",
+        row.text,
+        f"驳回命中词「{row.text}」",
+        tenant_id=row.tenant_id,
+        before={"status": "pending"},
+        after={"status": "rejected"},
+        ip=ip,
+    )
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def delete_keyword(db: Session, actor: Member, entry_id: int, ip: str = "") -> KeywordEntry:
+    _require(actor, "keyword.review")
+    entry = db.get(KeywordEntry, entry_id)
+    if entry is None or entry.deleted_at is not None:
+        raise DomainError(404, "命中词不存在")
+    if entry.tenant_id is None and not has_perm(actor.role, "keyword.review.global"):
+        raise DomainError(403, "公司管理员不能删除全局词")
+    if entry.tenant_id is not None:
+        resolve_tenant(actor, entry.tenant_id)
+    version = _next_version(db)
+    entry.deleted_at = utcnow()
+    entry.version = version
+    audit(
+        db,
+        actor,
+        "keyword.delete",
+        entry.text,
+        f"删除命中词「{entry.text}」",
+        tenant_id=entry.tenant_id,
+        after={"version": version},
+        ip=ip,
+    )
+    db.commit()
+    db.refresh(entry)
+    return entry
+
+
+def save_rule_settings(
+    db: Session,
+    actor: Member,
+    *,
+    tenant_id: int | None,
+    categories: list[str],
+    ignore_phrases: list[str],
+    note: str,
+    ip: str = "",
+) -> TenantRules:
+    if actor.role not in ("platform_admin", "tenant_admin"):
+        raise DomainError(403, "没有权限")
+    target = resolve_tenant(actor, tenant_id)
+    if target is None:
+        raise DomainError(400, "请选择公司")
+    unique: list[str] = []
+    for item in categories:
+        if item not in CATEGORIES:
+            raise DomainError(400, "类别只能是价格、规格、品牌、夸大宣传")
+        if item not in unique:
+            unique.append(item)
+    cleaned_ignore: list[str] = []
+    for item in ignore_phrases:
+        text = re.sub(r"\s+", "", str(item).strip())
+        if not text:
+            continue
+        if len(text) > 40:
+            raise DomainError(400, "忽略词需要在 1 到 40 个字之间")
+        if text not in cleaned_ignore:
+            cleaned_ignore.append(text)
+    if len(cleaned_ignore) > 30:
+        raise DomainError(400, "忽略词最多 30 条")
+    body = (note or "").strip()
+    if len(body) > 400:
+        raise DomainError(400, "补充说明不能超过 400 字")
+    if any(token in body for token in _NOTE_BLOCK):
+        raise DomainError(400, "补充说明不能放宽禁止推测")
+    if not unique and _active_phrase_count(db, target) == 0:
+        raise DomainError(400, "至少保留一个类别，或一条已通过的命中词")
+    rules = db.get(TenantRules, target)
+    if rules is None:
+        rules = TenantRules(tenant_id=target, categories=[], ignore_phrases=[], note="")
+        db.add(rules)
+    rules.categories = unique
+    rules.ignore_phrases = cleaned_ignore
+    rules.note = body
+    rules.version = _next_version(db)
+    rules.updated_at = utcnow()
+    audit(db, actor, "rules.update", str(target), "更新公司审核规则", tenant_id=target, ip=ip)
+    db.commit()
+    db.refresh(rules)
+    return rules
+
+
+def rules_payload(db: Session, actor: Member, since: int, tenant_id: int | None) -> dict:
+    if actor.role == "member":
+        target = actor.tenant_id
+    else:
+        target = resolve_tenant(actor, tenant_id if actor.role == "platform_admin" else actor.tenant_id)
+    meta = db.get(AppMeta, "rules_version")
+    current = int(meta.value) if meta and meta.value else 0
+    query = db.query(KeywordEntry).filter(KeywordEntry.version > since)
+    if target is None and actor.role == "platform_admin":
+        scoped = query
+    else:
+        scoped = query.filter((KeywordEntry.tenant_id.is_(None)) | (KeywordEntry.tenant_id == target))
+    phrases = []
+    removed = []
+    for entry in scoped.order_by(KeywordEntry.version, KeywordEntry.id).all():
+        item = {
+            "id": entry.id,
+            "text": entry.text,
+            "category": entry.category,
+            "source": entry.source,
+            "scope": "global" if entry.tenant_id is None else "tenant",
+            "scope_label": "全局" if entry.tenant_id is None else "公司",
+            "version": entry.version,
+        }
+        if entry.deleted_at is None:
+            phrases.append(item)
+        else:
+            removed.append(entry.id)
+    rules = db.get(TenantRules, target) if target else None
+    return {
+        "version": current,
+        "categories": list(rules.categories) if rules else list(DEFAULT_CATEGORIES),
+        "ignore_phrases": list(rules.ignore_phrases) if rules else [],
+        "note": rules.note if rules else "",
+        "phrases": phrases,
+        "removed_ids": removed,
+        "speculation_policy": "只报告画面里看得见的文字，或口播里连续说出来的原话。禁止推测优先于补充说明。",
+    }
+
+
+def visible_member_ids(db: Session, actor: Member, tenant_id: int | None) -> list[int] | None:
+    """None 表示平台看全部。"""
+    if actor.role == "platform_admin":
+        if tenant_id is None:
+            return None
+        return [row.id for row in db.query(Member.id).filter(Member.tenant_id == tenant_id).all()]
+    if actor.role == "tenant_admin":
+        resolve_tenant(actor, tenant_id)
+        return [row.id for row in db.query(Member.id).filter(Member.tenant_id == actor.tenant_id).all()]
+    return [actor.id]
+
+
+def reconcile(db: Session, tenant_ids: list[int]) -> dict:
+    balance = cost = allocated = pool = previous = 0
+    names: list[str] = []
+    parts = []
+    ok = True
+    for tenant_id in tenant_ids:
+        tenant = db.get(Tenant, tenant_id)
+        if tenant is None:
+            continue
+        part_balance = 0
+        part_cost = 0
+        part_names: list[str] = []
+        members = (
+            db.query(Member)
+            .filter(Member.tenant_id == tenant_id, Member.deleted_at.is_(None), Member.role != "platform_admin")
+            .all()
+        )
+        for member in members:
+            if member.status == "invited":
+                continue
+            part_cost += member.month_cost_cents
+            if member.balance_cents < 0 or member.overdraft:
+                part_names.append(member.name)
+            else:
+                part_balance += member.balance_cents
+        part_ok = part_balance + part_cost == tenant.allocated_total_cents and not part_names
+        ok = ok and part_ok
+        balance += part_balance
+        cost += part_cost
+        allocated += tenant.allocated_total_cents
+        pool += tenant.pool_balance_cents
+        previous += tenant.previous_month_cost_cents
+        names.extend(part_names)
+        parts.append(
+            {
+                "tenant_id": tenant.id,
+                "name": tenant.name,
+                "ok": part_ok,
+                "balance": yuan(part_balance),
+                "month_cost": yuan(part_cost),
+                "allocated": yuan(tenant.allocated_total_cents),
+                "pool_remaining": yuan(tenant.pool_balance_cents),
+                "pool_total": yuan(tenant.pool_total_cents),
+                "overdraft_members": part_names,
+            }
+        )
+    overall = balance + cost == allocated and not names and ok
+    return {
+        "ok": overall,
+        "balance": yuan(balance),
+        "month_cost": yuan(cost),
+        "allocated": yuan(allocated),
+        "pool_remaining": yuan(pool),
+        "previous_month_cost": yuan(previous),
+        "overdraft": bool(names),
+        "overdraft_members": names,
+        "tenants": parts,
+    }
+
+
+def trend(db: Session, member_ids: list[int] | None) -> list[dict]:
+    end = shanghai_now().date()
+    start = end - timedelta(days=6)
+    query = db.query(UsageSnapshot).filter(UsageSnapshot.day >= start, UsageSnapshot.day <= end)
+    if member_ids is not None:
+        if not member_ids:
+            return []
+        query = query.filter(UsageSnapshot.member_id.in_(member_ids))
+    buckets: dict[str, int] = {}
+    for row in query.all():
+        key = row.day.isoformat()
+        buckets[key] = buckets.get(key, 0) + row.cost_cents
+    days = []
+    for offset in range(6, -1, -1):
+        day = end - timedelta(days=offset)
+        key = day.isoformat()
+        days.append({"date": key, "cost": yuan(buckets.get(key, 0))})
+    return days
+
+
+def register_job(
+    db: Session,
+    actor: Member,
+    *,
+    filename: str,
+    member_id: int | None,
+    chunks,
+    ip: str = "",
+) -> ReviewJob:
+    target_id = actor.id if actor.role == "member" or member_id is None else member_id
+    member = db.get(Member, target_id)
+    if member is None or member.tenant_id is None:
+        raise DomainError(404, "成员不存在")
+    if actor.role == "member" and member.id != actor.id:
+        raise DomainError(403, "只能登记自己的视频")
+    if actor.role != "member":
+        resolve_tenant(actor, member.tenant_id)
+    safe = Path(filename or "").name
+    suffix = Path(safe).suffix.lower()
+    if suffix not in _ALLOWED_VIDEO:
+        raise DomainError(400, "只接收 mp4、mov、mkv、avi、webm、m4v、flv、wmv、mpeg、mpg、ts")
+    setting = db.get(AppSetting, 1)
+    status = "queued"
+    message = _REGISTERED
+    if setting is not None and setting.queue_paused:
+        message = "队列已暂停。" + _REGISTERED
+    job = ReviewJob(
+        tenant_id=member.tenant_id,
+        member_id=member.id,
+        filename=safe[:200],
+        status=status,
+        message=message[:300],
+    )
+    db.add(job)
+    db.flush()
+    root = Path(__file__).resolve().parents[1] / "data" / "videos" / str(job.id)
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / safe
+    size = 0
+    try:
+        with path.open("wb") as handle:
+            while True:
+                chunk = chunks.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > _MAX_VIDEO:
+                    raise DomainError(400, "单个视频不能超过 2GB")
+                handle.write(chunk)
+        if size <= 0:
+            raise DomainError(400, "视频是空的")
+    except Exception:
+        if path.exists():
+            path.unlink()
+        db.rollback()
+        raise
+    job.file_path = str(path)
+    audit(db, actor, "job.register", safe, f"登记视频 {safe}", tenant_id=member.tenant_id, ip=ip)
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+def set_queue_paused(db: Session, actor: Member, paused: bool, ip: str = "") -> bool:
+    if actor.role not in ("platform_admin", "tenant_admin"):
+        raise DomainError(403, "没有权限")
+    row = db.get(AppSetting, 1)
+    if row is None:
+        raise DomainError(500, "设置还没有初始化")
+    row.queue_paused = paused
+    row.updated_at = utcnow()
+    audit(db, actor, "queue.pause" if paused else "queue.resume", "queue", "暂停队列" if paused else "开始队列", ip=ip)
+    db.commit()
+    return row.queue_paused
+
+
+def pending_count(db: Session, actor: Member) -> int:
+    query = db.query(KeywordSubmission).filter(KeywordSubmission.status == "pending")
+    if actor.role == "platform_admin":
+        return query.count()
+    if actor.role == "tenant_admin":
+        return query.filter(
+            KeywordSubmission.tenant_id == actor.tenant_id,
+            KeywordSubmission.scope == "tenant",
+        ).count()
+    return query.filter(KeywordSubmission.member_id == actor.id).count()
+
+
+def bind_device(
+    db: Session,
+    *,
+    email: str,
+    relay_user_id: str,
+    device_name: str,
+    client_version: str = "",
+) -> tuple[str, Member, Device]:
+    """对上公司成员后签发设备令牌。对不上就拒绝，客户端继续用本机规则。"""
+    from app.security import new_member_token
+
+    address = (email or "").strip().lower()
+    member = db.query(Member).filter(Member.email == address).one_or_none()
+    if (
+        member is None
+        or member.deleted_at is not None
+        or not relay_user_id
+        or member.relay_user_id != relay_user_id
+    ):
+        raise DomainError(403, "对不上公司成员，继续使用本机已有规则")
+    if member.status != "active":
+        raise DomainError(403, "成员已停用")
+    tenant = db.get(Tenant, member.tenant_id or 0)
+    if tenant is None or tenant.status != "active":
+        raise DomainError(403, "公司已停用")
+    device = Device(
+        member_id=member.id,
+        name=(device_name or "未命名设备")[:80],
+        last_seen=utcnow(),
+        client_version=(client_version or "")[:40],
+    )
+    db.add(device)
+    db.flush()
+    raw = new_member_token(member_id=member.id, role=member.role, tenant_id=member.tenant_id)
+    db.add(
+        MemberToken(
+            member_id=member.id,
+            token_hash=sha256_text(raw),
+            device_id=device.id,
+            expires_at=utcnow() + timedelta(days=30),
+        )
+    )
+    db.commit()
+    db.refresh(device)
+    return raw, member, device
+
+
+def usage_rows(db: Session, actor: Member, tenant_id: int | None) -> list[Member]:
+    query = db.query(Member).filter(Member.deleted_at.is_(None), Member.role != "platform_admin")
+    if actor.role == "member":
+        return query.filter(Member.id == actor.id).all()
+    target = resolve_tenant(actor, tenant_id)
+    if target is not None:
+        query = query.filter(Member.tenant_id == target)
+    elif actor.role != "platform_admin":
+        query = query.filter(Member.tenant_id == actor.tenant_id)
+    return query.order_by(Member.month_cost_cents.desc()).all()
