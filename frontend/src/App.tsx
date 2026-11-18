@@ -101,6 +101,7 @@ function boundedConcurrency(value: number): number {
 const MODEL_OPTIONS = [
   { value: "glm-5.3-flash", label: "GLM 5.3 Flash" },
   { value: "deepseek-flash", label: "DeepSeek 4.1 Flash" },
+  { value: "qwen3.8-flash", label: "Qwen 3.8 Flash" },
 ];
 
 /** 剪辑入口和 JSON 导出先不露出，功能代码保留。 */
@@ -1544,7 +1545,7 @@ export function Shell() {
             label="思考模式"
             name="thinking"
             valuePropName="checked"
-            extra="两个模型都保持思考开启。关掉时用低强度推理，打开时用高强度。"
+            extra="三个模型都保持思考开启。关掉时用低强度推理，打开时用高强度。"
           >
             <Switch checkedChildren="开" unCheckedChildren="关" />
           </Form.Item>

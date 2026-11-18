@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 import logging
 
+from app import __version__
 from app.logging_setup import redact
 
 log = logging.getLogger(__name__)
@@ -22,10 +23,13 @@ KEY_NAME = "电商视频合规"
 # 专属分组，余额计费，1.8 倍（含口播）。用户令牌只有被管理员分配后才能在可用分组里看到它。
 # 编号尚未固定，默认按名称解析；EVC_RELAY_GROUP_ID 只在名称对不上时作备用。
 DEFAULT_RELAY_GROUP_NAME = "电商审核专属-bot创建"
-# 画面模型只有这两个。DeepSeek 4.1 Flash 的接口名是 deepseek-flash。
+# 画面模型只有这三个。DeepSeek 4.1 Flash 的接口名是 deepseek-flash。
 PICTURE_MODEL = "glm-5.3-flash"
 DEEPSEEK_FLASH_MODEL = "deepseek-flash"
-PICTURE_MODELS = (PICTURE_MODEL, DEEPSEEK_FLASH_MODEL)
+QWEN_FLASH_MODEL = "qwen3.8-flash"
+PICTURE_MODELS = (PICTURE_MODEL, DEEPSEEK_FLASH_MODEL, QWEN_FLASH_MODEL)
+# Cloudflare 会拦截 Python-urllib 的默认 UA（403 error 1010）。这里标明应用，不用库默认值。
+USER_AGENT = f"ecommerce-video-compliance/{__version__}"
 
 
 def configured_model(value: object) -> str:
@@ -33,6 +37,8 @@ def configured_model(value: object) -> str:
     text = str(value or "").strip().lower()
     if text.startswith("deepseek"):
         return DEEPSEEK_FLASH_MODEL
+    if text == QWEN_FLASH_MODEL:
+        return QWEN_FLASH_MODEL
     if text == PICTURE_MODEL:
         return PICTURE_MODEL
     return PICTURE_MODEL
@@ -248,6 +254,7 @@ class RelayClient:
     def _open(self) -> httpx.AsyncClient:
         kwargs: dict[str, Any] = {
             "timeout": httpx.Timeout(20.0, connect=10.0),
+            "headers": {"User-Agent": USER_AGENT},
             "trust_env": self._transport is None,
         }
         if self._transport is not None:

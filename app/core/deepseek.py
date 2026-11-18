@@ -1,7 +1,8 @@
-"""OpenAI 兼容的画面与口播文本调用。模型名 glm-5.3-flash。
+"""OpenAI 兼容的画面与口播文本调用。
 
 glm-5.3-flash 拒绝 thinking.type=disabled，并且省略 reasoning_effort 时默认是 max。
 思考开关因此改成推理强度：关闭用 low，打开用 high。图片只传 image_url.url。
+qwen3.8-flash 默认把思考过程放在 reasoning_content，解析时只读 message.content。
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from app.core.prompts import speech_system_prompt, speech_user_prompt, user_prom
 from app.core.rules import apply_rules
 from app.core.timeutil import format_range
 from app.core.transcript import SpeechSentence
+from app.core.relay import QWEN_FLASH_MODEL, USER_AGENT
 from app.logging_setup import redact
 from app.schemas import DetectionRules, Frame, RawHit, RunConfig
 
@@ -27,6 +29,10 @@ log = logging.getLogger(__name__)
 
 _RETRY_STATUS = {408, 409, 429, 500, 502, 503, 504}
 _MAX_TOKENS = {"low": 2048, "high": 4096}
+# qwen3.8-flash 的 completion 含 reasoning_tokens，实测大约是 glm 的 2 倍。
+# 上限加倍，给 content 留出和 glm 相近的空间，避免思考过程把 JSON 截断。
+_QWEN_MAX_TOKENS = {"low": 4096, "high": 8192}
+_REASONING_PARTS = {"reasoning", "thinking", "reasoning_content", "redacted_reasoning"}
 _JSON_FIX = "上一次不是合法 JSON。请只输出一个 JSON 对象，键名和文字都用英文双引号，} 和 ] 前面不要加逗号。"
 # 口播判定带整份词表和思考，比单帧画面更容易超过「单帧超时」。
 _SPEECH_TIMEOUT_FLOOR = 120.0
@@ -69,11 +75,15 @@ def chat_url(base_url: str) -> str:
     return base + "/chat/completions"
 
 
-def model_controls(thinking: bool) -> dict:
-    """glm-5.3-flash 必须开启思考。强度用 low 代替以前的关闭，避免默认 max。"""
+def model_controls(thinking: bool, model: str | None = None) -> dict:
+    """glm-5.3-flash 必须开启思考。强度用 low 代替以前的关闭，避免默认 max。
+
+    qwen3.8-flash 默认也会思考，沿用同一组强度，只放宽 max_tokens。
+    """
     effort = "high" if thinking else "low"
+    limits = _QWEN_MAX_TOKENS if model == QWEN_FLASH_MODEL else _MAX_TOKENS
     return {
-        "max_tokens": _MAX_TOKENS[effort],
+        "max_tokens": limits[effort],
         "thinking": {"type": "enabled"},
         "reasoning_effort": effort,
     }
@@ -87,19 +97,24 @@ def _encode_image(path: str) -> str:
 
 
 class DeepSeekRecognizer:
-    def __init__(self, config: RunConfig):
+    def __init__(self, config: RunConfig, transport: httpx.AsyncBaseTransport | None = None):
         self.config = config
+        self._transport = transport
         self._client: httpx.AsyncClient | None = None
 
     async def __aenter__(self) -> DeepSeekRecognizer:
-        self._client = httpx.AsyncClient(
-            timeout=httpx.Timeout(self.config.timeout_sec, connect=10.0),
-            limits=httpx.Limits(
+        kwargs: dict = {
+            "timeout": httpx.Timeout(self.config.timeout_sec, connect=10.0),
+            "headers": {"User-Agent": USER_AGENT},
+            "limits": httpx.Limits(
                 max_connections=self.config.concurrency + 2,
                 max_keepalive_connections=self.config.concurrency,
             ),
-            trust_env=True,
-        )
+            "trust_env": self._transport is None,
+        }
+        if self._transport is not None:
+            kwargs["transport"] = self._transport
+        self._client = httpx.AsyncClient(**kwargs)
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> bool:
@@ -171,13 +186,13 @@ class DeepSeekRecognizer:
 
     async def _complete_message(self, client: httpx.AsyncClient, body: dict) -> str:
         timeout = speech_request_timeout(self.config.timeout_sec)
-        try:
-            return await self._complete(client, body, timeout=timeout, attempts=_SPEECH_ATTEMPTS)
-        except APIStatusError as exc:
-            if exc.status == 400 and "response_format" in exc.detail:
-                body.pop("response_format", None)
+        while True:
+            try:
                 return await self._complete(client, body, timeout=timeout, attempts=_SPEECH_ATTEMPTS)
-            raise
+            except APIStatusError as exc:
+                if exc.status == 400 and _drop_rejected_controls(body, exc.detail, model=self.config.model):
+                    continue
+                raise
 
     def _speech_body(self, sentences: list[SpeechSentence]) -> dict:
         lines = [
@@ -192,7 +207,7 @@ class DeepSeekRecognizer:
             ],
             "response_format": {"type": "json_object"},
         }
-        body.update(model_controls(self.config.thinking))
+        body.update(model_controls(self.config.thinking, self.config.model))
         return body
 
     def _body(self, frame: Frame, encoded: str) -> dict:
@@ -213,7 +228,7 @@ class DeepSeekRecognizer:
             ],
             "response_format": {"type": "json_object"},
         }
-        body.update(model_controls(self.config.thinking))
+        body.update(model_controls(self.config.thinking, self.config.model))
         return body
 
     async def _complete(
@@ -229,7 +244,10 @@ class DeepSeekRecognizer:
             try:
                 response = await client.post(
                     chat_url(self.config.base_url),
-                    headers={"Authorization": f"Bearer {self.config.api_key}"},
+                    headers={
+                        "Authorization": f"Bearer {self.config.api_key}",
+                        "User-Agent": USER_AGENT,
+                    },
                     json=body,
                     timeout=timeout,
                 )
@@ -251,17 +269,44 @@ class DeepSeekRecognizer:
         raise RuntimeError(last_error)
 
 
+def _drop_rejected_controls(body: dict, detail: str, *, model: str) -> bool:
+    """上游 400 点名不支持的字段时去掉。qwen 不接受 glm 的思考字段时只去掉那一对。"""
+    dropped = False
+    if "response_format" in body and "response_format" in detail:
+        body.pop("response_format", None)
+        dropped = True
+    if model == QWEN_FLASH_MODEL and ("thinking" in detail or "reasoning_effort" in detail):
+        if "thinking" in body or "reasoning_effort" in body:
+            body.pop("thinking", None)
+            body.pop("reasoning_effort", None)
+            dropped = True
+    return dropped
+
+
 def _message_text(payload: dict) -> str:
     try:
         message = payload["choices"][0]["message"]
     except (KeyError, IndexError, TypeError) as exc:
         raise RuntimeError("模型响应缺少内容") from exc
+    if not isinstance(message, dict):
+        raise RuntimeError("模型响应缺少内容")
+    # qwen3.8-flash 把思考过程放在 reasoning_content。只读 content，避免思考文本混进 JSON。
     content = message.get("content")
     if isinstance(content, list):
-        content = "".join(
-            part.get("text", "") for part in content if isinstance(part, dict)
-        )
-    text = (content or "").strip()
+        chunks: list[str] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            kind = str(part.get("type") or "text").lower()
+            if kind in _REASONING_PARTS:
+                continue
+            text = part.get("text")
+            if isinstance(text, str):
+                chunks.append(text)
+        content = "".join(chunks)
+    elif not isinstance(content, str):
+        content = ""
+    text = content.strip()
     if not text:
         raise RuntimeError("模型返回空内容")
     return text
