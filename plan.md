@@ -21,10 +21,11 @@
 |---|---|
 | 租户、成员、席位管理 | 中转站里加 tenant 字段或租户钱包 |
 | 额度分配 / 回收 / 对账 | 改中转站扣费逻辑 |
-| 关键词提交 / 审批 / 增量下发 | 代理算力请求 |
-| 用量快照与看板 | 商户自助登录中转站后台 |
+| 审核规则按客户端现有结构审批和下发 | 代理算力请求 |
+| 用量快照与看板（只看中转站扣费） | 把口播再单列成一笔费用 |
 | 三角色固定权限 + 审计 | 可配置权限编辑器 / Casbin |
-| 客户端中转站地址配置化 | 共用电脑的本地视频历史隔离（第四期） |
+| 客户端中转站地址配置化 | 公司管理员查看命中结果、时间轴和导出 |
+| 建号时只分配专属分组 | 共用电脑的本地视频历史隔离（第四期） |
 
 ### 1.3 核心映射关系
 
@@ -33,6 +34,8 @@
 tenant_members.relay_user_id  ←→  token4u users.id
 中转站 usage_logs.user_id      ←→  业务侧的成员用量归因
 ```
+
+口播成本已经含在中转站分组扣费里。看板和等式只使用 `usage_logs` 的金额，不再按腾讯云时长另记一笔。
 
 ---
 
@@ -101,18 +104,21 @@ tenant_members       成员：id, tenant_id, email, name, role, relay_user_id, s
 invites              邀请：id, tenant_id, token_hash, email, role, expires_at, used_at
 devices              设备：id, member_id, name, last_seen, client_version
 member_tokens        设备令牌：id, member_id, token_hash, device_id, expires_at, revoked_at
-keyword_entries      正式词库：id, tenant_id(NULL=全局), word, status, version, deleted_at
-keyword_submissions  提交：id, tenant_id, member_id, word, scope, status, reviewer_id, reviewed_at, remark
+keyword_entries      正式命中词：id, tenant_id(NULL=全局), text, category, source, status, version, deleted_at
+keyword_submissions  提交：id, tenant_id, member_id, text, category, source, scope, status, reviewer_id, reviewed_at, remark
+tenant_rules         公司规则：tenant_id, categories(json), ignore_phrases(json), note, updated_at
 quota_allocations    额度分配：id, tenant_id, member_id, amount, period, idempotency_key(UNIQUE), operator_id, created_at
 usage_snapshots      用量快照：id, tenant_id, member_id, date, requests, input_tokens, output_tokens, cost, UNIQUE(tenant_id,member_id,date)
 audit_logs           审计：id, tenant_id, actor_id, role, action, object, before, after, ip, created_at   （只追加）
 ```
 
 约束：
-- `tenant_members.role` 用枚举 + CHECK：`platform_admin / tenant_admin / member`。
-- `quota_allocations.idempotency_key` 唯一索引，重试不会产生第二条。
+- `tenant_members.role` 用枚举 + CHECK：`platform_admin / tenant_admin / member`。平台管理员的 `tenant_id` 为空，不占任何公司席位。
+- `keyword_entries` 与客户端 `PhraseRule` 一致：`text` 1 到 40 字，`category` 只能是价格、规格、品牌、夸大宣传，`source` 只能是口播或画面。同一租户内按来源、类别、原文去重。通过的命中词全局加公司不超过 300 条。
+- `ignore_phrases` 最多 30 条，`note` 最多 400 字。补充说明不能放宽「禁止推测」。
+- `quota_allocations.idempotency_key` 唯一索引。先插入「处理中」记录，再调中转站；中转站不认这个键。调用成功才把记录改成成功。调用失败保持失败，同一键重试不再加款。调用成功但写记录失败时，用中转站余额流水补记，不能再调一次加款。
 - `usage_snapshots` 按 `(tenant_id, member_id, date)` 唯一，重复跑快照是 upsert。
-- 所有删除都是软删除（`deleted_at`），界面不提供物理删除。
+- 所有删除都是软删除（`deleted_at`），界面不提供物理删除。停用成员立刻腾出该公司的一个席位。
 
 ---
 
@@ -126,16 +132,18 @@ POST /v1/auth/refresh
 POST /v1/auth/logout
 ```
 
-JWT 的 `tenant_id` 是租户作用域的唯一来源。普通用户不登录后台，用 `member_tokens` 在客户端证明身份。
+JWT 的 `tenant_id` 是租户作用域的唯一来源。普通用户不登录后台。
+
+客户端只向中转站登一次。登录成功后，用中转站 access token 调 `POST /v1/devices/bind`。evc-admin 向中转站确认这个用户，对上 `tenant_members` 后签发 `member_token`，存在本机。关键词提交和拉取用这张令牌。对不上成员的账号不同步规则，继续用本机已有规则。
 
 ### 5.2 业务接口
 
 | 模块 | 接口 | 权限 |
 |---|---|---|
 | 租户 | `GET/POST /v1/tenants`、`PUT /v1/tenants/:id/status` | 平台管理员 |
-| 成员 | `GET /v1/members`、`POST /v1/members/invite`、`POST /v1/members/:id/disable`、`POST /v1/members/:id/password-reset` | 平台 / 公司管理员（本公司） |
-| 额度 | `POST /v1/quotas/allocate`（带 idempotency_key）、`POST /v1/quotas/recycle`、`GET /v1/quotas/records` | 平台 / 公司管理员（不超公司池） |
-| 关键词 | `GET /v1/keywords?since=<version>`（支持 ETag）、`POST /v1/keywords/submissions`、`GET /v1/keywords/submissions`、`POST /v1/keywords/:id/approve`、`/reject`、`DELETE`（软删） | 按 scope 与 tenant 判定 |
+| 成员 | `GET /v1/members`、`POST /v1/members/invite`、`POST /v1/invites/:token/accept`、`POST /v1/members/:id/disable`、`POST /v1/devices/:id/revoke` | 平台 / 公司管理员（本公司）；接受邀请的人打开链接 |
+| 额度 | `POST /v1/quotas/allocate`（带 idempotency_key）、`GET /v1/quotas/records` | 平台 / 公司管理员（不超公司池剩余） |
+| 规则 | `GET /v1/rules?since=<version>`（支持 ETag）、`PUT /v1/rules/settings`、`POST /v1/rules/submissions`、`GET /v1/rules/submissions`、`POST /v1/rules/:id/approve`、`/reject`、`DELETE`（软删） | 命中词按 scope 与 tenant 审批；类别开关、忽略词、补充说明由公司管理员直接保存 |
 | 用量 | `GET /v1/usage/summary?from&to`、`GET /v1/usage/by-member`、`GET /v1/usage/reconcile` | 平台全部 / 公司本公司 / 成员仅自己 |
 | 审计 | `GET /v1/audit-logs` | 平台全部 / 公司本公司 / 成员仅自己的提交 |
 
@@ -163,32 +171,56 @@ PERMISSIONS = {
 
 ### 6.1 开通成员
 
+只走邀请链接，邮件里不放密码。
+
 ```
-邀请 → 校验席位数 → POST /users(email,password,allowed_groups,balance)
-     → 写 tenant_members.relay_user_id → 发送邮箱+初始密码
-     → 客户端登录后自动建 key（relay.py:373）或手工填 api_key（manager.py:594-597）
+邀请 → 邮件只有一次性链接
+     → 对方设密码 → 校验席位数
+     → POST /users(email, password, allowed_groups=[专属分组], balance)
+     → 写 tenant_members.relay_user_id，占用一个席位
+     → 客户端用这个邮箱密码登录中转站
+     → 再用中转站 token 换 member_token
 ```
+
+中转站建号如果会自动挂上默认分组，要改掉。新建用户只保留这次传入的专属分组。客户端发现专属分组不在可用分组里时，登录可以成功，但不下发画面密钥，页面提示联系管理员。不改用其他分组，也不删除已有密钥。
+
+分组没分配上时，验收就是这条失败，而不是改绑到别的分组。
 
 ### 6.2 额度分配
 
 ```
-提交 → 校验公司池剩余 → POST /users/:id/balance(idempotency_key)
-     → 写 quota_allocations → 写 audit_logs
+提交 → 先写入处理中的 quota_allocations（幂等键已占用）
+     → 校验公司池剩余
+     → POST /users/:id/balance 做 add
+     → 成功后把记录改成成功，并写 audit_logs
 ```
 
-对账等式（每日校验，看板顶部红/绿状态条）：
+回收不做进对账。需要把成员余额退回公司池时，用余额接口的 `subtract`，禁止用 `set`。退回的金额加回可分配余额，看板不把它再加一次。
+
+看板只展示两列钱：成员当前余额、本月已消耗。公司池展示剩余可分配。每日状态条比较的是：
 
 ```
-公司池总额 = 成员余额合计 + 本月已消耗 + 已回收
+成员当前余额合计 + 本月已消耗  与  已分配累计  是否一致
 ```
 
-### 6.3 关键词
+不平则变红。中转站若把余额扣成负数，该成员按 0 展示，并在状态条注明透支，不把负数加进合计。
+
+### 6.3 审核规则
+
+界面上仍可叫关键词。落库和发给客户端时，按现在软件里的 `DetectionRules`：
+
+- 命中词：`text`、`category`（价格 / 规格 / 品牌 / 夸大宣传）、`source`（口播 / 画面）。词里的 `X` 仍表示数字。
+- 类别开关、忽略词、补充说明是公司级设置，公司管理员直接保存，不逐条审批。
+- 全局命中词由平台管理员审，公司命中词由本公司管理员审。不能审自己提交的词。
 
 ```
-客户端提交 → 待审 → 审批（通过/驳回）→ 通过则版本号 +1
-          → 客户端 GET /v1/keywords?since=<version> 拉增量（ETag）
-          → 删除一律软删除，写审计
+客户端提交一条命中词 → 待审 → 通过则版本号 +1 / 驳回
+                   → 客户端 GET /v1/rules?since=<version>
+                   → 与内置词合并：内置词保留，再叠加已通过的全局词和本公司词
+                   → 忽略词命中时丢掉；补充说明只追加，不能放宽禁止推测
 ```
+
+创建任务时，客户端仍把当时的整套规则抄进该任务。之后审批通过的新词不影响已经排队的视频。软删除的词不再出现在增量里。
 
 ### 6.4 用量归集
 
@@ -204,7 +236,7 @@ PERMISSIONS = {
 
 ### 6.5 离职回收
 
-禁用中转站用户（`UpdateUser status=disabled`）→ 吊销 key → 解绑设备令牌。三件必须同时做。
+禁用中转站用户（`UpdateUser status=disabled`）→ 吊销 key → 解绑全部设备令牌 → 席位立即空出。四件必须同时做。单台设备下线只吊销该 `member_token`，不禁用中转站账号。
 
 ---
 
@@ -215,8 +247,9 @@ PERMISSIONS = {
 - [ ] 中转站关闭后台模式与自助注册，确认邮箱验证策略
 - [ ] 建专属分组，确认倍率 1.8，拿到分组 ID / 名称
 - [ ] 生成受限管理密钥（只含 users.read / users.write / users.balance.write / usage.read），存环境变量
-- [ ] 客户端 `app/core/relay.py:19-20` 的中转站地址配置化（支持自托管 IP + HTTPS 证书）
-- [ ] 模型名配置化，确认 ASR 凭证接口在新地址可用
+- [ ] 客户端中转站地址配置化（支持自托管 IP + HTTPS 证书）
+- [ ] 确认建号不会自动挂上专属分组以外的分组
+- [ ] 确认 `POST /api/v1/asr/credentials` 在该地址可用。这是现有 fork 已有接口，上游同步时不能丢
 
 **验收**：客户端用测试账号在新地址能完成登录、建 key、跑通一次视频审核。
 
@@ -234,32 +267,32 @@ PERMISSIONS = {
 ### M2 租户与成员
 
 - [ ] 租户 CRUD、席位管理、状态切换
-- [ ] 成员邀请与开通（调 `POST /users`，写 `relay_user_id`）
-- [ ] 成员禁用（三件事一起做）、密码重置
-- [ ] `member_tokens` 发放与吊销
+- [ ] 邀请链接开通（调 `POST /users` 且只带专属分组，写 `relay_user_id`）
+- [ ] 成员禁用（四件事一起做，含腾出席位）；单设备吊销
+- [ ] 客户端用中转站 token 换 `member_token`
 - [ ] 后台页面：租户管理、成员管理
 
-**验收**：新开一个成员后，客户端能用发放的邮箱密码登录并跑通一次请求；禁用后客户端立即不可用。
+**验收**：新开一个成员后，客户端能用他设置的密码登录并跑通一次请求。专属分组不在可用分组里时，不建画面密钥，并提示联系管理员。禁用后客户端立即不可用，席位可以再邀一个人。
 
 ### M3 额度与用量
 
-- [ ] 额度分配 / 回收，幂等键唯一索引
+- [ ] 额度分配，先占幂等键再加款
 - [ ] 每日用量快照 cron（含 timezone 处理）
-- [ ] 对账状态计算与看板红/绿提示
+- [ ] 对账只比较成员当前余额合计加本月已消耗，是否等于已分配累计
 - [ ] 用量看板：按成员、按天、导出
 - [ ] 审计日志查询页
 
-**验收**：重复提交同一分配请求只产生一条 `quota_allocations`、只加一次余额；对账等式成立；看板数字与中转站后台一致。
+**验收**：重复提交同一分配请求只产生一条记录、只加一次余额。调用成功但本地记账失败时，不会再加一次。看板的余额和已消耗与中转站一致。
 
-### M4 关键词
+### M4 审核规则
 
-- [ ] 词库表、提交表、版本号管理
-- [ ] 客户端提交接口 + 增量拉取接口（ETag）
-- [ ] 审批页：待审 / 通过 / 驳回，禁止审批自己的词
+- [ ] 命中词按文字、类别、来源存储；公司级类别开关、忽略词、补充说明单独保存
+- [ ] 客户端提交命中词 + 增量拉取（ETag），并与内置词合并
+- [ ] 审批页：待审 / 通过 / 驳回，展示类别和来源，禁止审批自己的词
 - [ ] 软删除与审计
-- [ ] 全局词库与公司自定义词库的双轨作用域
+- [ ] 全局命中词与公司命中词分作用域
 
-**验收**：提交一条词 → 审批通过 → 客户端在 30 秒内用 `since` 拉到；驳回与删除不出现在增量结果里。
+**验收**：提交一条「口播 / 价格」命中词 → 审批通过 → 客户端在 30 秒内用 `since` 拉到，并按口播原话匹配。驳回、删除、忽略词覆盖的原文不出现。已经排队的任务仍用提交时抄下的规则。
 
 ### M5 可选增强
 
@@ -276,11 +309,11 @@ PERMISSIONS = {
 | 权限 | 三角色 × 每个接口的允许/拒绝矩阵；`tenant_id` 从 token 取而非请求体 |
 | 越权 | 公司管理员 A 读/改 B 的租户、成员、词、审计，全部 403 |
 | 幂等 | 同一 `idempotency_key` 重复提交，只加一次余额、只留一条记录 |
-| 对账 | 构造余额/消耗/回收数据，验证等式；不平则状态条变红 |
+| 对账 | 成员当前余额合计加本月已消耗等于已分配累计；透支记为 0 并标红。不把回收额再加一次 |
 | 时区 | `timezone=Asia/Shanghai` 与 UTC 的跨日边界，日报不错位 |
 | 倍率 | 验证 evc-admin 不再乘倍率，成本与中转站扣费一致 |
-| 词汇 | 通过/驳回/软删后的增量结果；不允许审批自己的词 |
-| 离职 | 禁用后客户端请求立即失败、key 失效、设备令牌失效 |
+| 规则 | 通过的命中词带类别和来源；忽略词和补充说明一起下发；不允许审批自己的词 |
+| 离职 | 禁用后客户端请求立即失败、key 失效、设备令牌失效、席位腾出 |
 
 用 pytest + 独立测试库；每个测试用事务回滚或 truncate，不污染开发库。
 
@@ -313,19 +346,20 @@ EVC_RELAY_TIMEZONE=Asia/Shanghai
 | 客户是预充值到中转站，还是付给你统一结算 | 决定用预分配还是后结算 | M3 前确认；第一版建议预分配 |
 | 商户是否需要自己登录中转站后台 | 若需要则必须做方案 A 租户钱包 | 当前假设“只通过客户端使用” |
 | 自助注册是否真的能关 | 关不掉则员工可绕过公司归属 | M0 实测 |
-| 本地视频历史的可见性 | 中转站管不了；共用电脑会串数据 | 按 Windows 账号分目录，第四期 |
+| 本地视频历史和命中导出 | 中转站和 evc-admin 都不管审核结果本身 | 本期不做，留在客户端 |
 | 客户端写死 token4u.cc | 连不上自托管 IP，什么都测不了 | M0 第一优先级 |
+| 建号自动分组、口播临时凭证 | 这两处已经或必须留在中转站 fork 里 | 上游同步时单独保住，不随「零改动」丢掉 |
 | 上游同步 | evc-admin 独立仓库，不受 `sync-upstream-release.sh` 影响 | 已规避 |
 
 ---
 
 ## 11. 总验收清单
 
-- [ ] 中转站代码零改动
+- [ ] 中转站扣费主链路不改；建号只分配专属分组；口播临时凭证接口还在
 - [ ] 三个角色权限符合矩阵，公司管理员只能动自己公司
-- [ ] 成员无需自助注册，由 evc-admin 代建
-- [ ] 额度分配幂等、对账等式成立
-- [ ] 关键词增量下发可用，违规词进不去
+- [ ] 成员通过邀请链接设密码，邮件里没有初始密码
+- [ ] 额度分配幂等；看板只对余额和已消耗
+- [ ] 命中词按类别和来源增量下发，并与内置词、忽略词一起生效
 - [ ] 看板数字与中转站一致，且不用实时打中转站
-- [ ] 离职回收三件事一次完成
-- [ ] 客户端地址/模型配置化，可连自托管中转站
+- [ ] 离职时禁用账号、吊销密钥、解绑设备、腾出席位一次完成
+- [ ] 客户端地址可配置，能连自托管中转站

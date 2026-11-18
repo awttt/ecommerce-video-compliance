@@ -183,6 +183,7 @@ tbody tr:hover{background:#fafcff}
       <a data-view="dashboard" data-roles="platform,tenant,member" class="on"><i class="ic">▦</i><span class="t">总览</span></a>
       <a data-view="flow" data-roles="platform,tenant,member"><i class="ic">⇄</i><span class="t">流程图与权限</span></a>
       <div class="group">业务管理</div>
+      <a data-view="review" data-roles="platform,tenant,member"><i class="ic">▶</i><span class="t">视频审核</span></a>
       <a data-view="tenants" data-roles="platform"><i class="ic">▣</i><span class="t">租户管理</span></a>
       <a data-view="members" data-roles="platform,tenant"><i class="ic">♙</i><span class="t">成员管理</span></a>
       <a data-view="quota" data-roles="platform,tenant"><i class="ic">¥</i><span class="t">额度分配</span></a>
@@ -209,20 +210,20 @@ tbody tr:hover{background:#fafcff}
       <!-- ---------- 总览 ---------- -->
       <section class="view" id="v-dashboard">
         <div class="vhead">
-          <div><h1>总览</h1><p>公司池、额度分配与实际消耗的对账情况</p></div>
+          <div><h1>总览</h1><p>成员余额和本月已消耗，数字来自中转站扣费</p></div>
           <div class="spacer"></div>
           <button class="btn" onclick="toast('已刷新（原型：数据为演示值）')">刷新数据</button>
         </div>
 
         <div class="banner ok" id="reconcileBanner">
           <b>对账状态：正常</b>
-          <span>公司池总额 ¥50,000 = 成员余额合计 ¥23,573.50 + 本月已消耗 ¥8,426.50 + 已回收 ¥18,000</span>
+          <span>成员余额合计 ¥23,573.50 + 本月已消耗 ¥8,426.50 = 已分配 ¥32,000</span>
           <div class="spacer"></div><span class="mini">每日 02:00 自动对账</span>
         </div>
 
         <div class="grid4">
-          <div class="card stat"><div class="k">公司池总额</div><div class="v">¥50,000</div><div class="d">2 家在营公司</div><div class="bar"><i style="width:100%"></i></div></div>
-          <div class="card stat"><div class="k">已分配额度</div><div class="v">¥32,000</div><div class="d">占用率 64%</div><div class="bar"><i style="width:64%"></i></div></div>
+          <div class="card stat"><div class="k">成员余额合计</div><div class="v">¥23,573.50</div><div class="d">当前还能用的额度</div><div class="bar"><i style="width:74%"></i></div></div>
+          <div class="card stat"><div class="k">已分配累计</div><div class="v">¥32,000</div><div class="d">公司池还可分配 ¥18,000</div><div class="bar"><i style="width:64%"></i></div></div>
           <div class="card stat"><div class="k">本月消耗</div><div class="v">¥8,426.50</div><div class="d up">较上月 +12.4%</div><div class="bar"><i style="width:26%;background:#52c41a"></i></div></div>
           <div class="card stat"><div class="k">待审关键词</div><div class="v">3</div><div class="d">其中 2 条公司自定义词</div><div class="bar"><i style="width:30%;background:#faad14"></i></div></div>
         </div>
@@ -247,7 +248,7 @@ tbody tr:hover{background:#fafcff}
               <tr><td>分配 ¥500 给 张剪辑</td><td class="mini">2 分钟前</td></tr>
               <tr><td>通过关键词「家居好物」</td><td class="mini">18 分钟前</td></tr>
               <tr><td>开通成员 李运营</td><td class="mini">1 小时前</td></tr>
-              <tr><td>回收上月未用额度 ¥320</td><td class="mini">昨天 02:00</td></tr>
+              <tr><td>停用成员 赵兼职，席位已空出</td><td class="mini">昨天 02:00</td></tr>
             </table>
           </div>
         </div>
@@ -255,9 +256,62 @@ tbody tr:hover{background:#fafcff}
         <div class="card">
           <h3>待处理 <small>点击右侧跳转</small></h3>
           <table>
-            <tr><td><span class="tag o">待审</span></td><td>关键词「厨房清洁神器」</td><td class="muted">锦程商贸 · 公司自定义词</td><td>今天 09:12</td><td style="text-align:right"><a class="btn sm primary" onclick="go('keywords')">去审批</a></td></tr>
-            <tr><td><span class="tag o">待审</span></td><td>关键词「冬季保暖」</td><td class="muted">锦程商贸 · 公司自定义词</td><td>今天 08:40</td><td style="text-align:right"><a class="btn sm primary" onclick="go('keywords')">去审批</a></td></tr>
-            <tr><td><span class="tag b">待审</span></td><td>关键词「品质生活」</td><td class="muted">全局词库</td><td>昨天 17:30</td><td style="text-align:right"><a class="btn sm primary" onclick="go('keywords')">去审批</a></td></tr>
+            <tr><td><span class="tag o">待审</span></td><td>口播 · 价格 ·「厨房清洁神器」</td><td class="muted">锦程商贸</td><td>今天 09:12</td><td style="text-align:right"><a class="btn sm primary" onclick="go('keywords')">去审批</a></td></tr>
+            <tr><td><span class="tag o">待审</span></td><td>画面 · 品牌 ·「冬季保暖」</td><td class="muted">锦程商贸</td><td>今天 08:40</td><td style="text-align:right"><a class="btn sm primary" onclick="go('keywords')">去审批</a></td></tr>
+            <tr><td><span class="tag b">待审</span></td><td>口播 · 规格 ·「品质生活」</td><td class="muted">全局</td><td>昨天 17:30</td><td style="text-align:right"><a class="btn sm primary" onclick="go('keywords')">去审批</a></td></tr>
+          </table>
+        </div>
+      </section>
+
+      <!-- ---------- 视频审核 ---------- -->
+      <section class="view hidden" id="v-review">
+        <div class="vhead">
+          <div><h1>视频审核</h1><p id="reviewScope">平台可看全部公司。识别仍用该成员的中转站额度，口播成本已含在扣费里。</p></div>
+          <div class="spacer"></div>
+          <button class="btn" onclick="toast('原型：导出当前视频的 Excel')">导出 Excel</button>
+          <button class="btn primary" onclick="toast('原型：已加入队列并开始识别')">开始识别</button>
+        </div>
+        <div class="banner info"><b>和桌面工具是同一套结果。</b>命中列仍是时间点、类别、来源、原文、位置、置信度、判定理由、备注。已经排队的任务用当时的规则，后来审批通过的词不影响它。</div>
+        <div class="grid2">
+          <div class="card">
+            <h3>上传 <small>mp4 / mov / mkv，单文件最大 2GB</small></h3>
+            <div style="border:1px dashed #c7d7fe;border-radius:8px;background:#f8fbff;padding:22px;text-align:center;color:#1e40af">
+              把视频拖到这里，或点击选择
+              <div class="mini" style="margin-top:6px">画面模型 GLM 5.3 Flash · 口播引擎 16k_zh（免费资源包）</div>
+            </div>
+            <div class="form-actions">
+              <button class="btn" onclick="toast('原型：队列已暂停，按钮变为开始')">暂停</button>
+              <span class="hint">开始和暂停是同一个按钮</span>
+            </div>
+            <table style="margin-top:8px">
+              <thead><tr><th>视频</th><th>公司 / 成员</th><th>状态</th><th>命中</th></tr></thead>
+              <tbody>
+                <tr><td><b>直播间-1117.mp4</b><div class="mini">03:12</div></td><td>锦程商贸 · 张剪辑</td><td><span class="tag b">识别中 73/248</span></td><td class="muted">—</td></tr>
+                <tr style="background:#f8fbff"><td><b>主图视频.mp4</b><div class="mini">00:46 · 当前选中</div></td><td>锦程商贸 · 张剪辑</td><td><span class="tag g">已完成</span></td><td>4</td></tr>
+                <tr><td><b>详情页口播.mp4</b><div class="mini">01:05</div></td><td>优品优选 · 陈店长</td><td><span class="tag gray">排队</span></td><td class="muted">—</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="card">
+            <h3>主图视频.mp4 <small>预览在原片和剪辑结果之间切换</small></h3>
+            <div style="height:168px;border-radius:8px;background:#0f172a;color:#94a3b8;display:grid;place-items:center;margin-bottom:10px">视频预览</div>
+            <div class="mini">时间轴：0:08 价格 · 0:21 品牌 · 0:33 解析失败</div>
+            <div class="form-actions">
+              <button class="btn" onclick="toast('原型：剪辑入口当前客户端先不露出，这里同样先不作为主操作')">生成剪辑</button>
+              <span class="hint">剪辑仍按画面边距和口播字边界</span>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <h3>命中 <small>主图视频.mp4</small></h3>
+          <table>
+            <thead><tr><th>时间点</th><th>类别</th><th>来源</th><th>原文</th><th>位置</th><th>置信度</th><th>判定理由</th><th>备注</th></tr></thead>
+            <tbody>
+              <tr><td class="mini">0:08–0:11</td><td>价格</td><td>口播</td><td>只要九十九元</td><td>口播内容</td><td>确定</td><td class="mini">口播里连续说出价格</td><td></td></tr>
+              <tr><td class="mini">0:21–0:24</td><td>品牌</td><td>画面</td><td>锦程</td><td>画面左上</td><td>确定</td><td class="mini">画面中看得见品牌文字</td><td></td></tr>
+              <tr><td class="mini">0:29–0:32</td><td>夸大宣传</td><td>口播</td><td>全网最低</td><td>口播内容</td><td>确定</td><td class="mini">绝对化用语</td><td></td></tr>
+              <tr><td class="mini">0:33–0:35</td><td>解析失败</td><td>画面</td><td></td><td>第 18 帧</td><td class="muted">—</td><td class="mini">这一帧没有返回可解析结果</td><td>解析失败，需要人工审核</td></tr>
+            </tbody>
           </table>
         </div>
       </section>
@@ -283,7 +337,7 @@ tbody tr:hover{background:#fafcff}
             </tbody>
           </table>
         </div>
-        <div class="banner info" style="margin-top:14px">新建公司时会同时创建公司管理员账号，并绑定一个中转站分组。第二版建议每家公司独立分组，统计可以用 <code>/groups/usage-summary</code> 一次拿到公司总量。</div>
+        <div class="banner info" style="margin-top:14px">新建公司只绑定专属分组「电商审核专属-bot创建」。中转站建号不得再自动挂上其他分组。第二版再改成每家公司一个分组。</div>
       </section>
 
       <!-- ---------- 成员管理 ---------- -->
@@ -302,14 +356,14 @@ tbody tr:hover{background:#fafcff}
           <table>
             <thead><tr><th>成员</th><th>角色</th><th>中转站用户</th><th>可用分组</th><th>状态</th><th>本月消耗</th><th>设备</th><th>操作</th></tr></thead>
             <tbody>
-              <tr><td><b>张剪辑</b><div class="mini">zhang@jiecheng.com</div></td><td><span class="tag gray">普通用户</span></td><td><code>user_1042</code></td><td>专属分组</td><td><span class="tag g">正常</span></td><td>¥1,842.00</td><td>2 台</td><td><div class="ops"><a onclick="toast('原型：重置密码')">重置密码</a><a class="red" onclick="toast('原型：会同时禁用中转站账号、吊销密钥、解绑设备')">禁用</a></div></td></tr>
-              <tr><td><b>李运营</b><div class="mini">li@jiecheng.com</div></td><td><span class="tag b">公司管理员</span></td><td><code>user_1043</code></td><td>专属分组</td><td><span class="tag g">正常</span></td><td>¥2,310.50</td><td>1 台</td><td><div class="ops"><a onclick="toast('原型：重置密码')">重置密码</a><a class="red" onclick="toast('原型：三件事一起做')">禁用</a></div></td></tr>
-              <tr><td><b>王审核</b><div class="mini">wang@jiecheng.com</div></td><td><span class="tag gray">普通用户</span></td><td><code>user_1044</code></td><td>专属分组</td><td><span class="tag g">正常</span></td><td>¥1,105.00</td><td>1 台</td><td><div class="ops"><a onclick="toast('原型：重置密码')">重置密码</a><a class="red" onclick="toast('原型：三件事一起做')">禁用</a></div></td></tr>
+              <tr><td><b>张剪辑</b><div class="mini">zhang@jiecheng.com</div></td><td><span class="tag gray">普通用户</span></td><td><code>user_1042</code></td><td>专属分组</td><td><span class="tag g">正常</span></td><td>¥1,842.00</td><td>2 台 <a onclick="toast('原型：只吊销这一台的设备令牌，不禁用账号')">下线一台</a></td><td><div class="ops"><a class="red" onclick="toast('原型：禁用账号、吊销密钥、解绑全部设备，并腾出一个席位')">禁用</a></div></td></tr>
+              <tr><td><b>李运营</b><div class="mini">li@jiecheng.com</div></td><td><span class="tag b">公司管理员</span></td><td><code>user_1043</code></td><td>专属分组</td><td><span class="tag g">正常</span></td><td>¥2,310.50</td><td>1 台</td><td><div class="ops"><a class="red" onclick="toast('原型：禁用账号、吊销密钥、解绑设备，并腾出席位')">禁用</a></div></td></tr>
+              <tr><td><b>王审核</b><div class="mini">wang@jiecheng.com</div></td><td><span class="tag gray">普通用户</span></td><td><code>user_1044</code></td><td>专属分组</td><td><span class="tag g">正常</span></td><td>¥1,105.00</td><td>1 台</td><td><div class="ops"><a class="red" onclick="toast('原型：禁用账号、吊销密钥、解绑设备，并腾出席位')">禁用</a></div></td></tr>
               <tr><td><b>赵兼职</b><div class="mini">zhao@jiecheng.com</div></td><td><span class="tag gray">普通用户</span></td><td><code>user_1045</code></td><td>专属分组</td><td><span class="tag r">已停用</span></td><td>¥960.50</td><td>0 台</td><td><div class="ops"><a onclick="toast('原型：恢复')">恢复</a></div></td></tr>
             </tbody>
           </table>
         </div>
-        <div class="banner info" style="margin-top:14px">禁用成员必须同时做三件事：中转站 <code>UpdateUser status=disabled</code> → 吊销该用户的 key → 解绑设备令牌。只禁用一边会留下可用密钥。</div>
+        <div class="banner info" style="margin-top:14px">邀请邮件里只有链接，没有密码。对方设好密码后才创建中转站账号，并且只分配专属分组。禁用时同时停用中转站账号、吊销密钥、解绑全部设备，并立刻腾出席位。</div>
       </section>
 
       <!-- ---------- 额度分配 ---------- -->
@@ -319,7 +373,7 @@ tbody tr:hover{background:#fafcff}
           <div class="card">
             <h3>锦程商贸 · 公司池</h3>
             <div class="grid4" style="margin:0">
-              <div class="stat"><div class="k">池总额</div><div class="v" style="font-size:19px">¥30,000</div></div>
+              <div class="stat"><div class="k">成员余额合计</div><div class="v" style="font-size:19px">¥15,782</div></div>
               <div class="stat"><div class="k">已分配</div><div class="v" style="font-size:19px">¥22,000</div></div>
               <div class="stat"><div class="k">可分配</div><div class="v" style="font-size:19px;color:#16a34a">¥8,000</div></div>
               <div class="stat"><div class="k">本月消耗</div><div class="v" style="font-size:19px">¥6,218</div></div>
@@ -350,7 +404,7 @@ tbody tr:hover{background:#fafcff}
 
       <!-- ---------- 关键词审批 ---------- -->
       <section class="view hidden" id="v-keywords">
-        <div class="vhead"><div><h1>关键词审批</h1><p>全局词库由平台管理员审，公司自定义词由公司管理员审；不允许审批自己提交的词</p></div><div class="spacer"></div><button class="btn primary" onclick="openModal('新增关键词',[{k:'关键词',p:'例如：家居好物'},{k:'作用域',p:'全局 / 本公司'},{k:'备注',p:'可选'}])">+ 新增</button></div>
+        <div class="vhead"><div><h1>关键词审批</h1><p>一条词要带类别和来源。全局词由平台管理员审，公司词由公司管理员审；不能审自己提交的词</p></div><div class="spacer"></div><button class="btn primary" onclick="openModal('新增命中词',[{k:'原文',p:'例如：家居好物，1 到 40 字'},{k:'类别',p:'价格 / 规格 / 品牌 / 夸大宣传'},{k:'来源',p:'口播 / 画面'},{k:'作用域',p:'全局 / 本公司'}])">+ 新增</button></div>
         <div class="card">
           <div class="tabs">
             <span class="on" data-ktab="pending">待审 <em id="tabPending">3</em></span>
@@ -358,17 +412,17 @@ tbody tr:hover{background:#fafcff}
             <span data-ktab="rejected">已驳回 <em>2</em></span>
           </div>
           <table id="kwTable">
-            <thead><tr><th>关键词</th><th>提交人</th><th>来源</th><th>词库</th><th>提交时间</th><th>状态</th><th>操作</th></tr></thead>
+            <thead><tr><th>原文</th><th>类别</th><th>来源</th><th>提交人</th><th>词库</th><th>提交时间</th><th>状态</th><th>操作</th></tr></thead>
             <tbody>
-              <tr data-kw="pending"><td><b>厨房清洁神器</b></td><td>张剪辑</td><td>锦程商贸</td><td><span class="tag o">公司自定义</span></td><td class="mini">今天 09:12</td><td><span class="tag o">待审</span></td><td><div class="ops"><a onclick="approve(this)">通过</a><a class="red" onclick="reject(this)">驳回</a></div></td></tr>
-              <tr data-kw="pending"><td><b>冬季保暖</b></td><td>李运营</td><td>锦程商贸</td><td><span class="tag o">公司自定义</span></td><td class="mini">今天 08:40</td><td><span class="tag o">待审</span></td><td><div class="ops"><a onclick="approve(this)">通过</a><a class="red" onclick="reject(this)">驳回</a></div></td></tr>
-              <tr data-kw="pending"><td><b>品质生活</b></td><td>平台运营</td><td>—</td><td><span class="tag b">全局词库</span></td><td class="mini">昨天 17:30</td><td><span class="tag o">待审</span></td><td><div class="ops"><a onclick="approve(this)">通过</a><a class="red" onclick="reject(this)">驳回</a></div></td></tr>
-              <tr data-kw="approved" class="hidden"><td><b>家居好物</b></td><td>王审核</td><td>锦程商贸</td><td><span class="tag o">公司自定义</span></td><td class="mini">昨天 15:02</td><td><span class="tag g">已通过</span></td><td><div class="ops"><a onclick="toast('原型：软删除')">删除</a></div></td></tr>
-              <tr data-kw="rejected" class="hidden"><td><b>违规词示例</b></td><td>张剪辑</td><td>锦程商贸</td><td><span class="tag o">公司自定义</span></td><td class="mini">11-14</td><td><span class="tag r">已驳回</span></td><td><div class="ops"><a onclick="toast('原型：重新提交')">重新提交</a></div></td></tr>
+              <tr data-kw="pending"><td><b>厨房清洁神器</b></td><td>价格</td><td>口播</td><td>张剪辑</td><td><span class="tag o">公司</span></td><td class="mini">今天 09:12</td><td><span class="tag o">待审</span></td><td><div class="ops"><a onclick="approve(this)">通过</a><a class="red" onclick="reject(this)">驳回</a></div></td></tr>
+              <tr data-kw="pending"><td><b>冬季保暖</b></td><td>品牌</td><td>画面</td><td>李运营</td><td><span class="tag o">公司</span></td><td class="mini">今天 08:40</td><td><span class="tag o">待审</span></td><td><div class="ops"><a onclick="approve(this)">通过</a><a class="red" onclick="reject(this)">驳回</a></div></td></tr>
+              <tr data-kw="pending"><td><b>品质生活</b></td><td>规格</td><td>口播</td><td>平台运营</td><td><span class="tag b">全局</span></td><td class="mini">昨天 17:30</td><td><span class="tag o">待审</span></td><td><div class="ops"><a onclick="approve(this)">通过</a><a class="red" onclick="reject(this)">驳回</a></div></td></tr>
+              <tr data-kw="approved" class="hidden"><td><b>家居好物</b></td><td>品牌</td><td>画面</td><td>王审核</td><td><span class="tag o">公司</span></td><td class="mini">昨天 15:02</td><td><span class="tag g">已通过</span></td><td><div class="ops"><a onclick="toast('原型：软删除')">删除</a></div></td></tr>
+              <tr data-kw="rejected" class="hidden"><td><b>违规词示例</b></td><td>夸大宣传</td><td>口播</td><td>张剪辑</td><td><span class="tag o">公司</span></td><td class="mini">11-14</td><td><span class="tag r">已驳回</span></td><td><div class="ops"><a onclick="toast('原型：重新提交')">重新提交</a></div></td></tr>
             </tbody>
           </table>
         </div>
-        <div class="banner info" style="margin-top:14px">通过后词库版本号 +1，客户端用 <code>GET /v1/keywords?since=&lt;version&gt;</code> 拉增量（支持 ETag）。删除一律软删除，界面不提供物理删除。</div>
+        <div class="banner info" style="margin-top:14px">通过后版本号 +1。客户端用 <code>GET /v1/rules?since=版本</code> 拉取，和内置词合并。类别开关、忽略词、补充说明由公司管理员直接保存，不在这张表里逐条审。已经排队的视频仍用当时抄下的规则。</div>
       </section>
 
       <!-- ---------- 用量看板 ---------- -->
@@ -389,7 +443,6 @@ tbody tr:hover{background:#fafcff}
               <tr><td>张剪辑</td><td><code>user_1042</code></td><td>3,268</td><td>7.5M</td><td>¥1,842.00</td><td><span class="pbar"><i style="width:80%"></i></span> 21.9%</td></tr>
               <tr><td>王审核</td><td><code>user_1044</code></td><td>1,961</td><td>4.5M</td><td>¥1,105.00</td><td><span class="pbar"><i style="width:48%"></i></span> 13.1%</td></tr>
               <tr><td>赵兼职</td><td><code>user_1045</code></td><td>1,705</td><td>3.9M</td><td>¥960.50</td><td><span class="pbar"><i style="width:42%"></i></span> 11.4%</td></tr>
-              <tr><td>已回收 / 未分配</td><td class="muted">—</td><td class="muted">—</td><td class="muted">—</td><td>¥2,208.50</td><td class="muted">26.2%</td></tr>
             </tbody>
           </table>
         </div>
@@ -407,7 +460,7 @@ tbody tr:hover{background:#fafcff}
               <tr><td class="mini">11-17 13:41:55</td><td>李运营</td><td><span class="tag b">公司管理员</span></td><td>锦程商贸</td><td><code>keyword.approve</code></td><td>家居好物</td><td class="mini">pending → approved</td><td class="mini">192.168.1.22</td></tr>
               <tr><td class="mini">11-17 11:08:31</td><td>平台管理员</td><td><span class="tag g">平台管理员</span></td><td>—</td><td><code>tenant.create</code></td><td>优品优选</td><td class="mini">—</td><td class="mini">192.168.1.9</td></tr>
               <tr><td class="mini">11-17 09:30:12</td><td>平台管理员</td><td><span class="tag g">平台管理员</span></td><td>—</td><td><code>member.create</code></td><td>李运营</td><td class="mini">relay_user=1043</td><td class="mini">192.168.1.9</td></tr>
-              <tr><td class="mini">11-16 02:00:04</td><td>系统</td><td><span class="tag gray">system</span></td><td>全部</td><td><code>quota.recycle</code></td><td>10 月额度</td><td class="mini">回收 ¥320</td><td class="mini">—</td></tr>
+              <tr><td class="mini">11-16 02:00:04</td><td>李运营</td><td><span class="tag b">公司管理员</span></td><td>锦程商贸</td><td><code>member.disable</code></td><td>赵兼职</td><td class="mini">席位 7/10 → 6/10</td><td class="mini">192.168.1.22</td></tr>
             </tbody>
           </table>
         </div>
@@ -448,15 +501,15 @@ tbody tr:hover{background:#fafcff}
       <!-- ---------- 普通用户视图 ---------- -->
       <section class="view hidden" id="v-member">
         <div class="vhead"><div><h1>我的关键词提交</h1><p>普通用户实际在客户端操作，这里只展示提交记录</p></div></div>
-        <div class="banner info"><b>角色说明：</b>普通用户不登录管理后台，通过客户端的「设备令牌」证明身份，只有「提交关键词」和「查看自己提交记录」两项权限。</div>
+        <div class="banner info"><b>角色说明：</b>普通用户不登录这个后台。客户端只用中转站账号登录一次，再用那张登录令牌换成设备令牌。命中词提交和查看自己的用量都走设备令牌。</div>
         <div class="card">
           <div class="vhead"><div></div><div class="spacer"></div><button class="btn primary" onclick="toast('原型：实际在客户端提交')">+ 提交关键词</button></div>
           <table>
-            <thead><tr><th>关键词</th><th>词库</th><th>提交时间</th><th>状态</th><th>审核备注</th></tr></thead>
+            <thead><tr><th>原文</th><th>类别</th><th>来源</th><th>提交时间</th><th>状态</th><th>审核备注</th></tr></thead>
             <tbody>
-              <tr><td>厨房清洁神器</td><td>公司自定义</td><td class="mini">今天 09:12</td><td><span class="tag o">待审</span></td><td class="muted">—</td></tr>
-              <tr><td>家居好物</td><td>公司自定义</td><td class="mini">昨天 15:02</td><td><span class="tag g">已通过</span></td><td class="muted">—</td></tr>
-              <tr><td>违规词示例</td><td>公司自定义</td><td class="mini">11-14</td><td><span class="tag r">已驳回</span></td><td class="muted">不符合品类规范</td></tr>
+              <tr><td>厨房清洁神器</td><td>价格</td><td>口播</td><td class="mini">今天 09:12</td><td><span class="tag o">待审</span></td><td class="muted">—</td></tr>
+              <tr><td>家居好物</td><td>品牌</td><td>画面</td><td class="mini">昨天 15:02</td><td><span class="tag g">已通过</span></td><td class="muted">—</td></tr>
+              <tr><td>违规词示例</td><td>夸大宣传</td><td>口播</td><td class="mini">11-14</td><td><span class="tag r">已驳回</span></td><td class="muted">不符合品类规范</td></tr>
             </tbody>
           </table>
         </div>
@@ -473,9 +526,9 @@ tbody tr:hover{background:#fafcff}
             <div class="step gray">evc-admin<br><small>校验席位数</small></div><span class="ar">→</span>
             <div class="step o">POST /users<br><small>email + password<br>allowed_groups</small></div><span class="ar">→</span>
             <div class="step gray">写入<br><small>relay_user_id</small></div><span class="ar">→</span>
-            <div class="step g">发送凭据<br><small>邮箱 + 初始密码</small></div>
+            <div class="step g">邀请链接<br><small>对方自己设密码</small></div>
           </div>
-          <div class="flow-note">员工不经过自助注册；账号密码由 evc-admin 生成。客户端登录后自动建 key（<code>relay.py:373</code>），也可手动填 api_key。</div>
+          <div class="flow-note">邮件里只有链接。对方设密码后才建中转站账号，并且只分配专属分组。分组不在可用列表里时，客户端不建画面密钥，提示联系管理员。</div>
         </div>
 
         <div class="flow-box">
@@ -487,11 +540,11 @@ tbody tr:hover{background:#fafcff}
             <div class="step gray">写 quota_allocations</div><span class="ar">→</span>
             <div class="step g">写 audit_logs</div>
           </div>
-          <div class="flow-note">失败重试凭幂等键不会重复加钱。对账等式：<code>池总额 = 成员余额合计 + 本月消耗 + 已回收</code>。</div>
+          <div class="flow-note">先在本地占住幂等键，再调中转站加款。对账只看 <code>成员当前余额合计 + 本月已消耗 = 已分配累计</code>。</div>
         </div>
 
         <div class="flow-box">
-          <h3><i>3</i>关键词生命周期 <small>提交 → 待审 → 通过/驳回 → 版本 +1 → 客户端增量拉取</small></h3>
+          <h3><i>3</i>命中词 <small>原文 + 类别 + 来源；通过后和内置词合并下发</small></h3>
           <div class="flow-row">
             <div class="step g">客户端提交<br><small>POST /submissions</small></div><span class="ar">→</span>
             <div class="step gray">待审队列</div><span class="ar">→</span>
@@ -520,9 +573,9 @@ tbody tr:hover{background:#fafcff}
           <h3><i>5</i>登录与算力链路 <small>业务和算力互不代理</small></h3>
           <div class="flow-row">
             <div class="step g">客户端</div><span class="ar">→</span>
-            <div class="step o">/auth/login<br><small>邮箱 + 密码</small></div><span class="ar">→</span>
-            <div class="step gray">/keys 建或复用 key</div><span class="ar">→</span>
-            <div class="step o">gateway<br><small>/v1/chat/completions</small></div>
+            <div class="step o">中转站登录<br><small>只登这一次</small></div><span class="ar">→</span>
+            <div class="step gray">换设备令牌<br><small>POST /devices/bind</small></div><span class="ar">→</span>
+            <div class="step o">gateway<br><small>画面和口播都走这里扣费</small></div>
           </div>
           <div class="flow-note">算力请求完全绕过 evc-admin；关键词提交/拉取才走 evc-admin。中转站服务密钥只在服务端使用。</div>
         </div>
@@ -535,7 +588,8 @@ tbody tr:hover{background:#fafcff}
               <tr><td>建 / 停用公司、设席位</td><td><span class="tag g">✓</span></td><td class="muted">—</td><td class="muted">—</td></tr>
               <tr><td>邀请 / 禁用成员</td><td><span class="tag g">✓</span></td><td><span class="tag b">✓ 本公司</span></td><td class="muted">—</td></tr>
               <tr><td>分配 / 回收额度</td><td><span class="tag g">✓</span></td><td><span class="tag b">✓ 不超公司池</span></td><td class="muted">—</td></tr>
-              <tr><td>查看用量</td><td><span class="tag g">全部</span></td><td><span class="tag b">本公司</span></td><td><span class="tag gray">仅自己</span></td></tr>
+              <tr><td>查看用量（余额和已消耗）</td><td><span class="tag g">全部</span></td><td><span class="tag b">本公司</span></td><td><span class="tag gray">仅自己</span></td></tr>
+              <tr><td>上传视频、看命中、导出</td><td><span class="tag g">全部公司</span></td><td><span class="tag b">本公司</span></td><td><span class="tag gray">仅自己的视频</span></td></tr>
               <tr><td>提交关键词</td><td><span class="tag g">✓</span></td><td><span class="tag g">✓</span></td><td><span class="tag g">✓</span></td></tr>
               <tr><td>审核关键词</td><td><span class="tag g">全局 + 任意公司</span></td><td><span class="tag b">仅本公司自定义词</span></td><td class="muted">—</td></tr>
               <tr><td>查看审计日志</td><td><span class="tag g">全部</span></td><td><span class="tag b">本公司</span></td><td><span class="tag gray">仅自己的提交</span></td></tr>
@@ -560,7 +614,7 @@ tbody tr:hover{background:#fafcff}
     member:{name:'普通用户',chip:'客户端身份',avatar:'用'}
   };
   var VIEW={
-    dashboard:'总览',flow:'流程图与权限',tenants:'租户管理',members:'成员管理',
+    dashboard:'总览',review:'视频审核',flow:'流程图与权限',tenants:'租户管理',members:'成员管理',
     quota:'额度分配',keywords:'关键词审批',usage:'用量看板',audit:'审计日志',
     settings:'接入设置',member:'我的关键词提交'
   };
@@ -583,7 +637,7 @@ tbody tr:hover{background:#fafcff}
     window.scrollTo({top:0,behavior:'smooth'});
   }
   function allowed(link){
-    if(current==='member') return link.dataset.view==='dashboard'||link.dataset.view==='keywords'||link.dataset.view==='flow'||link.dataset.view==='member';
+    if(current==='member') return link.dataset.view==='dashboard'||link.dataset.view==='review'||link.dataset.view==='keywords'||link.dataset.view==='flow'||link.dataset.view==='member';
     return (link.dataset.roles||'').split(',').indexOf(current)>=0;
   }
   function applyRole(r){
@@ -595,11 +649,16 @@ tbody tr:hover{background:#fafcff}
     document.querySelectorAll('.nav a').forEach(function(a){a.classList.toggle('hidden',!allowed(a));});
     document.querySelectorAll('[data-role-only]').forEach(function(e){e.classList.toggle('hidden',e.dataset.roleOnly!==r);});
     var memberView=document.getElementById('v-member');
+    var scope=document.getElementById('reviewScope');
+    if(scope){
+      scope.textContent = r==='platform'
+        ? '平台可看全部公司。识别仍用该成员的中转站额度，口播成本已含在扣费里。'
+        : r==='tenant'
+        ? '只看本公司的视频和命中。识别仍用该成员的中转站额度。'
+        : '只看自己上传的视频。识别仍用自己的中转站额度。';
+    }
     if(r==='member'){
-      document.querySelectorAll('.view').forEach(function(v){v.classList.add('hidden');});
-      memberView.classList.remove('hidden');
-      document.getElementById('crumb').textContent='我的关键词提交';
-      document.querySelectorAll('.nav a').forEach(function(a){a.classList.remove('on');});
+      go('review');
     }else{
       memberView.classList.add('hidden');
       go('dashboard');
