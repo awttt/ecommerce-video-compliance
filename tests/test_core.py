@@ -624,10 +624,13 @@ def test_exaggeration_keeps_the_absolute_words_and_drops_ordinary_speech():
     assert stored["rules"]["categories"] == ["价格"]
 
 
-def _chat_response(content: str, status: int = 200) -> httpx.Response:
+def _chat_response(content: str, status: int = 200, reasoning: str | None = None) -> httpx.Response:
     if status != 200:
         return httpx.Response(status, json={"error": {"message": content}})
-    return httpx.Response(status, json={"choices": [{"message": {"content": content}}]})
+    message: dict = {"content": content}
+    if reasoning is not None:
+        message["reasoning_content"] = reasoning
+    return httpx.Response(status, json={"choices": [{"message": message}]})
 
 
 def test_speech_request_waits_longer_than_a_frame():
@@ -729,7 +732,7 @@ def test_chat_url_accepts_official_base():
 def test_glm_request_enables_thinking_and_drops_image_detail():
     from app.core.deepseek import DeepSeekRecognizer, model_controls
     from app.core.pipeline import recognition_max_edge
-    from app.core.relay import DEEPSEEK_FLASH_MODEL, PICTURE_MODEL, configured_model
+    from app.core.relay import DEEPSEEK_FLASH_MODEL, PICTURE_MODEL, QWEN_FLASH_MODEL, configured_model
     from app.schemas import DEFAULT_SETTINGS, RunConfig
 
     assert configured_model("deepseek-flash") == DEEPSEEK_FLASH_MODEL
@@ -739,8 +742,13 @@ def test_glm_request_enables_thinking_and_drops_image_detail():
     assert configured_model("  ") == PICTURE_MODEL
     assert configured_model("glm-5.3-flash") == PICTURE_MODEL
     assert configured_model("glm-4.5-air") == PICTURE_MODEL
+    assert configured_model("qwen3.8-flash") == QWEN_FLASH_MODEL
+    assert configured_model("Qwen3.8-Flash") == QWEN_FLASH_MODEL
+    assert configured_model("qwen-max") == PICTURE_MODEL
     assert RunConfig().model == PICTURE_MODEL
+    assert RunConfig().timeout_sec == 120
     assert DEFAULT_SETTINGS["model"] == PICTURE_MODEL
+    assert DEFAULT_SETTINGS["timeout_sec"] == 120.0
 
     assert model_controls(False) == {
         "max_tokens": 2048,
@@ -774,11 +782,24 @@ def test_glm_request_enables_thinking_and_drops_image_detail():
     assert recognition_max_edge(1280, "low") == 640
     assert recognition_max_edge(480, "low") == 480
 
+    qwen = DeepSeekRecognizer(RunConfig(model=QWEN_FLASH_MODEL, thinking=False))
+    qwen_body = qwen._body(Frame(index=0, start_sec=0, end_sec=1, path="frame.jpg"), "abcd")
+    assert qwen_body["model"] == QWEN_FLASH_MODEL
+    assert qwen_body["max_tokens"] == 4096
+    assert qwen_body["reasoning_effort"] == "low"
+    assert qwen_body["thinking"] == {"type": "enabled"}
+    assert model_controls(True, QWEN_FLASH_MODEL)["max_tokens"] == 8192
+    assert model_controls(True, QWEN_FLASH_MODEL)["reasoning_effort"] == "high"
 
-async def test_saved_model_collapses_to_the_two_choices(tmp_path):
-    from app.core.relay import DEEPSEEK_FLASH_MODEL, PICTURE_MODEL
+
+async def test_saved_model_keeps_qwen_and_collapses_unknown_names(tmp_path):
+    from app.core.relay import DEEPSEEK_FLASH_MODEL, PICTURE_MODEL, QWEN_FLASH_MODEL
     from app.db import Database
-    from app.schemas import DEFAULT_SETTINGS
+    from app.schemas import DEFAULT_SETTINGS, SettingUpdate
+
+    assert SettingUpdate(model="qwen3.8-flash").model == QWEN_FLASH_MODEL
+    assert SettingUpdate(model="Qwen3.8-Flash").model == QWEN_FLASH_MODEL
+    assert SettingUpdate(model="qwen-max").model == PICTURE_MODEL
 
     db = Database(tmp_path / "app.db")
     await db.connect()
@@ -795,4 +816,148 @@ async def test_saved_model_collapses_to_the_two_choices(tmp_path):
     custom["model"] = "glm-4.5-air"
     await db.save_settings(custom)
     assert (await db.load_settings())["model"] == PICTURE_MODEL
+    custom["model"] = "qwen3.8-flash"
+    await db.save_settings(custom)
+    assert (await db.load_settings())["model"] == QWEN_FLASH_MODEL
     await db.close()
+
+
+def test_message_text_ignores_reasoning_content():
+    from app.core.deepseek import _drop_rejected_controls, _message_text
+    from app.core.relay import PICTURE_MODEL, QWEN_FLASH_MODEL
+
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "content": '{"items":[]}',
+                    "reasoning_content": "生产日期是未来日期 {broken",
+                }
+            }
+        ]
+    }
+    assert _message_text(payload) == '{"items":[]}'
+    mixed = {
+        "choices": [
+            {
+                "message": {
+                    "content": [
+                        {"type": "reasoning", "text": "not json {"},
+                        {"type": "text", "text": '{"items":[]}'},
+                    ],
+                    "reasoning_content": "ignored",
+                }
+            }
+        ]
+    }
+    assert _message_text(mixed) == '{"items":[]}'
+    empty = {"choices": [{"message": {"content": None, "reasoning_content": '{"items":[]}'}}]}
+    with pytest.raises(RuntimeError, match="空内容"):
+        _message_text(empty)
+
+    glm = {
+        "response_format": {"type": "json_object"},
+        "thinking": {"type": "enabled"},
+        "reasoning_effort": "low",
+    }
+    untouched = dict(glm)
+    assert _drop_rejected_controls(untouched, "unknown parameter: thinking", model=PICTURE_MODEL) is False
+    assert untouched == glm
+    qwen = dict(glm)
+    assert _drop_rejected_controls(qwen, "unknown parameter: thinking", model=QWEN_FLASH_MODEL) is True
+    assert "thinking" not in qwen
+    assert "reasoning_effort" not in qwen
+    assert "response_format" in qwen
+    shared = dict(glm)
+    assert _drop_rejected_controls(shared, "response_format is unsupported", model=PICTURE_MODEL) is True
+    assert "response_format" not in shared
+    assert "thinking" in shared
+
+
+def test_prompts_name_the_local_date(monkeypatch):
+    from datetime import date
+
+    import app.core.prompts as prompts
+
+    monkeypatch.setattr(prompts, "local_today", lambda: date(2026, 11, 18))
+    visual = prompts.visual_system_prompt()
+    speech = prompts.speech_system_prompt()
+    assert "今天的日期是 2026-11-18" in visual
+    assert "今天的日期是 2026-11-18" in speech
+    assert "未来日期" in visual
+    assert visual.rfind("禁止推测") > visual.rfind("今天的日期是")
+    assert speech.rfind("禁止推测") > speech.rfind("今天的日期是")
+
+
+async def test_qwen_frame_reads_content_and_sends_app_user_agent(tmp_path):
+    from app.core.relay import QWEN_FLASH_MODEL, USER_AGENT
+
+    image = tmp_path / "frame.jpg"
+    image.write_bytes(b"\xff\xd8frame")
+    calls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(json.loads(request.content))
+        assert request.headers["user-agent"] == USER_AGENT
+        assert request.headers["user-agent"].startswith("ecommerce-video-compliance/")
+        return _chat_response(
+            '{"items":[{"类别":"价格","原文":"¥168","位置":"标题下","置信度":"确定","判定理由":"画面写着手到价","备注":""}]}',
+            reasoning="生产日期 2026-09-15 是未来日期 {not json",
+        )
+
+    recognizer = DeepSeekRecognizer(
+        RunConfig(api_key="sk-test", model=QWEN_FLASH_MODEL, thinking=False, base_url="https://token4u.cc/v1"),
+        transport=httpx.MockTransport(handler),
+    )
+    async with recognizer:
+        hits = await recognizer.recognize(Frame(index=1, start_sec=0, end_sec=1, path=str(image)))
+    assert [item.text for item in hits] == ["¥168"]
+    assert calls[0]["model"] == QWEN_FLASH_MODEL
+    assert calls[0]["max_tokens"] == 4096
+    assert calls[0]["messages"][1]["content"][1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    assert "今天的日期是" in calls[0]["messages"][0]["content"]
+    assert recognizer.config.timeout_sec == 120
+
+
+async def test_qwen_drops_rejected_thinking_fields(tmp_path):
+    from app.core.relay import QWEN_FLASH_MODEL
+
+    image = tmp_path / "frame.jpg"
+    image.write_bytes(b"\xff\xd8frame")
+    calls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append(body)
+        if len(calls) == 1:
+            return _chat_response("unknown parameter: thinking", status=400)
+        return _chat_response('{"items":[]}')
+
+    recognizer = DeepSeekRecognizer(
+        RunConfig(api_key="sk-test", model=QWEN_FLASH_MODEL, thinking=True, base_url="https://token4u.cc/v1"),
+        transport=httpx.MockTransport(handler),
+    )
+    async with recognizer:
+        hits = await recognizer.recognize(Frame(index=1, start_sec=0, end_sec=1, path=str(image)))
+    assert hits == []
+    assert calls[0]["max_tokens"] == 8192
+    assert calls[0]["thinking"] == {"type": "enabled"}
+    assert "thinking" not in calls[1]
+    assert "reasoning_effort" not in calls[1]
+    assert calls[1]["max_tokens"] == 8192
+    assert "response_format" in calls[1]
+
+
+async def test_relay_client_sends_app_user_agent():
+    from app.core.relay import USER_AGENT, RelayClient
+
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["ua"] = request.headers["user-agent"]
+        return httpx.Response(200, json={"code": 0, "message": "success", "data": {}})
+
+    client = RelayClient(transport=httpx.MockTransport(handler))
+    await client.public_settings()
+    assert seen["ua"] == USER_AGENT
+    assert "python" not in seen["ua"].lower()

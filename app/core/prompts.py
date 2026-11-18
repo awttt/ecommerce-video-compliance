@@ -1,6 +1,8 @@
-"""发给 glm-5.3-flash 的画面审核提示。只允许报告画面里看得见的内容。"""
+"""发给画面模型的审核提示。只允许报告画面里看得见的内容。"""
 
 from __future__ import annotations
+
+from datetime import date
 
 from app.core.exaggeration import exaggeration_instructions
 from app.core.timeutil import format_range
@@ -20,6 +22,21 @@ SYSTEM_PROMPT = """你是电商短视频画面合规审核员。你只能报告�
 只输出 JSON 对象，不要 Markdown，不要解释。格式：
 {"items":[{"类别":"价格","原文":"¥199","位置":"画面右下角价格贴纸","置信度":"确定","判定理由":"带货币符号且位于商品旁价格标签","备注":""}]}
 类别只能是「价格」「规格」「品牌」。置信度只能是「确定」或「疑似」。"""
+
+
+def local_today() -> date:
+    return date.today()
+
+
+def today_line() -> str:
+    """模型训练截止日期会把已经过去的日期说成未来。请求时写入本机今天。"""
+    current = local_today().isoformat()
+    return (
+        f"今天的日期是 {current}。"
+        "画面或口播里的日期、生产日期和年份按原文照抄，"
+        "不要因为你以为它是未来或过去就改写、省略或降低置信度，"
+        "也不要在判定理由或备注里把它说成未来日期。"
+    )
 
 
 def user_prompt(frame: Frame, rules: DetectionRules | None = None) -> str:
@@ -71,7 +88,7 @@ def speech_user_prompt(lines: list[str], rules: DetectionRules | None = None) ->
 
 
 def visual_system_prompt(rules: DetectionRules | None = None) -> str:
-    return SYSTEM_PROMPT + "\n" + rules_appendix(rules, "画面")
+    return SYSTEM_PROMPT + "\n" + today_line() + "\n" + rules_appendix(rules, "画面")
 
 
 def speech_system_prompt(rules: DetectionRules | None = None) -> str:
@@ -89,7 +106,7 @@ def speech_system_prompt(rules: DetectionRules | None = None) -> str:
             "类别只能是「价格」「规格」「品牌」「夸大宣传」。",
             1,
         )
-    return text + "\n" + rules_appendix(current, "口播")
+    return text + "\n" + today_line() + "\n" + rules_appendix(current, "口播")
 
 
 def rules_appendix(rules: DetectionRules | None = None, source: str = "画面") -> str:

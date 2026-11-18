@@ -71,7 +71,7 @@ ecommerce-video-compliance/
 - Python 3.11+
 - Node.js 18+（只在构建界面时需要）
 - FFmpeg 5+，并且 `ffmpeg`、`ffprobe` 在 PATH 中
-- 能访问 `https://token4u.cc`（登录后的画面请求发到 `https://token4u.cc/v1`，模型可选 `glm-5.3-flash` 或 `deepseek-flash`）
+- 能访问 `https://token4u.cc`（登录后的画面请求发到 `https://token4u.cc/v1`，模型可选 `glm-5.3-flash`、`deepseek-flash` 或 `qwen3.8-flash`）
 - 口播检测还要能访问 `https://asr.tencentcloudapi.com`。登录后的临时凭证由 token4u 签发，本机不保存腾讯云密钥
 - Windows 桌面窗口使用系统 WebView2（Win10/11 一般已经带了）
 
@@ -79,7 +79,7 @@ ecommerce-video-compliance/
 
 分组名称可以用 `EVC_RELAY_GROUP_NAME` 覆盖，默认就是「电商审核专属-bot创建」。名称对不上时，如果 `EVC_RELAY_GROUP_ID` 填了编号，并且该编号也在当前账号的可用分组里，才改用这个编号。编号还不确定时留空。查询可用分组失败、又配置了编号时，会直接用该编号创建；中转站拒绝绑定则同样报错。
 
-视觉请求使用 Chat Completions，图片用 base64 data URL，不带 `detail`。`glm-5.3-flash` 不能关闭思考；思考开关关闭时用 `reasoning_effort: low`，避免默认的 `max`。
+视觉请求使用 Chat Completions，图片用 base64 data URL，不带 `detail`。`glm-5.3-flash` 不能关闭思考；思考开关关闭时用 `reasoning_effort: low`，避免默认的 `max`。`qwen3.8-flash` 会把思考过程放在 `reasoning_content`，程序只读取 `content`。它的输出上限是另外两个模型的两倍，避免思考过程把结果截断。请求带应用自己的 User-Agent。系统提示会写上本机当天日期，减少把已经过去的日期说成未来日期。
 
 ## 开发运行
 
@@ -244,7 +244,7 @@ pytest
 
 ## 口播检测
 
-音频用 FFmpeg 抽成 16kHz 单声道。本地文件通过录音文件识别的 `CreateRecTask`（`SourceType=1`）上传，再轮询 `DescribeTaskStatus` 取带时间戳的句子。单段音频超过约 4.5MB 时按时间切开，时间戳加回视频里的起点。口播文本交给 `glm-5.3-flash` 做文本判定，原文对不上句子的会被丢掉。
+音频用 FFmpeg 抽成 16kHz 单声道。本地文件通过录音文件识别的 `CreateRecTask`（`SourceType=1`）上传，再轮询 `DescribeTaskStatus` 取带时间戳的句子。单段音频超过约 4.5MB 时按时间切开，时间戳加回视频里的起点。口播文本交给当前选中的画面模型做文本判定，原文对不上句子的会被丢掉。
 
 口播临时凭证不会写进任务记录。日志里的 SecretId 和签名会打码。海外账号可以把 `TENCENT_ASR_HOST` 设成对应域名。
 
