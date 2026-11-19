@@ -178,13 +178,17 @@ class Database:
             cursor = await self.conn.execute("SELECT value FROM settings WHERE key='config'")
             row = await cursor.fetchone()
         merged = dict(DEFAULT_SETTINGS)
+        stored: dict = {}
         if row is not None:
             try:
-                stored = json.loads(row["value"])
+                parsed = json.loads(row["value"])
             except json.JSONDecodeError:
-                stored = {}
-            if isinstance(stored, dict):
+                parsed = {}
+            if isinstance(parsed, dict):
+                stored = parsed
                 merged.update(stored)
+        had_luna_percent = "luna_request_percent" in stored
+        merged.pop("luna_request_percent", None)
         merged["model"] = configured_model(merged.get("model"))
         engine = configured_engine(merged.get("asr_engine"))
         engine_changed = merged.get("asr_engine") != engine
@@ -201,7 +205,14 @@ class Database:
         except Exception:
             merged["rules"] = DetectionRules().model_dump()
             seeded = False
-        if seeded or concurrency_changed or exaggeration_changed or engine_changed or region_changed:
+        if (
+            seeded
+            or concurrency_changed
+            or exaggeration_changed
+            or engine_changed
+            or region_changed
+            or had_luna_percent
+        ):
             await self.save_settings(merged)
         return merged
 

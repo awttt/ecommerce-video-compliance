@@ -460,8 +460,11 @@ export function Shell() {
 
   const jobId = job?.id;
   const jobStatus = job?.status;
+  const previewStatus = job?.preview_status;
+  const previewWaiting = previewStatus === "pending";
   useEffect(() => {
-    if (!jobId || (jobStatus != null && TERMINAL.includes(jobStatus))) return undefined;
+    const terminal = jobStatus != null && TERMINAL.includes(jobStatus);
+    if (!jobId || (terminal && !previewWaiting)) return undefined;
     let stop = false;
     const tick = async () => {
       if (stop) return;
@@ -469,7 +472,8 @@ export function Shell() {
         const next = await getJob(jobId);
         if (stop) return;
         setJob(next);
-        if (!TERMINAL.includes(next.status)) window.setTimeout(tick, 700);
+        const stillWaiting = next.preview_status === "pending";
+        if (!TERMINAL.includes(next.status) || stillWaiting) window.setTimeout(tick, 700);
         else refreshHistory().catch(() => undefined);
       } catch (error) {
         const text = error instanceof Error ? error.message : "";
@@ -485,7 +489,7 @@ export function Shell() {
       stop = true;
       window.clearTimeout(starter);
     };
-  }, [jobId, jobStatus]);
+  }, [jobId, jobStatus, previewWaiting]);
 
   useEffect(() => {
     if (!job) return;
@@ -537,9 +541,17 @@ export function Shell() {
   }, [clockOn]);
   const currentElapsed = job ? jobElapsed(job, now) : null;
   const totalElapsed = batchElapsed(batch, now);
+  const previewBlocked = job?.preview_status === "pending" || job?.preview_status === "failed";
   const mediaUrl =
-    job == null ? null : source === "output" && job.output_ready ? `/api/jobs/${job.id}/output` : `/api/jobs/${job.id}/media`;
-  const mediaMime = previewMime(source === "output" ? "clean.mp4" : job?.filename || "");
+    job == null
+      ? null
+      : source === "output" && job.output_ready
+        ? `/api/jobs/${job.id}/output`
+        : previewBlocked
+          ? null
+          : `/api/jobs/${job.id}/media`;
+  const mediaMime =
+    source === "output" || job?.preview_status === "ready" ? "video/mp4" : previewMime(job?.filename || "");
   const uploadReady = Boolean(settings?.account_logged_in) && workspace === "detect";
 
   function commitPicked(next: PickedVideo[]) {
@@ -1225,7 +1237,7 @@ export function Shell() {
                     <VideoPane
                       mediaUrl={mediaUrl}
                       mimeType={mediaMime}
-                      emptyText="还没有可预览的视频"
+                      emptyText={previewBlocked && job.preview_hint ? job.preview_hint : "还没有可预览的视频"}
                       onTime={handleTime}
                       onReady={(player) => {
                         seekRef.current = player.seek;
@@ -1235,7 +1247,7 @@ export function Shell() {
                         player.seek(sec, { play: false });
                       }}
                     />
-                    {job.preview_hint ? <div className="hint">{job.preview_hint}</div> : null}
+                    {job.preview_hint && !previewBlocked ? <div className="hint">{job.preview_hint}</div> : null}
                     {editorOn && coversDuration(cuts, job.duration_sec) ? (
                       <Alert
                         style={{ marginTop: 12 }}

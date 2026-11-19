@@ -24,7 +24,7 @@ def has_encoder(name: str) -> bool:
     return name in result.stdout
 
 
-def make_video(path: Path, seconds: float = 2) -> None:
+def make_video(path: Path, seconds: float = 2, profile: str | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     binary = ffmpeg_bin()
     if binary is None:
@@ -47,6 +47,7 @@ def make_video(path: Path, seconds: float = 2) -> None:
             "-shortest",
             "-c:v",
             "libx264",
+            *(["-profile:v", profile] if profile else []),
             "-pix_fmt",
             "yuv420p",
             "-c:a",

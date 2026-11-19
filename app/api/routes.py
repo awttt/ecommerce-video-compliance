@@ -437,13 +437,17 @@ async def delete_job(job_id: str) -> dict:
 @router.get("/jobs/{job_id}/media", dependencies=[Depends(require_login)])
 async def job_media(job_id: str) -> FileResponse:
     state = await _state(job_id)
-    path = Path(state.source_path)
+    try:
+        path = get_manager().media_source(state)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="预览还没准备好") from exc
     if not path.is_file():
         raise HTTPException(status_code=404, detail="视频文件不存在")
+    media_type = "video/mp4" if path.name == "preview.mp4" else _media_type(path)
     return FileResponse(
         path,
-        media_type=_media_type(path),
-        filename=state.filename,
+        media_type=media_type,
+        filename=state.filename if path.name != "preview.mp4" else path.name,
         content_disposition_type="inline",
     )
 

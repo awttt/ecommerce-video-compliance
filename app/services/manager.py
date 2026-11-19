@@ -17,6 +17,7 @@ from pathlib import Path
 
 from app.core.aggregate import aggregate, refold_findings
 from app.core.deepseek import build_recognizer
+from app.core.model_route import ModelRoute, initial_route_fields, public_stats
 from app.core.relay import (
     CHAT_BASE,
     KEY_NAME,
@@ -32,7 +33,7 @@ from app.core.relay import (
 )
 from app.logging_setup import redact
 from app.core.editor import cuttable_findings, detect_silences, draft_cuts, normalize_cuts, render_clean_video
-from app.core.ffmpeg import FFmpegError, extract_strip, probe_video
+from app.core.ffmpeg import FFmpegError, extract_strip, probe_video, transcode_preview, window_can_play
 from app.core.pipeline import JobCancelled, Progress, drop_retried_reviews, run_pipeline, run_selected_frames
 from app.core.speech import NoAudio, SpeechProgress, judge_transcript, run_speech
 from app.core.transcript import dump_sentences, load_sentences
@@ -76,10 +77,10 @@ from app.schemas import (
 log = logging.getLogger(__name__)
 
 TERMINAL = {"done", "failed", "cancelled"}
-_PREVIEWABLE = {".mp4", ".webm", ".m4v"}
 _MAX_QUEUE = 20
 _RELAY_RETRY_STATUSES = {408, 429, 500, 502, 503, 504}
 _strip_locks: dict[str, asyncio.Lock] = {}
+_preview_locks: dict[str, asyncio.Lock] = {}
 
 
 def _relay_credential_retryable(exc: RelayError) -> bool:
@@ -145,10 +146,18 @@ def _email_ok(value: str) -> str:
     return cleaned
 
 
-def _preview_hint(path: str) -> str:
-    if Path(path).suffix.lower() in _PREVIEWABLE:
-        return ""
-    return "该封装可能无法在窗口内直接预览，识别结果仍然可用。建议使用 H.264 MP4。"
+def preview_file(job_id: str) -> Path:
+    return video_dir(job_id) / "preview.mp4"
+
+
+def _preview_hint(status: str) -> str:
+    if status == "pending":
+        return "原片窗口播不了，正在生成预览。识别仍用原片。"
+    if status == "ready":
+        return "窗口播放的是预览副本，识别仍用原片。"
+    if status == "failed":
+        return "原片窗口播不了，预览没有生成。识别仍用原片。"
+    return ""
 
 
 def _load_edit_plan(raw) -> dict | None:
@@ -243,6 +252,10 @@ class JobState:
     speech_judge: str = ""
     hold_failed_indexes: bool = False
     queue_at: str = ""
+    preview_status: str = ""
+    preview_cancel: asyncio.Event = field(default_factory=asyncio.Event)
+    preview_task: asyncio.Task | None = None
+    preview_proc: asyncio.subprocess.Process | None = None
 
     def touch(self) -> None:
         self.updated_at = utcnow()
@@ -286,6 +299,10 @@ class JobState:
 
     def to_public(self, include_findings: bool = True) -> JobPublic:
         output_ready = bool(self.output_path and Path(self.output_path).is_file())
+        preview_status = self.preview_status
+        preview_path = preview_file(self.id)
+        if preview_status != "direct" and preview_path.is_file() and preview_path.stat().st_size > 0:
+            preview_status = "ready"
         return JobPublic(
             id=self.id,
             filename=self.filename,
@@ -308,7 +325,8 @@ class JobState:
             speech_retry=speech_retry_kind(self),
             mock=bool(self.options.get("mock")),
             output_ready=output_ready,
-            preview_hint=_preview_hint(self.source_path),
+            preview_status=preview_status,
+            preview_hint=_preview_hint(preview_status),
             cuts=[CutSpan(start_sec=item["start_sec"], end_sec=item["end_sec"]) for item in _plan_cuts(self.edit_plan)],
             edit_rendered=_plan_rendered(self.edit_plan),
             has_edit_plan=self.edit_plan is not None,
@@ -320,6 +338,7 @@ class JobState:
             hold_sec=self.hold_sec,
             paused_at=self.paused_at,
             findings=list(self.findings) if include_findings else [],
+            model_stats=public_stats(self.options.get("model_stats")),
         )
 
 
@@ -358,6 +377,13 @@ def _retry_part(raw) -> str:
 
 def _load_transcript(raw) -> list[dict]:
     return dump_sentences(load_sentences(raw))
+
+
+def _clear_speech_assignments(options: dict) -> None:
+    """重新转写后的口播批次是新内容。清掉旧序号，避免沿用上一份转写的模型。"""
+    assignments = options.get("model_assignments")
+    if isinstance(assignments, dict) and isinstance(assignments.get("speech"), dict):
+        assignments["speech"] = {}
 
 
 def speech_retry_kind(state: JobState) -> str:
@@ -489,7 +515,7 @@ def _fold_pause(state: JobState, at: str, *, terminal: bool = False) -> None:
 
 
 def _apply_refold(state: JobState) -> None:
-    folded = refold_findings(state.findings)
+    folded = refold_findings(state.findings, state.fps)
     state.findings = folded
     if folded:
         state.hit_count = len(folded)
@@ -538,8 +564,18 @@ class JobManager:
 
     async def shutdown(self) -> None:
         self._stopping = True
+        previews: list[asyncio.Task] = []
         for state in self._jobs.values():
             state.cancel_event.set()
+            state.preview_cancel.set()
+            proc = state.preview_proc
+            if proc is not None and proc.returncode is None:
+                proc.kill()
+            if state.preview_task is not None and not state.preview_task.done():
+                state.preview_task.cancel()
+                previews.append(state.preview_task)
+        if previews:
+            await asyncio.gather(*previews, return_exceptions=True)
         tasks = list(self._tasks.values())
         for task in tasks:
             task.cancel()
@@ -723,6 +759,7 @@ class JobManager:
             "max_width": int(self._settings["max_width"]),
             "jpeg_q": int(self._settings["jpeg_q"]),
             "model": str(self._settings["model"]),
+            **initial_route_fields(str(self._settings["model"])),
             "detail": str(self._settings["detail"]),
             "thinking": bool(self._settings["thinking"]),
             "motion_enabled": bool(self._settings.get("motion_enabled", False)),
@@ -772,9 +809,101 @@ class JobManager:
             inline = os.environ.get("EVC_INLINE_JOBS") == "1"
             if not inline:
                 self._kick_locked()
+        await self.ensure_preview(state)
         if inline:
             await self.run(state.id)
         return state
+
+    async def ensure_preview(self, state: JobState) -> None:
+        """窗口播不了的原片转一份 H.264 预览。已经知道结果就直接返回。"""
+        if self._stopping or state.preview_status in {"direct", "ready", "pending", "failed"}:
+            return
+        preview = preview_file(state.id)
+        if preview.is_file() and preview.stat().st_size > 0:
+            state.preview_status = "ready"
+            return
+        lock = _preview_locks.setdefault(state.id, asyncio.Lock())
+        async with lock:
+            if state.preview_status in {"direct", "ready", "pending", "failed"}:
+                return
+            if preview.is_file() and preview.stat().st_size > 0:
+                state.preview_status = "ready"
+                return
+            source = Path(state.source_path)
+            if not source.is_file():
+                state.preview_status = "failed"
+                return
+            try:
+                probe = await probe_video(source)
+            except (FFmpegError, OSError):
+                log.warning("preview probe failed for %s", state.id)
+                state.preview_status = "failed"
+                return
+            if window_can_play(source, probe):
+                state.preview_status = "direct"
+                return
+            if state.preview_cancel.is_set():
+                state.preview_status = "failed"
+                return
+            state.preview_status = "pending"
+            state.preview_task = asyncio.create_task(
+                self._transcode_preview(state, probe.has_audio),
+                name=f"preview-{state.id}",
+            )
+            self._publish(state)
+
+    async def _transcode_preview(self, state: JobState, has_audio: bool) -> None:
+        dest = preview_file(state.id)
+        partial = dest.with_name(dest.stem + ".part.mp4")
+        try:
+            def on_process(proc: asyncio.subprocess.Process) -> None:
+                state.preview_proc = proc
+                if state.preview_cancel.is_set() and proc.returncode is None:
+                    proc.kill()
+
+            await transcode_preview(
+                Path(state.source_path),
+                dest,
+                has_audio=has_audio,
+                cancel=state.preview_cancel,
+                on_process=on_process,
+            )
+            state.preview_status = "ready"
+        except asyncio.CancelledError:
+            proc = state.preview_proc
+            if proc is not None and proc.returncode is None:
+                proc.kill()
+            partial.unlink(missing_ok=True)
+            raise
+        except (FFmpegError, OSError) as exc:
+            partial.unlink(missing_ok=True)
+            if not state.preview_cancel.is_set():
+                log.warning("preview transcode failed for %s: %s", state.id, exc)
+            state.preview_status = "failed"
+        finally:
+            state.preview_proc = None
+            self._publish(state)
+
+    async def _stop_preview(self, state: JobState) -> None:
+        state.preview_cancel.set()
+        proc = state.preview_proc
+        if proc is not None and proc.returncode is None:
+            proc.kill()
+        task = state.preview_task
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        _preview_locks.pop(state.id, None)
+
+    def media_source(self, state: JobState) -> Path:
+        """直接能播的返回原片，转好的返回预览副本。还在转或转失败时不把原片交给窗口。"""
+        source = Path(state.source_path)
+        preview = preview_file(state.id)
+        if state.preview_status != "direct" and preview.is_file() and preview.stat().st_size > 0:
+            return preview
+        if state.preview_status in {"", "direct"}:
+            return source
+        raise FileNotFoundError("预览还没准备好")
 
     async def retry_failed_frames(self, job_id: str) -> JobState:
         state = await self.get(job_id)
@@ -1065,14 +1194,23 @@ class JobManager:
         self._publish(state)
         holder: dict = {"proc": None, "audio_proc": None, "recognizer": None, "asr": None}
         state.holder = holder
+        if part == "transcribe":
+            _clear_speech_assignments(state.options)
         config = self._config_for(state)
+        route = ModelRoute.bind(
+            state.options,
+            selected_model=config.model,
+            allow_new_flash=not (part == "frames" and bool(selective)),
+            flush=lambda: self._flush_route(state),
+        )
+        await self._flush_route(state)
         try:
-            recognizer = build_recognizer(config)
+            recognizer = build_recognizer(config, route)
             holder["recognizer"] = recognizer
 
             async def on_progress(progress: Progress) -> None:
                 if selective:
-                    progress.findings = refold_findings([*kept_visual, *progress.findings])
+                    progress.findings = refold_findings([*kept_visual, *progress.findings], config.fps)
                 await self._on_visual(state, progress)
 
             async def on_speech(progress: SpeechProgress) -> None:
@@ -1130,7 +1268,7 @@ class JobManager:
                     try:
                         if selective:
                             findings, still_failed, frame_error = await visual_task
-                            findings = refold_findings([*kept_visual, *findings])
+                            findings = refold_findings([*kept_visual, *findings], config.fps)
                         else:
                             findings = await visual_task
                     except BaseException:
@@ -1485,6 +1623,16 @@ class JobManager:
         else:
             state.progress = min(99.0, visual_ratio * 100)
 
+    async def _flush_route(self, state: JobState) -> None:
+        """闪帧和口播的新分配在发出请求前落盘，重启后仍用原来的模型。"""
+        async with state.progress_lock:
+            try:
+                await self.db.upsert_job(state.to_row())
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("save model route failed")
+
     async def _maybe_save(self, state: JobState) -> None:
         now = time.monotonic()
         if now - state.last_save < 0.8:
@@ -1507,6 +1655,7 @@ class JobManager:
         cached = self._jobs.get(job_id)
         if cached is not None:
             _apply_refold(cached)
+            await self.ensure_preview(cached)
             return cached
         row = await self.db.get_job(job_id)
         if row is None:
@@ -1514,6 +1663,7 @@ class JobManager:
         state = _state_from_row(row, await self.db.get_findings(job_id))
         self._jobs[job_id] = state
         _apply_refold(state)
+        await self.ensure_preview(state)
         return state
 
     async def list_jobs(self) -> list[JobPublic]:
@@ -1522,7 +1672,7 @@ class JobManager:
         for row in rows:
             state = self._jobs.get(row["id"])
             if state is None:
-                findings = refold_findings(await self.db.get_findings(row["id"]))
+                findings = refold_findings(await self.db.get_findings(row["id"]), row["fps"])
                 state = _state_from_row(row, [])
                 if findings:
                     state.hit_count = len(findings)
@@ -1588,6 +1738,7 @@ class JobManager:
                     await asyncio.wait_for(task, timeout=8)
                 except Exception:
                     task.cancel()
+        await self._stop_preview(state)
         await self.db.delete_job(job_id)
         self._jobs.pop(job_id, None)
         self._tasks.pop(job_id, None)

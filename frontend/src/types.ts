@@ -40,6 +40,7 @@ export interface Job {
   speech_retry: "" | "transcribe" | "judge";
   mock: boolean;
   output_ready: boolean;
+  preview_status: string;
   preview_hint: string;
   cuts: CutSpan[];
   edit_rendered: boolean;

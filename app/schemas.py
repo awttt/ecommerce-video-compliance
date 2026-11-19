@@ -203,6 +203,17 @@ class CutSpan(BaseModel):
     end_sec: float = Field(ge=0)
 
 
+class ModelStat(BaseModel):
+    """本机请求计数。logical 按逻辑单元去重；timeout 含在 failed 里。"""
+
+    logical: int = 0
+    runs: int = 0
+    http_attempts: int = 0
+    ok: int = 0
+    failed: int = 0
+    timeout: int = 0
+
+
 class JobPublic(BaseModel):
     id: str
     filename: str
@@ -225,6 +236,7 @@ class JobPublic(BaseModel):
     speech_retry: Literal["", "transcribe", "judge"] = ""
     mock: bool = False
     output_ready: bool = False
+    preview_status: str = ""
     preview_hint: str = ""
     cuts: list[CutSpan] = Field(default_factory=list)
     edit_rendered: bool = False
@@ -237,6 +249,7 @@ class JobPublic(BaseModel):
     hold_sec: float = 0
     paused_at: str | None = None
     findings: list[Finding] = Field(default_factory=list)
+    model_stats: dict[str, ModelStat] = Field(default_factory=dict)
 
 
 class SettingUpdate(BaseModel):
