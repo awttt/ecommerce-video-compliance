@@ -214,7 +214,36 @@ powershell -ExecutionPolicy Bypass -File scripts\build_installer.ps1
 
 版本号取自 `app/__init__.py` 的 `__version__`，发新版本前先改这里。没有代码签名证书时，用户首次运行安装包会看到 SmartScreen 提示，点「更多信息 → 仍要运行」可以继续。
 
-GitHub Actions 的 `Windows package` 工作流会顺带编译安装包，并静默安装一次做冒烟检查，产物名为 `VideoCompliance-windows-setup`。
+GitHub Actions 的 `Windows package` 工作流会编译安装包，静默安装一次做冒烟检查，并把产物留成 `VideoCompliance-windows-setup`。推送到 `main` 只做到这里。
+
+### 发布
+
+1. 把 `app/__init__.py` 的 `__version__` 改成新版本。格式是 `X.Y.Z`，三段整数，不能有前导零。同一个版本号不能再用：下载站前面有 Cloudflare 缓存，同名文件不会换成新的安装包。
+2. 在改过版本号的那个提交上打标签并推送。标签必须是 `v` 加上 `__version__`：
+
+```bash
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
+
+推送 `v*` 标签后，工作流在安装包编译并通过冒烟检查之后，把安装包上传到 https://token4u.cc/download ，核对 sha256 成功后再发布 GitHub Release（附带安装包，以及 `sha256sum` 生成的 `.sha256`）。标签和 `__version__` 不一致时，工作流会失败并写明期望的标签。
+
+在该标签上手动运行也可以，需要勾选 **release**：
+
+```bash
+gh workflow run "Windows package" --ref vX.Y.Z -f release=true
+```
+
+不勾选 **release** 时只打包。推送到 `main` 不会发布，也不会上传到下载站。
+
+下载站上传读取四个 Actions secrets（Settings → Secrets and variables → Actions）。私钥不要加口令。`DEPLOY_KNOWN_HOSTS` 用 `ssh-keyscan <主机>` 得到的一行即可，主机名要和 `DEPLOY_SSH_HOST` 一致。缺任何一个时，这次上传会跳过并留下说明，GitHub Release 照常发布：
+
+- `DEPLOY_SSH_HOST`：SSH 主机名或 IP
+- `DEPLOY_SSH_USER`：SSH 用户
+- `DEPLOY_SSH_KEY`：私钥全文（多行）
+- `DEPLOY_KNOWN_HOSTS`：这一台主机的一行 `known_hosts`
+
+上传后工作流会核对 `https://token4u.cc/download/VideoCompliance-X.Y.Z-Setup.exe.sha256`，大约等五分钟。和本地 sha256 不一致则失败。
 
 ## macOS 打包
 
