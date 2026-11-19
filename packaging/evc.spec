@@ -8,7 +8,7 @@ macOS 得到 dist/VideoCompliance.app。需要在对应系统上打包，不能�
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules, collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 ROOT = Path(SPECPATH).resolve().parent
 
@@ -95,18 +95,8 @@ a = Analysis(
     noarchive=False,
 )
 
-# 收集 OpenCV 和 NumPy 的动态库（Windows 需要 .pyd 和 .dll 文件）
-try:
-    cv2_binaries = collect_dynamic_libs("cv2")
-    a.binaries += cv2_binaries
-except Exception as e:
-    print(f"警告：无法收集 cv2 动态库：{e}")
-
-try:
-    numpy_binaries = collect_dynamic_libs("numpy")
-    a.binaries += numpy_binaries
-except Exception as e:
-    print(f"警告：无法收集 numpy 动态库：{e}")
+# 动态库由 packaging/hooks 收集。collect_dynamic_libs 返回 (源文件, 目标目录) 二元组，
+# 只能交给 hook 的 binaries。直接拼进 a.binaries 会在 COLLECT 时按三元组拆开而失败。
 pyz = PYZ(a.pure)
 exe = EXE(
     pyz,

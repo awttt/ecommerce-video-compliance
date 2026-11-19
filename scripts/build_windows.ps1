@@ -26,6 +26,9 @@ npm run build
 Pop-Location
 
 & $Python -m PyInstaller --noconfirm --clean packaging\evc.spec
+if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller 失败，退出码 $LASTEXITCODE"
+}
 
 Write-Host ""
 Write-Host "打包完成：dist\VideoCompliance\VideoCompliance.exe"
