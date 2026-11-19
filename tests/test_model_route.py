@@ -16,7 +16,7 @@ from app.core.model_route import (
     split_percent,
     uses_luna,
 )
-from app.core.relay import DEEPSEEK_FLASH_MODEL, PICTURE_MODEL, QWEN_FLASH_MODEL
+from app.core.relay import CHAT_BASE, DEEPSEEK_FLASH_MODEL, PICTURE_MODEL, QWEN_FLASH_MODEL
 from app.core.transcript import SpeechSentence
 from app.db import Database
 from app.factory import create_app
@@ -226,6 +226,71 @@ async def test_job_snapshot_does_not_follow_later_settings(tmp_path):
         assert state.to_public().model_stats == {}
     finally:
         await manager.shutdown()
+
+
+async def test_glm_and_luna_share_the_account_key_and_token4u_url(tmp_path, no_sleep):
+    same_key = "sk-same-group-test-key"
+    manager = get_manager()
+    await manager.init()
+    try:
+        manager._settings["relay_email"] = "user@example.com"
+        manager._settings["relay_access_token"] = "access-token-for-tests"
+        manager._settings["relay_api_key"] = same_key
+        manager._settings["model"] = PICTURE_MODEL
+        manager._settings["motion_enabled"] = False
+        manager._settings["timeout_sec"] = 120
+        await manager.pause_queue()
+        video = tmp_path / "clip.mp4"
+        video.write_bytes(b"not-a-video")
+        state = await manager.create_job(video, "clip.mp4")
+        manager._settings["model"] = QWEN_FLASH_MODEL
+        manager._settings["motion_enabled"] = True
+        assert state.options["model"] == PICTURE_MODEL
+        assert state.options["motion_enabled"] is False
+        assert state.options["luna_request_percent"] == 50
+        state.options["base_url"] = "https://example.invalid"
+        config = manager._config_for(state)
+        assert config.base_url == CHAT_BASE == "https://token4u.cc/v1"
+        assert config.api_key == same_key
+        assert config.model == PICTURE_MODEL
+        assert config.motion_enabled is False
+    finally:
+        await manager.shutdown()
+
+    image = tmp_path / "frame.jpg"
+    image.write_bytes(b"\xff\xd8frame")
+    seen: list[httpx.Request] = []
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _response('{"items":[]}')
+
+    route = ModelRoute.bind(dict(state.options), selected_model=PICTURE_MODEL)
+    recognizer = DeepSeekRecognizer(
+        RunConfig(
+            api_key=config.api_key,
+            model=config.model,
+            timeout_sec=120,
+            base_url=config.base_url,
+            motion_enabled=False,
+        ),
+        transport=httpx.MockTransport(transport),
+        route=route,
+    )
+    async with recognizer:
+        await recognizer.recognize(Frame(index=1, start_sec=0, end_sec=1, path=str(image)))
+        await recognizer.recognize(Frame(index=2, start_sec=1, end_sec=2, path=str(image)))
+        await recognizer.recognize(Frame(index=2, start_sec=1, end_sec=2, path=str(image)))
+        await recognizer.judge_speech([SpeechSentence(f"第{index}句", index, index + 0.2) for index in range(9)])
+    urls = [str(item.url) for item in seen]
+    auths = [item.headers["authorization"] for item in seen]
+    models = [json.loads(item.content)["model"] for item in seen]
+    assert urls == ["https://token4u.cc/v1/chat/completions"] * 5
+    assert auths == [f"Bearer {same_key}"] * 5
+    assert models == [PICTURE_MODEL, LUNA_MODEL, LUNA_MODEL, PICTURE_MODEL, LUNA_MODEL]
+    assert route.stats[PICTURE_MODEL]["logical"] == 2
+    assert route.stats[LUNA_MODEL]["logical"] == 2
+    assert "kuaipao.ai" not in "".join(urls)
 
 
 async def _run_frames(tmp_path, *, model: str, percent: int, handler, thinking: bool = False):
