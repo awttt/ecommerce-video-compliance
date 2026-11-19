@@ -515,7 +515,7 @@ def _fold_pause(state: JobState, at: str, *, terminal: bool = False) -> None:
 
 
 def _apply_refold(state: JobState) -> None:
-    folded = refold_findings(state.findings)
+    folded = refold_findings(state.findings, state.fps)
     state.findings = folded
     if folded:
         state.hit_count = len(folded)
@@ -1210,7 +1210,7 @@ class JobManager:
 
             async def on_progress(progress: Progress) -> None:
                 if selective:
-                    progress.findings = refold_findings([*kept_visual, *progress.findings])
+                    progress.findings = refold_findings([*kept_visual, *progress.findings], config.fps)
                 await self._on_visual(state, progress)
 
             async def on_speech(progress: SpeechProgress) -> None:
@@ -1268,7 +1268,7 @@ class JobManager:
                     try:
                         if selective:
                             findings, still_failed, frame_error = await visual_task
-                            findings = refold_findings([*kept_visual, *findings])
+                            findings = refold_findings([*kept_visual, *findings], config.fps)
                         else:
                             findings = await visual_task
                     except BaseException:
@@ -1672,7 +1672,7 @@ class JobManager:
         for row in rows:
             state = self._jobs.get(row["id"])
             if state is None:
-                findings = refold_findings(await self.db.get_findings(row["id"]))
+                findings = refold_findings(await self.db.get_findings(row["id"]), row["fps"])
                 state = _state_from_row(row, [])
                 if findings:
                     state.hit_count = len(findings)

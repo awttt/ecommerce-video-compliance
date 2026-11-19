@@ -175,6 +175,7 @@ class VideoProbe:
         fps: float = 0,
         codec: str = "",
         pix_fmt: str = "",
+        profile: str = "",
     ):
         self.duration = duration
         self.has_video = has_video
@@ -184,6 +185,7 @@ class VideoProbe:
         self.fps = fps
         self.codec = codec
         self.pix_fmt = pix_fmt
+        self.profile = profile
 
 
 def _parse_rate(value: object) -> float:
@@ -255,7 +257,8 @@ async def probe_video(path: Path) -> VideoProbe:
                 fps = count / duration
     codec = str(video.get("codec_name") or "") if video else ""
     pix_fmt = str(video.get("pix_fmt") or "") if video else ""
-    return VideoProbe(duration, video is not None, audio, width, height, fps, codec, pix_fmt)
+    profile = str(video.get("profile") or "") if video else ""
+    return VideoProbe(duration, video is not None, audio, width, height, fps, codec, pix_fmt, profile)
 
 
 # 窗口只稳定画出这几种。其余的 MP4 往往有声音、画面是黑的。
@@ -263,12 +266,29 @@ _PREVIEW_EDGE = 1280
 
 
 def window_can_play(path: Path, probe: VideoProbe) -> bool:
-    """WebView2 能直接画出来的画面。MP4 外壳不够，还要看编码和像素格式。"""
+    """WebView2 能直接画出来的画面。MP4 外壳不够，还要看编码和像素格式。
+
+    WebView2（Chromium）对 H.264 的支持:
+    - Baseline/Constrained Baseline Profile: 最佳兼容性
+    - Main/High Profile: 可能出现黑屏（特别是没有硬件加速时）
+
+    为确保所有用户都能正常播放，只允许 Baseline Profile 直接播放，
+    其他 Profile 统一转码。
+    """
     suffix = path.suffix.lower()
     codec = probe.codec.lower()
     pix = probe.pix_fmt.lower()
+    profile = probe.profile.lower()
+
+    # 只允许 MP4/M4V + H.264 Baseline Profile + yuv420p 直接播放
     if suffix in {".mp4", ".m4v"} and codec == "h264" and pix in {"yuv420p", "yuvj420p"}:
-        return True
+        # 检查 profile：只有 Baseline 或 Constrained Baseline 才能直接播放
+        if "baseline" in profile or "constrained" in profile:
+            return True
+        # Main, High, High 10 等其他 Profile 需要转码
+        return False
+
+    # WebM (VP8/VP9) 通常没问题
     return suffix == ".webm" and codec in {"vp8", "vp9"}
 
 
@@ -320,6 +340,10 @@ async def _transcode_preview(
         scale,
         "-c:v",
         "libx264",
+        "-profile:v",
+        "baseline",  # 使用 Baseline Profile 确保 WebView2 兼容性
+        "-level",
+        "3.0",       # Level 3.0 适合大多数设备
         "-preset",
         "veryfast",
         "-crf",
@@ -327,7 +351,7 @@ async def _transcode_preview(
         "-pix_fmt",
         "yuv420p",
         "-movflags",
-        "+faststart",
+        "+faststart",  # 将 moov atom 移到文件开头，支持流式播放
     ]
     if has_audio:
         cmd.extend(["-c:a", "aac", "-b:a", "128k"])

@@ -48,6 +48,17 @@ def _scan(marked_at: int | None = None, cut_at: int | None = None) -> list[tuple
     return [(item.index, item.score) for item in scanner.finish()]
 
 
+def test_strokes_held_for_four_frames_on_a_moving_texture_are_found():
+    # 底照常平移，字停在原处四帧。中间几帧彼此都带着字，一帧的比较会互相抵消。
+    scanner = MotionScanner(_WIDTH, _HEIGHT)
+    for index in range(20):
+        scanner.push(_texture(index * 12, marks=10 <= index <= 13))
+    held = [item for item in scanner.finish() if item.length > 1]
+    assert [(item.index, item.length) for item in held] == [(10, 4)]
+    assert held[0].source_index == 11
+    assert 40 <= held[0].x <= 110 and 70 <= held[0].y <= 100
+
+
 def test_one_frame_strokes_on_a_moving_texture_are_found():
     found = _scan(marked_at=10)
     assert [index for index, _score in found] == [10]

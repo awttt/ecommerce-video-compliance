@@ -63,6 +63,16 @@ def test_motion_spans_are_kept_ahead_of_brightness_spans():
     assert [item.source_index for item in merged] == [18, 30, 106]
 
 
+def test_merge_fills_with_the_strongest_brightness_hits_not_the_earliest():
+    from app.core.flash import FlashSpan, merge_flash_spans
+
+    motion = [FlashSpan(1.0, 1.033, 30, 80)]
+    bright = [FlashSpan(0.5, 0.533, 15, 30), FlashSpan(2.0, 2.033, 60, 40), FlashSpan(9.0, 9.033, 270, 200)]
+    merged = merge_flash_spans(motion, bright, limit=3)
+    # 片尾那处最明显，名额不够时丢的应是最弱的一处，不是片尾。输出仍按时间排。
+    assert [item.source_index for item in merged] == [30, 60, 270]
+
+
 def test_one_frame_overlay_is_found_when_the_rest_of_the_picture_stays():
     frames = [_means(30)] * 10
     frames[5] = _means(220)

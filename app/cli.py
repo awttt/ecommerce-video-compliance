@@ -15,12 +15,30 @@ from app.services.manager import AuthRequired, get_manager
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="检测一个本地视频里的价格、规格、品牌和口播夸大宣传")
-    parser.add_argument("video", type=Path, help="视频文件路径")
-    parser.add_argument("--fps", type=float, default=None, help="抽帧 FPS，0.5 到 2")
-    parser.add_argument("--concurrency", type=int, default=None, help=f"同时请求模型的数量，1 到 {MAX_CONCURRENCY}")
-    parser.add_argument("--mock", action="store_true", help="不调用模型，返回固定样例命中")
-    parser.add_argument("--no-asr", action="store_true", help="关闭这一次的口播检测")
-    parser.add_argument("--json", dest="json_path", type=Path, default=None, help="把结果写入这个 JSON 文件")
+
+    subparsers = parser.add_subparsers(dest="command", help="子命令")
+
+    # scan 命令
+    scan_parser = subparsers.add_parser("scan", help="扫描视频")
+    scan_parser.add_argument("video", type=Path, help="视频文件路径")
+    scan_parser.add_argument("--fps", type=float, default=None, help="抽帧 FPS，0.5 到 2")
+    scan_parser.add_argument("--concurrency", type=int, default=None, help=f"同时请求模型的数量，1 到 {MAX_CONCURRENCY}")
+    scan_parser.add_argument("--mock", action="store_true", help="不调用模型，返回固定样例命中")
+    scan_parser.add_argument("--no-asr", action="store_true", help="关闭这一次的口播检测")
+    scan_parser.add_argument("--json", dest="json_path", type=Path, default=None, help="把结果写入这个 JSON 文件")
+
+    # diagnose 命令
+    diagnose_parser = subparsers.add_parser("diagnose", help="诊断闪帧检测环境和视频")
+    diagnose_parser.add_argument("video", type=Path, nargs="?", default=None, help="可选：要诊断的视频文件路径")
+
+    # 兼容旧的用法：直接传视频路径
+    parser.add_argument("video", type=Path, nargs="?", help=argparse.SUPPRESS)
+    parser.add_argument("--fps", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--concurrency", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--mock", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--no-asr", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--json", dest="json_path", type=Path, default=None, help=argparse.SUPPRESS)
+
     return parser
 
 
@@ -80,7 +98,25 @@ async def _scan(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    raise SystemExit(asyncio.run(_scan(args)))
+
+    # 处理旧的用法（直接传视频路径）
+    if args.command is None and args.video is not None:
+        args.command = "scan"
+
+    if args.command == "diagnose":
+        from app.core.flash_diagnostics import print_diagnostic_report
+        print_diagnostic_report(args.video)
+        return
+
+    if args.command == "scan" or (args.command is None and args.video):
+        if args.video is None:
+            print("错误：scan 命令需要指定视频文件路径", file=sys.stderr)
+            raise SystemExit(2)
+        raise SystemExit(asyncio.run(_scan(args)))
+
+    # 没有命令或参数，显示帮助
+    build_parser().print_help()
+    raise SystemExit(2)
 
 
 if __name__ == "__main__":

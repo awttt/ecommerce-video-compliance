@@ -10,8 +10,12 @@ from app.schemas import MANUAL_REVIEW_NOTE, Finding, RawHit, is_manual_review
 
 # 口播只吸收时间戳的浮点误差。
 MERGE_EPSILON = 0.08
-# 画面抽帧最慢 0.5 FPS，空了大约一帧仍视为同一处文字还在。再久就断开。
+# 画面空了一帧仍视为同一处文字还在，再久就断开。知道抽帧 FPS 时按一帧的长度算，
+# 不知道时按最慢的 0.5 FPS 算。1 FPS 也按 2 秒的话，中间连着两帧都没有这段字，
+# 前后两次出现（例如 1.5 秒的闪帧和 3 秒、6 秒的同一价格）会被串成一整段。
 PICTURE_GAP = 2.0
+# 帧起止秒保留三位小数，按一帧算间隔时留出这点舍入。
+_FRAME_SLACK = 0.01
 _CATEGORY_ORDER = {"价格": 0, "规格": 1, "品牌": 2}
 _PRICE_HEAD = re.compile(r"^(?P<mark>[¥￥$])?(?P<number>\d+(?:\.\d+)?)(?P<unit>元|块钱|块)?")
 _COLON_DECIMAL = re.compile(r"\d[:：]\d")
@@ -46,13 +50,16 @@ def _group_key(hit: RawHit) -> tuple[str, str, str]:
     return hit.category, text_key, source
 
 
-def _gap_limit(source: str) -> float:
-    if source == "画面":
+def _gap_limit(source: str, sample_fps: float | None) -> float:
+    if source != "画面":
+        return MERGE_EPSILON
+    if sample_fps is None or sample_fps <= 0:
         return PICTURE_GAP
-    return MERGE_EPSILON
+    return min(PICTURE_GAP, 1.0 / sample_fps + _FRAME_SLACK)
 
 
-def aggregate(hits: list[RawHit]) -> list[Finding]:
+def aggregate(hits: list[RawHit], sample_fps: float | None = None) -> list[Finding]:
+    """sample_fps 是普通抽帧的 FPS，决定画面上空几秒还算同一处文字。"""
     groups: dict[tuple[str, str, str], list[RawHit]] = {}
     for hit in hits:
         groups.setdefault(_group_key(hit), []).append(hit)
@@ -60,7 +67,7 @@ def aggregate(hits: list[RawHit]) -> list[Finding]:
     findings: list[Finding] = []
     for grouped in groups.values():
         grouped.sort(key=lambda item: (item.start_sec, item.end_sec))
-        limit = _gap_limit(grouped[0].source or "画面")
+        limit = _gap_limit(grouped[0].source or "画面", sample_fps)
         current = [grouped[0]]
         for hit in grouped[1:]:
             if hit.start_sec <= current[-1].end_sec + limit:
@@ -76,8 +83,11 @@ def aggregate(hits: list[RawHit]) -> list[Finding]:
     return findings
 
 
-def refold_findings(findings: list[Finding]) -> list[Finding]:
-    """已保存的旧结果再收一次。已经收干净的列表再收一次，内容不变。"""
+def refold_findings(findings: list[Finding], sample_fps: float | None = None) -> list[Finding]:
+    """已保存的旧结果再收一次。已经收干净的列表再收一次，内容不变。
+
+    以前按 2 秒串起来的段，这里不会拆开；只是不再把新的段串得那么宽。
+    """
     if len(findings) < 2:
         return list(findings)
     hits = [
@@ -97,7 +107,7 @@ def refold_findings(findings: list[Finding]) -> list[Finding]:
         )
         for item in findings
     ]
-    return aggregate(hits)
+    return aggregate(hits, sample_fps)
 
 
 def _choose_text(items: list[RawHit]) -> str:

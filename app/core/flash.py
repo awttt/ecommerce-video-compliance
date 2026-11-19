@@ -181,10 +181,14 @@ def merge_flash_spans(
     *,
     limit: int = MAX_FLASHES,
 ) -> list[FlashSpan]:
-    """两路分数不能混在一起排。先留 primary，再用 secondary 补到 limit，按源帧号去重。"""
+    """两路分数不能混在一起排。先留 primary，再用 secondary 补到 limit，按源帧号去重。
+
+    secondary 按它自己的分数从高往低补。按时间补的话，名额不够时丢的总是片尾。
+    """
     chosen: list[FlashSpan] = []
     seen: set[int] = set()
-    for span in list(primary) + list(secondary):
+    fill = sorted(secondary, key=lambda item: item.score, reverse=True)
+    for span in list(primary) + fill:
         if span.source_index in seen:
             continue
         chosen.append(span)

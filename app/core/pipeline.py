@@ -190,7 +190,7 @@ async def _run(
                 frames_extracted=extracted,
                 frames_recognized=recognized,
                 failed_frames=failed,
-                findings=aggregate(snapshot),
+                findings=aggregate(snapshot, config.fps),
                 last_error=last_error,
                 failed_indexes=list(failed_indexes),
             )
@@ -391,7 +391,7 @@ async def _run(
         detail = last_error or "没有成功的识别结果"
         raise RuntimeError(f"全部分帧识别失败（{failed} 帧）。{detail}")
 
-    findings = aggregate(raw)
+    findings = aggregate(raw, config.fps)
     message = f"正在汇总时间区间，当前 {len(findings)} 条"
     await publish("aggregating", message)
     return findings
@@ -472,7 +472,7 @@ async def _run_selected(
                 frames_extracted=extracted,
                 frames_recognized=recognized,
                 failed_frames=failed,
-                findings=aggregate(list(raw)),
+                findings=aggregate(list(raw), config.fps),
                 last_error=last_error,
                 failed_indexes=list(failed_indexes),
             )
@@ -618,6 +618,6 @@ async def _run_selected(
 
     if cancel.is_set():
         raise JobCancelled()
-    findings = aggregate(raw)
+    findings = aggregate(raw, config.fps)
     await publish("aggregating", f"重试结束，新命中 {len(findings)} 条")
     return findings, list(failed_indexes), last_error

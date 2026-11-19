@@ -4,7 +4,7 @@ import json
 import httpx
 import pytest
 
-from app.core.aggregate import aggregate
+from app.core.aggregate import aggregate, refold_findings
 from app.core.deepseek import (
     DeepSeekRecognizer,
     SpeechJudgeError,
@@ -253,6 +253,32 @@ def test_aggregate_joins_one_missed_frame_and_keeps_a_later_flash():
 
     findings = aggregate([hit(0, 1), hit(2, 3), hit(12, 13)])
     assert [(item.start_sec, item.end_sec) for item in findings] == [(0, 3), (12, 13)]
+    # 1 FPS 时空一帧就是空一秒，仍然串起来。
+    findings = aggregate([hit(0, 1), hit(2, 3), hit(12, 13)], sample_fps=1)
+    assert [(item.start_sec, item.end_sec) for item in findings] == [(0, 3), (12, 13)]
+
+
+def test_one_fps_keeps_separate_appearances_of_the_same_price_apart():
+    def hit(start: float, end: float) -> RawHit:
+        return RawHit(
+            start_sec=start,
+            end_sec=end,
+            category="价格",
+            text="9.9元",
+            position="画面下方字幕上",
+            confidence="确定",
+            reason="可见价格",
+            source="画面",
+        )
+
+    # 1.47 秒闪一下，3 秒、6 秒抽帧又看到。2 秒和 4、5 秒的抽帧里都没有，是三次出现。
+    hits = [hit(1.467, 1.6), hit(3.0, 4.0), hit(6.0, 7.0)]
+    findings = aggregate(hits, sample_fps=1)
+    assert [(item.start_sec, item.end_sec) for item in findings] == [(1.467, 1.6), (3.0, 4.0), (6.0, 7.0)]
+    assert refold_findings(findings, sample_fps=1) == findings
+    # 0.5 FPS 时两次抽帧本来就隔 2 秒，空一帧仍按同一处算。
+    slow = aggregate([hit(0, 2), hit(4, 6)], sample_fps=0.5)
+    assert [(item.start_sec, item.end_sec) for item in slow] == [(0, 6)]
 
 
 def test_picture_price_fold_does_not_change_speech_wording():

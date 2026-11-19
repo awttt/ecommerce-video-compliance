@@ -15,8 +15,8 @@ from app.services.manager import JobManager, JobState, get_manager, preview_file
 from tests.media import ffmpeg_bin, has_encoder, make_video
 
 
-def _probe(codec: str, pix: str) -> VideoProbe:
-    return VideoProbe(1.0, True, True, 16, 16, 30, codec, pix)
+def _probe(codec: str, pix: str, profile: str = "") -> VideoProbe:
+    return VideoProbe(1.0, True, True, 16, 16, 30, codec, pix, profile)
 
 
 def _job(job_id: str, **overrides) -> JobState:
@@ -56,18 +56,21 @@ def _sign_in() -> None:
     manager._settings["relay_access_token"] = "access-token-for-tests"
 
 
-def test_window_can_play_accepts_only_eight_bit_h264_mp4_and_webm():
-    h264 = _probe("h264", "yuv420p")
+def test_window_can_play_accepts_only_baseline_h264_mp4_and_webm():
+    h264 = _probe("h264", "yuv420p", "Baseline")
     assert window_can_play(Path("a.mp4"), h264)
     assert window_can_play(Path("a.m4v"), h264)
-    assert window_can_play(Path("a.MP4"), _probe("H264", "YUV420P"))
-    assert window_can_play(Path("a.mp4"), _probe("h264", "yuvj420p"))
+    assert window_can_play(Path("a.MP4"), _probe("H264", "YUV420P", "Constrained Baseline"))
+    assert window_can_play(Path("a.mp4"), _probe("h264", "yuvj420p", "Baseline"))
     assert window_can_play(Path("a.webm"), _probe("vp9", "yuv420p"))
     assert window_can_play(Path("a.webm"), _probe("vp8", ""))
+    assert not window_can_play(Path("a.mp4"), _probe("h264", "yuv420p", "High"))
+    assert not window_can_play(Path("a.mp4"), _probe("h264", "yuv420p", "Main"))
+    assert not window_can_play(Path("a.mp4"), _probe("h264", "yuv420p"))
     assert not window_can_play(Path("a.mp4"), _probe("hevc", "yuv420p"))
     assert not window_can_play(Path("a.mp4"), _probe("h265", "yuv420p"))
-    assert not window_can_play(Path("a.mp4"), _probe("h264", "yuv420p10le"))
-    assert not window_can_play(Path("a.mp4"), _probe("h264", "yuv444p"))
+    assert not window_can_play(Path("a.mp4"), _probe("h264", "yuv420p10le", "High 10"))
+    assert not window_can_play(Path("a.mp4"), _probe("h264", "yuv444p", "High 4:4:4"))
     assert not window_can_play(Path("a.mkv"), h264)
     assert not window_can_play(Path("a.mov"), h264)
     assert not window_can_play(Path("a.webm"), _probe("av1", "yuv420p"))
@@ -284,7 +287,7 @@ def _make_mpeg4(path: Path) -> None:
 @pytest.mark.skipif(not ffmpeg_bin() or not has_encoder("libx264"), reason="没有 libx264")
 async def test_h264_mp4_plays_directly_and_is_probed_again_after_restart(tmp_path: Path):
     video = tmp_path / "ok.mp4"
-    make_video(video, 0.4)
+    make_video(video, 0.4, profile="baseline")
     manager = JobManager()
     await manager.init()
     try:
@@ -297,6 +300,7 @@ async def test_h264_mp4_plays_directly_and_is_probed_again_after_restart(tmp_pat
         probed = await probe_video(video)
         assert probed.codec == "h264"
         assert probed.pix_fmt == "yuv420p"
+        assert "baseline" in probed.profile.lower()
     finally:
         await manager.shutdown()
 
@@ -337,6 +341,7 @@ async def test_other_mp4_becomes_an_h264_preview_and_keeps_the_original(tmp_path
         assert original.codec == "mpeg4"
         assert copied.codec == "h264"
         assert copied.pix_fmt == "yuv420p"
+        assert "baseline" in copied.profile.lower()
         assert copied.has_audio is True
         assert max(copied.width, copied.height) <= 1280
         assert state.source_path == str(source)
