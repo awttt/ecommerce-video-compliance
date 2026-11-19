@@ -90,8 +90,8 @@ import { VideoPane, type PlayerControls } from "./VideoPane";
 const { Dragger } = Upload;
 const { Text, Paragraph } = Typography;
 
-const DEFAULT_CONCURRENCY = 4;
-const MAX_CONCURRENCY = 8;
+const DEFAULT_CONCURRENCY = 10;
+const MAX_CONCURRENCY = 20;
 
 function boundedConcurrency(value: number): number {
   if (!Number.isFinite(value)) return DEFAULT_CONCURRENCY;
@@ -259,7 +259,7 @@ export function Shell() {
   const [job, setJob] = useState<Job | null>(null);
   const [retryingId, setRetryingId] = useState("");
   const [fps, setFps] = useState(1);
-  const [concurrency, setConcurrency] = useState(4);
+  const [concurrency, setConcurrency] = useState(DEFAULT_CONCURRENCY);
   const [padding, setPadding] = useState(0.2);
   const [picked, setPicked] = useState<PickedVideo[]>([]);
   const pickedRef = useRef<PickedVideo[]>([]);
@@ -406,6 +406,7 @@ export function Shell() {
       jpeg_q: settings.jpeg_q,
       detail: settings.detail,
       thinking: settings.thinking,
+      motion_enabled: settings.motion_enabled,
       timeout_sec: settings.timeout_sec,
       asr_enabled: settings.asr_enabled,
       model: settings.model,
@@ -1546,6 +1547,14 @@ export function Shell() {
             name="thinking"
             valuePropName="checked"
             extra="三个模型都保持思考开启。关掉时用低强度推理，打开时用高强度。"
+          >
+            <Switch checkedChildren="开" unCheckedChildren="关" />
+          </Form.Item>
+          <Form.Item
+            label="闪帧检测"
+            name="motion_enabled"
+            valuePropName="checked"
+            extra="找出只出现一两帧的后期贴字。镜头不动时比较小块亮度，镜头在动时再对齐前后帧并把那一块放大。关闭后只按原来的抽帧。只影响之后开始的检测，打开会多送一些帧。"
           >
             <Switch checkedChildren="开" unCheckedChildren="关" />
           </Form.Item>

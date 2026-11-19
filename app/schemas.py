@@ -162,8 +162,8 @@ class DetectionRules(BaseModel):
         return self
 
 
-MAX_CONCURRENCY = 8
-DEFAULT_CONCURRENCY = 4
+MAX_CONCURRENCY = 20
+DEFAULT_CONCURRENCY = 10
 
 
 def clamp_concurrency(value: object, default: int = DEFAULT_CONCURRENCY) -> int:
@@ -184,6 +184,7 @@ class RunConfig(BaseModel):
     model: str = "glm-5.3-flash"
     detail: str = "original"
     thinking: bool = False
+    motion_enabled: bool = False
     timeout_sec: float = 120
     mock: bool = False
     fault_bad_json: bool = False
@@ -247,6 +248,7 @@ class SettingUpdate(BaseModel):
     jpeg_q: int | None = Field(default=None, ge=2, le=15)
     detail: Literal["original", "high", "low"] | None = None
     thinking: bool | None = None
+    motion_enabled: bool | None = None
     timeout_sec: float | None = Field(default=None, ge=15, le=180)
     mock_mode: bool | None = None
     fault_bad_json: bool | None = None
@@ -328,6 +330,7 @@ class SettingPublic(BaseModel):
     jpeg_q: int
     detail: str
     thinking: bool
+    motion_enabled: bool = False
     timeout_sec: float
     mock_mode: bool
     fault_bad_json: bool = False
@@ -457,6 +460,7 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "jpeg_q": 5,
     "detail": "original",
     "thinking": False,
+    "motion_enabled": False,
     "timeout_sec": 120.0,
     "mock_mode": False,
     "fault_bad_json": False,

@@ -100,6 +100,6 @@ if (-not (Test-Path $setup)) { throw "没有生成 $setup。" }
 $size = [math]::Round((Get-Item $setup).Length / 1MB, 1)
 Write-Host ""
 Write-Host "安装包：$setup（$size MB）"
-Write-Host "用户安装到 %LOCALAPPDATA%\Programs\VideoCompliance，重复安装会覆盖旧版本。"
+Write-Host "安装时可选目录。有其他固定磁盘时默认不放 C 盘；装完会询问是否删除安装包。"
 Write-Host "数据仍在 %APPDATA%\EcommerceVideoCompliance，卸载或升级都不会删除。"
 Write-Host "没有代码签名时，Windows 首次运行可能弹 SmartScreen 提示。"

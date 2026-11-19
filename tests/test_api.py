@@ -81,25 +81,38 @@ def test_health_and_settings_do_not_leak_the_key(monkeypatch):
         assert cleared.json()["api_key_source"] == "env"
 
 
-def test_concurrency_defaults_to_four_and_caps_at_eight(monkeypatch):
+def test_motion_scan_stays_off_until_turned_on(monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-env-example-9876")
     with TestClient(create_app()) as client:
-        assert client.get("/api/settings").json()["concurrency"] == 4
-        kept = client.put("/api/settings", json={"concurrency": 8})
+        assert client.get("/api/settings").json()["motion_enabled"] is False
+        turned = client.put("/api/settings", json={"motion_enabled": True})
+        assert turned.status_code == 200
+        assert turned.json()["motion_enabled"] is True
+        kept = client.put("/api/settings", json={"fps": 1})
+        assert kept.json()["motion_enabled"] is True
+        off = client.put("/api/settings", json={"motion_enabled": False})
+        assert off.json()["motion_enabled"] is False
+
+
+def test_concurrency_defaults_to_ten_and_caps_at_twenty(monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-env-example-9876")
+    with TestClient(create_app()) as client:
+        assert client.get("/api/settings").json()["concurrency"] == 10
+        kept = client.put("/api/settings", json={"concurrency": 20})
         assert kept.status_code == 200
-        assert kept.json()["concurrency"] == 8
-        rejected = client.put("/api/settings", json={"concurrency": 9})
+        assert kept.json()["concurrency"] == 20
+        rejected = client.put("/api/settings", json={"concurrency": 21})
         assert rejected.status_code == 422
-        assert "并发数需要在 1 到 8 之间" in rejected.text
-        assert client.get("/api/settings").json()["concurrency"] == 8
+        assert "并发数需要在 1 到 20 之间" in rejected.text
+        assert client.get("/api/settings").json()["concurrency"] == 20
         sign_in()
         upload = client.post(
             "/api/jobs",
             files={"file": ("clip.mp4", b"not-a-video", "video/mp4")},
-            data={"concurrency": "9"},
+            data={"concurrency": "21"},
         )
         assert upload.status_code == 400
-        assert upload.json()["detail"] == "并发数需要在 1 到 8 之间"
+        assert upload.json()["detail"] == "并发数需要在 1 到 20 之间"
 
 
 def test_custom_rules_roundtrip_and_reject_an_empty_rule(monkeypatch):

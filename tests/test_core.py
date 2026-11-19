@@ -53,6 +53,8 @@ async def test_wait_while_paused_holds_until_resume_or_cancel():
 def test_format_range_matches_required_example():
     assert format_range(12, 15) == "00:12-00:15"
     assert format_range(0, 1) == "00:00-00:01"
+    assert format_range(0, 0.5) == "00:00-00:01"
+    assert format_range(0.5, 0.533) == "00:00.50-00:00.53"
     assert format_clock(3661) == "01:01:01"
     assert format_range(3600, 3661) == "01:00:00-01:01:01"
 

@@ -169,7 +169,7 @@ EVC_FFPROBE=C:\ffmpeg\bin\ffprobe.exe
 
 1. 登录 token4u.cc 账号。画面请求地址固定为 `https://token4u.cc/v1`，模型在 GLM 5.3 Flash 和 DeepSeek 4.1 Flash 之间选择。
 2. 需要口播检测时，打开「口播检测」。程序用登录账号向 token4u 领取临时凭证，再由本机把音频直接发给腾讯云。引擎默认 `16k_zh`（录音文件识别通用引擎，走每月免费资源包）。设置里可以改成大模型 2.0 的 `16k_zh_en_2.0`。可以随时关掉口播，只检测画面。
-3. 拖入视频。抽帧可在 0.5–2 FPS 之间调，并发在 1–8 之间，默认 4。
+3. 拖入视频。抽帧可在 0.5–2 FPS 之间调，并发在 1–20 之间，默认 10。
 4. 进度会同时显示抽帧、画面识别和口播阶段。画面检测与音频识别并行。
 5. 点击表格或时间轴，视频跳到对应时间。口播条目在时间轴下半部分。
 6. 导出 JSON 或 Excel。一次识别多个视频时，可以批量导出成一个 Excel。文件同时写在数据目录的 `exports/`。
@@ -195,16 +195,17 @@ powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
 powershell -ExecutionPolicy Bypass -File scripts\build_installer.ps1
 ```
 
-脚本会依次做：构建程序 → 缺 FFmpeg 时自动下载到 `dist\VideoCompliance\` → 编译 `packaging\installer.iss`。产物是单个 `dist\VideoCompliance-<版本>-Setup.exe`，用户双击安装即可。需要 [Inno Setup](https://jrsoftware.org/isdl.php)（6.0 或更新版本），没有时会提示安装命令。
+脚本会依次做：构建程序 → 缺 FFmpeg 时自动下载到 `dist\VideoCompliance\` → 编译 `packaging\installer.iss`。产物是单个 `dist\VideoCompliance-<版本>-Setup.exe`，用户双击安装即可。需要 [Inno Setup](https://jrsoftware.org/isdl.php)（6.6 或更新版本），没有时会提示安装命令。
 
 安装行为：
 
-- 装到 `%LOCALAPPDATA%\Programs\VideoCompliance`，按当前用户安装，不需要管理员权限。
-- `AppId` 固定，重复运行新版本安装包会直接覆盖旧版本，不会出现两份；安装前会自动关闭正在运行的程序。
+- 安装时可以选择目录，按当前用户安装，不需要管理员权限。全新安装会从 D 到 Z 找第一个固定磁盘，默认放到该盘的 `VideoCompliance`。只有 C 盘时才用 `%LOCALAPPDATA%\Programs\VideoCompliance`，页面上可以改。升级会带出上次的目录，也可以改。
+- `AppId` 固定，重复运行新版本安装包会覆盖所选目录里的旧版本，不会出现两份；安装前会自动关闭正在运行的程序。
 - 旧版本的 `_internal` 目录会先删掉，避免残留的旧模块被加载。
 - 数据在 `%APPDATA%\EcommerceVideoCompliance`，在安装目录之外，升级和卸载都不动它。
 - 安装包自带 `ffmpeg.exe` 和 `ffprobe.exe`，用户不用自己装 FFmpeg。
-- 静默安装：`VideoCompliance-<版本>-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`，静默模式装完不会自动启动程序。
+- 安装完成页会询问是否删除安装包。点「删除」后，安装程序关闭时删掉这个安装包；点「保留」则留下。静默安装不询问，也不删除。
+- 静默安装：`VideoCompliance-<版本>-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`。不写 `/DIR` 时用上面的默认目录。静默模式装完不会自动启动程序。
 - Win10 缺少 WebView2 时，安装程序会提示并打开微软下载页。
 
 程序图标和安装包图标都用 `packaging/app.ico`，由 `frontend/public/logo.png` 生成；换 logo 后重新生成这个 ico 即可。
@@ -251,7 +252,7 @@ pytest
 ## 限制
 
 - 不读外挂字幕。口播只看腾讯云转写结果，转写错了，判定也会跟着错。
-- 小于抽帧间隔的闪现文字可能漏掉。字太小、反光、被挡住时，会标成「疑似」或者不报。
+- 设置里的「闪帧检测」默认关闭。打开后，只出现一两帧就消失的后期贴字会单独抽出来，时间用这一帧自己的起止；镜头一直在动时，还会把变化周围的一块放大再看。关闭后只按原来的抽帧。短于一帧、没有写进成片像素的字仍然看不到。字太小、反光、被挡住时，会标成「疑似」或者不报。
 - 模型仍可能看错。导出结果需要人工看一眼再决定能不能发。
 - 同一时刻只识别一个视频。可以一次选多个，其余在队列里等，最多排 20 个。
 - 预览对 H.264 MP4 最稳。mkv 等封装即使窗口播不了，识别仍然进行。
