@@ -11,9 +11,9 @@ from app.core.model_route import (
     REACHABLE_HTTP_GLM_LUNA,
     REACHABLE_HTTP_QWEN,
     ModelRoute,
-    clamp_luna_percent,
     initial_route_fields,
     max_http_per_logical_dispatch,
+    split_percent,
     uses_luna,
 )
 from app.core.relay import DEEPSEEK_FLASH_MODEL, PICTURE_MODEL, QWEN_FLASH_MODEL
@@ -44,23 +44,22 @@ def no_sleep(monkeypatch):
 
 
 def test_percent_is_request_ordinal_not_a_global_half():
-    assert clamp_luna_percent(None) == 0
-    assert clamp_luna_percent(True) == 0
-    assert clamp_luna_percent("50") == 50
-    assert clamp_luna_percent(150) == 100
+    assert split_percent(PICTURE_MODEL) == 50
+    assert split_percent(QWEN_FLASH_MODEL) == 0
+    assert split_percent(DEEPSEEK_FLASH_MODEL) == 0
+    assert split_percent(LUNA_MODEL) == 0
     assert max_http_per_logical_dispatch() == 12
     assert [uses_luna(index, 0) for index in range(1, 5)] == [False, False, False, False]
     assert [uses_luna(index, 100) for index in range(1, 4)] == [True, True, True]
     assert [uses_luna(index, 50) for index in range(1, 5)] == [False, True, False, True]
     assert sum(uses_luna(index, 1) for index in range(1, 101)) == 1
-    # 两个任务各自从第 1 帧开始，50% 时都是 GLM，不会跨任务凑成对半。
-    assert uses_luna(1, 50) is False
     assert uses_luna(1, 50) is False
 
 
 async def test_picture_and_speech_keep_separate_ratios_and_retries_do_not_switch():
-    options = initial_route_fields(50)
+    options = initial_route_fields()
     route = ModelRoute.bind(options, selected_model=PICTURE_MODEL)
+    assert options["luna_request_percent"] == 50
     assert [await route.begin_picture(index) for index in (1, 2, 3, 4)] == [
         PICTURE_MODEL,
         LUNA_MODEL,
@@ -83,36 +82,40 @@ async def test_picture_and_speech_keep_separate_ratios_and_retries_do_not_switch
 
 
 async def test_flash_assignment_is_flushed_before_return_and_survives_reload():
-    options = initial_route_fields(100)
+    options = initial_route_fields()
     flushed: list[str] = []
     first = FLASH_INDEX_BASE + 1000
     second = FLASH_INDEX_BASE + 2000
 
     async def flush() -> None:
-        flushed.append(options["model_assignments"]["picture"][str(first)])
+        picture = options["model_assignments"]["picture"]
+        latest = picture[str(second)] if str(second) in picture else picture[str(first)]
+        flushed.append(latest)
 
     route = ModelRoute.bind(options, selected_model=PICTURE_MODEL, allow_new_flash=True, flush=flush)
-    assert await route.begin_picture(first) == LUNA_MODEL
-    assert flushed == [LUNA_MODEL]
+    assert await route.begin_picture(first) == PICTURE_MODEL
+    assert flushed == [PICTURE_MODEL]
     assert await route.begin_picture(second) == LUNA_MODEL
+    assert flushed == [PICTURE_MODEL, LUNA_MODEL]
     picture_flushes = len(flushed)
-    assert await route.begin_picture(1) == LUNA_MODEL
+    assert await route.begin_picture(1) == PICTURE_MODEL
     assert len(flushed) == picture_flushes
-    assert await route.begin_speech(0) == LUNA_MODEL
+    assert await route.begin_speech(0) == PICTURE_MODEL
     assert len(flushed) == picture_flushes + 1
 
     restored = json.loads(json.dumps(options))
     again = ModelRoute.bind(restored, selected_model=PICTURE_MODEL, allow_new_flash=False)
-    assert await again.begin_picture(first) == LUNA_MODEL
+    assert await again.begin_picture(first) == PICTURE_MODEL
     assert await again.begin_picture(second) == LUNA_MODEL
     missing = FLASH_INDEX_BASE + 3000
     assert await again.begin_picture(missing) == PICTURE_MODEL
     assert str(missing) not in again.assignments["flash_order"]
-    assert again.stats[LUNA_MODEL]["logical"] == 4
+    assert again.stats[LUNA_MODEL]["logical"] == 1
+    assert again.stats[PICTURE_MODEL]["logical"] == 4
 
 
 async def test_rejudge_keeps_speech_model_and_retranscribe_counts_new_batches():
-    options = initial_route_fields(50)
+    options = initial_route_fields()
     route = ModelRoute.bind(options, selected_model=PICTURE_MODEL)
     assert await route.begin_speech(0) == PICTURE_MODEL
     assert await route.begin_speech(1) == LUNA_MODEL
@@ -149,20 +152,20 @@ async def test_stats_are_locked_and_timeout_is_a_failed_subset():
     assert route.stats[LUNA_MODEL]["runs"] == 10
 
 
-async def test_saved_settings_keep_model_timeout_and_default_percent_to_zero(tmp_path):
+async def test_saved_settings_drop_a_stored_luna_percent(tmp_path):
     db = Database(tmp_path / "app.db")
     await db.connect()
     legacy = dict(DEFAULT_SETTINGS)
-    legacy.pop("luna_request_percent")
     legacy["rules_initialized"] = True
     legacy["exaggeration_initialized"] = True
     legacy["model"] = PICTURE_MODEL
     legacy["timeout_sec"] = 120.0
     legacy["base_url"] = "https://example.invalid"
     legacy["tencent_region"] = "ap-shanghai"
+    legacy["luna_request_percent"] = 80
     await db.save_settings(legacy)
     loaded = await db.load_settings()
-    assert loaded["luna_request_percent"] == 0
+    assert "luna_request_percent" not in loaded
     assert loaded["model"] == PICTURE_MODEL
     assert loaded["timeout_sec"] == 120.0
     assert loaded["base_url"] == "https://example.invalid"
@@ -174,25 +177,26 @@ async def test_saved_settings_keep_model_timeout_and_default_percent_to_zero(tmp
     await db.close()
 
 
-def test_settings_api_keeps_percent_without_changing_model_or_timeout():
+def test_settings_api_ignores_luna_percent_without_changing_model_or_timeout():
     with TestClient(create_app()) as client:
         current = client.get("/api/settings").json()
         assert current["model"] == PICTURE_MODEL
         assert current["timeout_sec"] == 120
-        assert current["luna_request_percent"] == 0
+        assert "luna_request_percent" not in current
         assert "sk-" not in client.get("/api/settings").text
-        saved = client.put("/api/settings", json={"luna_request_percent": 50}).json()
-        assert saved["luna_request_percent"] == 50
-        assert saved["model"] == PICTURE_MODEL
-        assert saved["timeout_sec"] == 120
-        assert client.put("/api/settings", json={"luna_request_percent": 101}).status_code == 422
-        assert client.get("/api/settings").json()["luna_request_percent"] == 50
+        saved = client.put("/api/settings", json={"luna_request_percent": 50})
+        assert saved.status_code == 200
+        assert "luna_request_percent" not in saved.json()
+        assert saved.json()["model"] == PICTURE_MODEL
+        assert saved.json()["timeout_sec"] == 120
+        ignored = client.put("/api/settings", json={"luna_request_percent": 101})
+        assert ignored.status_code == 200
+        assert "luna_request_percent" not in ignored.json()
         qwen = client.put("/api/settings", json={"model": QWEN_FLASH_MODEL}).json()
         assert qwen["model"] == QWEN_FLASH_MODEL
-        assert qwen["luna_request_percent"] == 50
+        assert "luna_request_percent" not in qwen
         collapsed = client.put("/api/settings", json={"model": LUNA_MODEL}).json()
         assert collapsed["model"] == PICTURE_MODEL
-        assert collapsed["luna_request_percent"] == 50
         assert collapsed["timeout_sec"] == 120
 
 
@@ -204,12 +208,12 @@ async def test_job_snapshot_does_not_follow_later_settings(tmp_path):
         manager._settings["relay_access_token"] = "access-token-for-tests"
         manager._settings["model"] = PICTURE_MODEL
         manager._settings["timeout_sec"] = 120
-        manager._settings["luna_request_percent"] = 50
+        manager._settings["luna_request_percent"] = 100
         await manager.pause_queue()
         video = tmp_path / "clip.mp4"
         video.write_bytes(b"not-a-video")
         state = await manager.create_job(video, "clip.mp4")
-        manager._settings["luna_request_percent"] = 100
+        manager._settings["luna_request_percent"] = 0
         manager._settings["model"] = QWEN_FLASH_MODEL
         manager._settings["timeout_sec"] = 30
         assert state.options["luna_request_percent"] == 50
@@ -219,7 +223,6 @@ async def test_job_snapshot_does_not_follow_later_settings(tmp_path):
         stored = json.loads(row["options_json"])
         assert stored["luna_request_percent"] == 50
         assert stored["timeout_sec"] == 120
-        assert state.to_public().luna_request_percent == 50
         assert state.to_public().model_stats == {}
     finally:
         await manager.shutdown()
@@ -237,14 +240,12 @@ async def _run_frames(tmp_path, *, model: str, percent: int, handler, thinking: 
         assert "thinking" not in request.headers["authorization"]
         return handler(calls)
 
-    options = initial_route_fields(percent)
-    route = ModelRoute.bind(options, selected_model=model)
+    route = ModelRoute(selected_model=model, percent=percent)
     recognizer = DeepSeekRecognizer(
         RunConfig(
             api_key="sk-test",
             model=model,
             thinking=thinking,
-            luna_request_percent=percent,
             timeout_sec=120,
             base_url="https://token4u.cc/v1",
         ),
@@ -427,9 +428,9 @@ async def test_non_retryable_status_does_not_spend_the_rest_of_the_budget(tmp_pa
 
 
 async def test_mock_mode_does_not_increase_http_attempts():
-    options = initial_route_fields(50)
+    options = initial_route_fields()
     route = ModelRoute.bind(options, selected_model=PICTURE_MODEL)
-    recognizer = build_recognizer(RunConfig(mock=True, luna_request_percent=50, timeout_sec=120), route)
+    recognizer = build_recognizer(RunConfig(mock=True, timeout_sec=120), route)
     async with recognizer:
         await recognizer.recognize(Frame(index=1, start_sec=0, end_sec=1, path="missing.jpg"))
         await recognizer.judge_speech([SpeechSentence("九十九元", 0, 1)])
@@ -449,11 +450,11 @@ async def test_speech_batches_use_their_own_ratio_and_same_model_on_repair(tmp_p
             return _response("不是 JSON")
         return _response('{"items":[]}')
 
-    options = initial_route_fields(50)
+    options = initial_route_fields()
     route = ModelRoute.bind(options, selected_model=PICTURE_MODEL)
     sentences = [SpeechSentence(f"第{index}句没有价格", index, index + 0.4) for index in range(9)]
     recognizer = DeepSeekRecognizer(
-        RunConfig(api_key="sk-test", timeout_sec=120, base_url="https://token4u.cc/v1", luna_request_percent=50),
+        RunConfig(api_key="sk-test", timeout_sec=120, base_url="https://token4u.cc/v1"),
         transport=httpx.MockTransport(handler),
         route=route,
     )

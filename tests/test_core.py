@@ -751,10 +751,9 @@ def test_glm_request_enables_thinking_and_drops_image_detail():
     assert configured_model("gpt-6-luna") == PICTURE_MODEL
     assert RunConfig().model == PICTURE_MODEL
     assert RunConfig().timeout_sec == 120
-    assert RunConfig().luna_request_percent == 0
     assert DEFAULT_SETTINGS["model"] == PICTURE_MODEL
     assert DEFAULT_SETTINGS["timeout_sec"] == 120.0
-    assert DEFAULT_SETTINGS["luna_request_percent"] == 0
+    assert "luna_request_percent" not in DEFAULT_SETTINGS
 
     assert model_controls(False) == {
         "max_tokens": 2048,

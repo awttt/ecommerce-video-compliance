@@ -1,8 +1,8 @@
-"""把 GLM 与 Luna 按逻辑请求分配。不按 token，也不读中转站账号权重。
+"""画面模型是 GLM 5.3 Flash 时，固定把请求分给 glm-5.3-flash 和 gpt-6-luna。
 
-一次逻辑请求是一帧画面，或一批口播判定。比例只在画面模型为 glm-5.3-flash 时生效。
-普通抽帧用帧号，口播用批次序号，两条序列各自计算。闪帧帧号不连续，
-第一次出现时按本任务的抽出顺序编号，并在发出请求前写入任务快照。
+一次逻辑请求是一帧画面，或一批口播判定。普通抽帧用帧号，口播用批次序号。
+闪帧帧号不连续，第一次出现时按本任务的抽出顺序编号，并在发出请求前写入任务快照。
+DeepSeek 和 Qwen 不分流。
 """
 
 from __future__ import annotations
@@ -16,6 +16,9 @@ from app.core.flash import FLASH_INDEX_BASE
 from app.core.relay import LUNA_MODEL, PICTURE_MODEL
 
 log = logging.getLogger(__name__)
+
+# 只在画面模型为 glm-5.3-flash 时使用。序号从 1 起，奇数 GLM，偶数 Luna。
+SPLIT_PERCENT = 50
 
 # 一轮传输里，超时、断线和可重试状态码最多 POST 这么多次。这不是整次逻辑请求的上限。
 TRANSPORT_ATTEMPTS = 2
@@ -52,18 +55,10 @@ class HttpBudget:
         self.used += 1
 
 
-def clamp_luna_percent(value: object) -> int:
-    if isinstance(value, bool) or value is None:
-        return 0
-    if isinstance(value, int):
-        number = value
-    elif isinstance(value, float) and value.is_integer():
-        number = int(value)
-    elif isinstance(value, str) and value.strip().lstrip("-").isdigit():
-        number = int(value.strip())
-    else:
-        return 0
-    return min(100, max(0, number))
+def split_percent(selected_model: str) -> int:
+    if selected_model == PICTURE_MODEL:
+        return SPLIT_PERCENT
+    return 0
 
 
 def uses_luna(ordinal: int, percent: int) -> bool:
@@ -154,7 +149,7 @@ class ModelRoute:
         flush: Callable[[], Awaitable[None]] | None = None,
     ):
         self.selected_model = selected_model or PICTURE_MODEL
-        self.percent = clamp_luna_percent(percent) if self.selected_model == PICTURE_MODEL else 0
+        self.percent = percent if self.selected_model == PICTURE_MODEL else 0
         self.assignments = assignments if assignments is not None else empty_assignments()
         self.stats = stats if stats is not None else {}
         self.allow_new_flash = allow_new_flash
@@ -173,7 +168,7 @@ class ModelRoute:
         allow_new_flash: bool = True,
         flush: Callable[[], Awaitable[None]] | None = None,
     ) -> ModelRoute:
-        configured = clamp_luna_percent(options.get("luna_request_percent"))
+        configured = split_percent(selected_model)
         options["luna_request_percent"] = configured
         assignments = normalize_assignments(options.get("model_assignments"))
         options["model_assignments"] = assignments
@@ -277,9 +272,9 @@ class ModelRoute:
         return model, True
 
 
-def initial_route_fields(percent: object) -> dict[str, Any]:
+def initial_route_fields(model: str = PICTURE_MODEL) -> dict[str, Any]:
     return {
-        "luna_request_percent": clamp_luna_percent(percent),
+        "luna_request_percent": split_percent(model),
         "model_assignments": empty_assignments(),
         "model_stats": {},
     }

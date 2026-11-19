@@ -10,7 +10,6 @@ from pathlib import Path
 import aiosqlite
 
 from app.core.asr_engine import configured_engine
-from app.core.model_route import clamp_luna_percent
 from app.core.relay import configured_model
 from app.core.rule_catalog import apply_builtin_rules, enable_exaggeration
 from app.schemas import DEFAULT_SETTINGS, FIXED_TENCENT_REGION, DetectionRules, Finding, clamp_concurrency
@@ -179,15 +178,18 @@ class Database:
             cursor = await self.conn.execute("SELECT value FROM settings WHERE key='config'")
             row = await cursor.fetchone()
         merged = dict(DEFAULT_SETTINGS)
+        stored: dict = {}
         if row is not None:
             try:
-                stored = json.loads(row["value"])
+                parsed = json.loads(row["value"])
             except json.JSONDecodeError:
-                stored = {}
-            if isinstance(stored, dict):
+                parsed = {}
+            if isinstance(parsed, dict):
+                stored = parsed
                 merged.update(stored)
+        had_luna_percent = "luna_request_percent" in stored
+        merged.pop("luna_request_percent", None)
         merged["model"] = configured_model(merged.get("model"))
-        merged["luna_request_percent"] = clamp_luna_percent(merged.get("luna_request_percent"))
         engine = configured_engine(merged.get("asr_engine"))
         engine_changed = merged.get("asr_engine") != engine
         merged["asr_engine"] = engine
@@ -203,7 +205,14 @@ class Database:
         except Exception:
             merged["rules"] = DetectionRules().model_dump()
             seeded = False
-        if seeded or concurrency_changed or exaggeration_changed or engine_changed or region_changed:
+        if (
+            seeded
+            or concurrency_changed
+            or exaggeration_changed
+            or engine_changed
+            or region_changed
+            or had_luna_percent
+        ):
             await self.save_settings(merged)
         return merged
 

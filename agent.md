@@ -11,10 +11,10 @@
 - 导出固定 8 列，顺序不要改：时间点、类别、来源、原文、位置、置信度、判定理由、备注。JSON 在 `结果` 数组里。口播位置固定为「口播内容」。
 - 口播原文必须是某一句转写里的连续子串，对不上就丢掉。画面命中的时间是抽帧区间，不是模型自己编的时间。
 - 画面模型有三个：`glm-5.3-flash`（GLM 5.3 Flash，`PICTURE_MODEL`，默认）、`deepseek-flash`（DeepSeek 4.1 Flash，`DEEPSEEK_FLASH_MODEL`）和 `qwen3.8-flash`（Qwen 3.8 Flash，`QWEN_FLASH_MODEL`）。登录后的请求用设置里选中的那个，基地址固定为 `https://token4u.cc/v1`。`chat_url()` 只在基地址后面补 `/chat/completions`；基地址已经以该路径结尾就原样使用，不要自己再插入 `/v1`。加载设置时，空的模型名和其他名字改成 `glm-5.3-flash`；`deepseek*`（例如 `deepseek-v4.1-flash`、`deepseek-v4.1-flash-1017`）改成 `deepseek-flash`；只有完整的 `qwen3.8-flash` 保留为 Qwen，其他 qwen 名字仍改回 GLM。`gpt-6-luna` 写进画面模型字段也会被收成 GLM。不要改用户已保存的基地址。默认超时仍是 120 秒。
-- `luna_request_percent`（bot创建）是 0 到 100 的整数，默认 0。只有画面模型是 `glm-5.3-flash` 时，才把逻辑请求分给 `glm-5.3-flash` 和 `gpt-6-luna`。0 全部 GLM，100 全部 Luna。这是逻辑请求数，不是 token，不是金额，也不是中转站分组里的账号权重。普通抽帧按帧号，口播按批次序号，两条各自计算。50 时第 1 帧和第 1 批口播仍是 GLM，所以只有一帧或只有一批口播的任务会全部走 GLM。每个任务用创建时抄进 `options` 的比例，换一个视频或一批视频都不保证凑成全局对半。DeepSeek / Qwen 保留这份数字但不参加分配。闪帧帧号不连续，第一次按抽出顺序写入 `model_assignments`，并在发出请求前落盘；失败帧重试、口播重判和重启都读这份记录。没有记录的旧闪帧退回 GLM，不再按剩下的帧重排。重新转写会清掉口播分配；只重判文字不会。同一逻辑单元不因为重试换模型，也不自动改打另一个模型。
+- 画面模型是 `glm-5.3-flash` 时，分流写死在 `app/core/model_route.py`：`SPLIT_PERCENT = 50`，`split_percent` 只对这个模型返回 50，DeepSeek / Qwen 返回 0。设置、界面和 `GET/PUT /api/settings` 都没有比例字段，也不要把比例滑块或相关说明加回去。加载设置时若数据库里还有 `luna_request_percent`，删掉并写回。创建任务时 `initial_route_fields(model)` 把这个常量抄进该任务的 options；`ModelRoute.bind` 再按当时选中的画面模型覆盖。闪帧帧号不连续，第一次按抽出顺序写入 `model_assignments`，并在发出请求前落盘；失败帧重试、口播重判和重启都读这份记录。没有记录的旧闪帧退回 GLM，不再按剩下的帧重排。重新转写会清掉口播分配；只重判文字不会。同一逻辑单元不因为重试换模型，也不自动改打另一个模型。
 - Luna 请求不带 GLM 的 `thinking` / `reasoning_effort`，只留 `max_tokens`（思考开关仍决定 2048 或 4096）和原来的 `response_format`。这只在 mock 里核对过请求形状，不能当成线上识图、计费或稳定性已经通过。并发仍是原来的一个池（默认 10，最多 20），超时仍走现在的 `timeout_sec`（默认 120，口播和画面共用 `speech_request_timeout` 的 120 到 180）。不按模型各开一份并发或超时，避免在途请求翻倍或改掉现有超时。
 - 一次逻辑请求的 HTTP 硬停止是 12 次：每段最多 1 轮传输加 2 轮 400 剥字段，每轮最多 2 次 POST，解析失败最多再来 1 段（`2 × (1 + 2) × 2`）。400 会立刻结束当前这一轮，所以实际打不到 12。现在走得到的最坏次数是 GLM / Luna 5 次、Qwen 7 次。纯 503 或纯超时、且没有 200 的坏 JSON、也没有可剥字段的 400，同一轮 2 次后停止。这些 POST 都可能被上游计费；客户端看不出 503 或超时有没有已经扣费。不新增跨模型回退，所以失败不会再自动打到另一个模型上。用户再点「重试失败的帧」或「重试文字判定」会另开一组，上限同样是这一次逻辑请求的硬停止。
-- 任务上的 `model_stats`（bot创建）是本机计数。`logical` 按帧号或口播批次去重，用户重试同一帧或重判同一批不加；重新转写会把新批次再计一次。`runs` 是判定结束的次数，含这些显式重跑。`http_attempts` 是真实 POST，模拟识别不加。`timeout` 只在这次判定最终失败且终端错误是超时时加 1，并且同时计入 `failed`。取消时已经发出的 POST 计入 `http_attempts`，但没有结果就不计入 `runs`。不要用中转站用量来对这个比例。
+- 任务上的 `model_stats` 是本机计数，界面不展示。`logical` 按帧号或口播批次去重，用户重试同一帧或重判同一批不加；重新转写会把新批次再计一次。`runs` 是判定结束的次数，含这些显式重跑。`http_attempts` 是真实 POST，模拟识别不加。`timeout` 只在这次判定最终失败且终端错误是超时时加 1，并且同时计入 `failed`。取消时已经发出的 POST 计入 `http_attempts`，但没有结果就不计入 `runs`。
 - 视觉请求只在 user 消息里放 `image_url.url` 的 data URL，不要带 `detail`。`glm-5.3-flash` 的 `thinking.type` 只能是 `enabled`，传 `disabled` 会 400。思考开关关闭时带 `reasoning_effort: low` 和 `max_tokens: 2048`；打开时用 `high` 和 `4096`。不要省略 `reasoning_effort`，上游默认是 `max`。`qwen3.8-flash` 用同一组思考字段，但 `max_tokens` 是 4096 / 8192，因为思考 token 会计入 completion，实测大约是 glm 的 2 倍。它的思考过程在 `reasoning_content`，解析只读 `message.content`，不要把思考文本拼进结果。若 400 且错误提到 `response_format`，去掉该字段重试；qwen 若 400 点名 `thinking` 或 `reasoning_effort`，去掉这两个字段再试。408/409/429/500/502/503/504 和网络超时可重试。401/403 表示密钥无效。请求里不要带 temperature。发往 token4u 的 httpx 客户端带 `User-Agent: ecommerce-video-compliance/<版本>`，不要用 Python-urllib 的默认 UA。低细节只把抽帧长边压到不超过 640，不传给模型。画面和口播的系统提示会写入本机当天日期，避免模型把已经过去的日期说成未来日期。
 - 服务只监听 `127.0.0.1` 或 `localhost`。不要改成对外网卡。
 - 密钥只放在 gitignore 的 `.env` 和 `data/app.db`。不要写进任务记录、日志、测试、提交或聊天回复。`GET /api/settings` 只返回打码后的密钥。PUT 时空的密钥字段表示「不修改」。`clear_api_key` / `clear_tencent_secret` 只清本机保存的值。
@@ -28,7 +28,7 @@
 | 画面或口播提示词、禁止推测 | `app/core/prompts.py` |
 | 丢掉不合法命中、口播原文必须命中原句、词级时间 | `app/core/parsing.py` |
 | 自定义类别开关、额外命中词、忽略词 | `app/core/rules.py`，结构在 `app/schemas.py` 的 `DetectionRules`，界面在 `frontend/src/App.tsx` 的审核规则抽屉 |
-| 画面模型请求体、重试、模拟识别、GLM/Luna 请求比例 | `app/core/deepseek.py`，分配和计数在 `app/core/model_route.py` |
+| 画面模型请求体、重试、模拟识别、GLM/Luna 分流 | `app/core/deepseek.py`，分配和计数在 `app/core/model_route.py` |
 | 腾讯云录音文件识别、分片、时间戳 | `app/core/tencent_asr.py`，句子结构在 `app/core/transcript.py` |
 | 抽音频、口播进度、和画面并行 | `app/core/speech.py`，调度在 `app/services/manager.py` |
 | 抽帧、画面进度 | `app/core/pipeline.py`，`app/core/ffmpeg.py` |

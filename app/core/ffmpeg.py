@@ -173,6 +173,8 @@ class VideoProbe:
         width: int,
         height: int,
         fps: float = 0,
+        codec: str = "",
+        pix_fmt: str = "",
     ):
         self.duration = duration
         self.has_video = has_video
@@ -180,6 +182,8 @@ class VideoProbe:
         self.width = width
         self.height = height
         self.fps = fps
+        self.codec = codec
+        self.pix_fmt = pix_fmt
 
 
 def _parse_rate(value: object) -> float:
@@ -249,7 +253,121 @@ async def probe_video(path: Path) -> VideoProbe:
                 count = 0
             if count > 0:
                 fps = count / duration
-    return VideoProbe(duration, video is not None, audio, width, height, fps)
+    codec = str(video.get("codec_name") or "") if video else ""
+    pix_fmt = str(video.get("pix_fmt") or "") if video else ""
+    return VideoProbe(duration, video is not None, audio, width, height, fps, codec, pix_fmt)
+
+
+# 窗口只稳定画出这几种。其余的 MP4 往往有声音、画面是黑的。
+_PREVIEW_EDGE = 1280
+
+
+def window_can_play(path: Path, probe: VideoProbe) -> bool:
+    """WebView2 能直接画出来的画面。MP4 外壳不够，还要看编码和像素格式。"""
+    suffix = path.suffix.lower()
+    codec = probe.codec.lower()
+    pix = probe.pix_fmt.lower()
+    if suffix in {".mp4", ".m4v"} and codec == "h264" and pix in {"yuv420p", "yuvj420p"}:
+        return True
+    return suffix == ".webm" and codec in {"vp8", "vp9"}
+
+
+async def transcode_preview(
+    source: Path,
+    dest: Path,
+    *,
+    has_audio: bool,
+    cancel: asyncio.Event,
+    on_process: Callable[[asyncio.subprocess.Process], None] | None = None,
+) -> None:
+    """做成窗口能播的 H.264 副本。长边不超过 1280，识别仍用原片。"""
+    if cancel.is_set():
+        raise FFmpegError("预览已取消")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    partial = dest.with_name(dest.stem + ".part.mp4")
+    partial.unlink(missing_ok=True)
+    try:
+        await _transcode_preview(source, partial, has_audio=has_audio, cancel=cancel, on_process=on_process)
+    except FFmpegError:
+        partial.unlink(missing_ok=True)
+        if cancel.is_set() or not has_audio:
+            raise
+        await _transcode_preview(source, partial, has_audio=False, cancel=cancel, on_process=on_process)
+    if cancel.is_set():
+        partial.unlink(missing_ok=True)
+        raise FFmpegError("预览已取消")
+    partial.replace(dest)
+
+
+async def _transcode_preview(
+    source: Path,
+    dest: Path,
+    *,
+    has_audio: bool,
+    cancel: asyncio.Event,
+    on_process: Callable[[asyncio.subprocess.Process], None] | None,
+) -> None:
+    scale = await scale_filter(_PREVIEW_EDGE)
+    cmd = [
+        resolve_bin("ffmpeg"),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(source),
+        "-vf",
+        scale,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+    ]
+    if has_audio:
+        cmd.extend(["-c:a", "aac", "-b:a", "128k"])
+    else:
+        cmd.append("-an")
+    cmd.append(str(dest))
+    if cancel.is_set():
+        raise FFmpegError("预览已取消")
+    proc = await spawn_process(*cmd, stdout=asyncio.subprocess.DEVNULL)
+    if on_process is not None:
+        on_process(proc)
+    if cancel.is_set():
+        if proc.returncode is None:
+            proc.kill()
+        await proc.wait()
+        raise FFmpegError("预览已取消")
+
+    async def _stop_when_cancelled() -> None:
+        await cancel.wait()
+        if proc.returncode is None:
+            proc.kill()
+
+    watcher = asyncio.create_task(_stop_when_cancelled())
+    try:
+        _, stderr = await proc.communicate()
+    except asyncio.CancelledError:
+        if proc.returncode is None:
+            proc.kill()
+        raise
+    finally:
+        watcher.cancel()
+        try:
+            await watcher
+        except asyncio.CancelledError:
+            pass
+    if cancel.is_set():
+        raise FFmpegError("预览已取消")
+    if proc.returncode != 0:
+        detail = decode_bytes(stderr).strip()
+        raise FFmpegError(detail or "预览转码失败")
 
 
 def _frame_indexes(directory: Path) -> list[tuple[int, Path]]:

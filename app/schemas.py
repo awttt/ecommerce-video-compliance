@@ -186,7 +186,6 @@ class RunConfig(BaseModel):
     thinking: bool = False
     motion_enabled: bool = False
     timeout_sec: float = 120
-    luna_request_percent: int = 0
     mock: bool = False
     fault_bad_json: bool = False
     fault_tencent: bool = False
@@ -237,6 +236,7 @@ class JobPublic(BaseModel):
     speech_retry: Literal["", "transcribe", "judge"] = ""
     mock: bool = False
     output_ready: bool = False
+    preview_status: str = ""
     preview_hint: str = ""
     cuts: list[CutSpan] = Field(default_factory=list)
     edit_rendered: bool = False
@@ -249,7 +249,6 @@ class JobPublic(BaseModel):
     hold_sec: float = 0
     paused_at: str | None = None
     findings: list[Finding] = Field(default_factory=list)
-    luna_request_percent: int = 0
     model_stats: dict[str, ModelStat] = Field(default_factory=dict)
 
 
@@ -270,7 +269,6 @@ class SettingUpdate(BaseModel):
     fault_partial_frames: bool | None = None
     mcp_enabled: bool | None = None
     model: str | None = None
-    luna_request_percent: int | None = Field(default=None, ge=0, le=100)
     asr_enabled: bool | None = None
     tencent_secret_id: str | None = None
     tencent_secret_key: str | None = None
@@ -294,15 +292,6 @@ class SettingUpdate(BaseModel):
         if value is None:
             return None
         return configured_model(value)
-
-    @field_validator("luna_request_percent")
-    @classmethod
-    def _luna_percent(cls, value: int | None) -> int | None:
-        if value is None:
-            return None
-        if isinstance(value, bool):
-            raise ValueError("Luna 请求比例需要是 0 到 100 的整数")
-        return value
 
     @field_validator("api_key")
     @classmethod
@@ -348,7 +337,6 @@ class SettingPublic(BaseModel):
     api_key_source: str
     base_url: str
     model: str
-    luna_request_percent: int = 0
     fps: float
     concurrency: int
     max_width: int
@@ -487,7 +475,6 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "thinking": False,
     "motion_enabled": False,
     "timeout_sec": 120.0,
-    "luna_request_percent": 0,
     "mock_mode": False,
     "fault_bad_json": False,
     "fault_tencent": False,

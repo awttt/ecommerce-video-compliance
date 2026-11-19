@@ -27,6 +27,7 @@ from app.core.model_route import (
     HttpBudget,
     ModelRoute,
     max_http_per_logical_dispatch,
+    split_percent,
 )
 from app.core.relay import LUNA_MODEL, QWEN_FLASH_MODEL, USER_AGENT
 from app.logging_setup import redact
@@ -119,7 +120,7 @@ class DeepSeekRecognizer:
         self.config = config
         self.route = route or ModelRoute(
             selected_model=config.model,
-            percent=config.luna_request_percent,
+            percent=split_percent(config.model),
         )
         self._transport = transport
         self._client: httpx.AsyncClient | None = None
