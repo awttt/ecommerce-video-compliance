@@ -79,6 +79,7 @@ export interface Settings {
   jpeg_q: number;
   detail: string;
   thinking: boolean;
+  motion_enabled: boolean;
   timeout_sec: number;
   mock_mode: boolean;
   fault_bad_json: boolean;

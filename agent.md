@@ -28,6 +28,7 @@
 | 腾讯云录音文件识别、分片、时间戳 | `app/core/tencent_asr.py`，句子结构在 `app/core/transcript.py` |
 | 抽音频、口播进度、和画面并行 | `app/core/speech.py`，调度在 `app/services/manager.py` |
 | 抽帧、画面进度 | `app/core/pipeline.py`，`app/core/ffmpeg.py` |
+| 底在动时的单帧贴字 | `app/core/motion.py`。没装 numpy / opencv 时跳过，只用 `app/core/flash.py` 的亮度比较 |
 | 相邻命中收成一条 | `app/core/aggregate.py`。合并键是类别 + 来源 + 原文。画面价格会把同一处的不同读法收成一档，例如「5.55元」和「5.55元3把」。画面间隙不超过 `PICTURE_GAP`（2 秒）就接上；口播间隙超过 `MERGE_EPSILON`（0.08 秒）就断开 |
 | 自动剪辑 | `app/core/editor.py` 的 `plan_cuts`，调用在 `manager.cut` |
 | 任务队列、设置、取消、导出 | `app/services/manager.py` |
@@ -43,7 +44,7 @@
 
 1. `POST /api/jobs` 或 `POST /api/jobs/batch` 把文件放到 `data/videos/{job_id}/`。
 2. 同一时间只跑一个任务。其余保持 `queued`，最多 20 个。`EVC_INLINE_JOBS=1` 时在请求里同步跑完，测试靠这个。
-3. 画面：FFmpeg 按 FPS（0.5–2）抽 JPEG，边抽边发给当前选中的画面模型。口播：抽出 16 kHz 单声道，用临时凭证走腾讯云「录音文件识别」（`CreateRecTask` / `DescribeTaskStatus`，SourceType 1）。未登录、凭证失败或本机没有调试密钥时跳过口播，任务仍然成功，`asr_error` 写明已跳过。
+3. 画面：FFmpeg 按 FPS（0.5–2）抽 JPEG，边抽边发给当前选中的画面模型。同时扫完全部源帧：底不动时用小块亮度找一两帧的贴字；底在动时用光流把前后帧对齐到当前帧，再找只在这一帧里的笔画。两路都由设置里的「闪帧检测」控制，默认关闭，创建任务时抄进该任务的 options。关掉就不扫全部源帧。打开后两路一起送去识别，按源帧号去重，最多 40 帧，其中运动这一路最多 10 帧，送出前把笔画峰值周围一块放大，淡字才读得见；放大失败就用整帧。没装 numpy / opencv 时打开开关也只有亮度这一路。口播：抽出 16 kHz 单声道，用临时凭证走腾讯云「录音文件识别」（`CreateRecTask` / `DescribeTaskStatus`，SourceType 1）。未登录、凭证失败或本机没有调试密钥时跳过口播，任务仍然成功，`asr_error` 写明已跳过。
 4. 两边并行。总进度大约是画面 70% + 口播 30%，完成前不超过 99。画面先结束时提示「画面已完成，正在等待口播结果」。
 5. `aggregate()` 收成 `Finding`。口播命中额外带 `sentence_start`、`sentence_end`、`next_start`，只给剪辑用，不进导出。
 6. 临时帧在 `data/frames/{job_id}`，临时音频在 `data/audio/{job_id}`。任务结束就删，除非 `EVC_KEEP_FRAMES=1`。

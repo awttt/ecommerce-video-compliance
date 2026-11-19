@@ -12,7 +12,16 @@ from pathlib import Path
 
 from app.core.aggregate import aggregate
 from app.core.deepseek import Recognizer
-from app.core.ffmpeg import FFmpegError, extract_frames, extract_one_frame, frame_bounds, probe_video
+from app.core.ffmpeg import (
+    FFmpegError,
+    extract_frames,
+    extract_one_frame,
+    extract_source_frames,
+    frame_bounds,
+    probe_video,
+    scan_flashes,
+)
+from app.core.flash import flash_time
 from app.schemas import MANUAL_REVIEW_CATEGORY, MANUAL_REVIEW_NOTE, Finding, Frame, RawHit, RunConfig, is_manual_review
 
 log = logging.getLogger(__name__)
@@ -48,17 +57,25 @@ def drop_retried_reviews(
 ) -> list[Finding]:
     """重试某一帧时拿掉这一帧原来的解析失败行。重试再失败会重新记一条。"""
     windows: list[tuple[float, float]] = []
+    flashed: list[float] = []
     for index in indexes:
+        when = flash_time(int(index))
+        if when is not None:
+            flashed.append(when)
+            continue
         bounds = frame_bounds(int(index), fps, duration)
         if bounds is not None:
             windows.append(bounds)
-    if not windows:
+    if not windows and not flashed:
         return list(findings)
     kept: list[Finding] = []
     for item in findings:
-        if is_manual_review(item.category) and any(
-            abs(item.start_sec - start) < 0.05 and abs(item.end_sec - end) < 0.05
-            for start, end in windows
+        if is_manual_review(item.category) and (
+            any(abs(item.start_sec - start) < 0.05 for start in flashed)
+            or any(
+                abs(item.start_sec - start) < 0.05 and abs(item.end_sec - end) < 0.05
+                for start, end in windows
+            )
         ):
             continue
         kept.append(item)
@@ -179,8 +196,27 @@ async def _run(
             )
         await on_progress(state)
 
-    await publish("extracting", "正在抽帧")
+    await publish(
+        "extracting",
+        "正在抽帧，并检查一闪而过的画面" if config.motion_enabled else "正在抽帧",
+    )
     queue: asyncio.Queue[Frame | None] = asyncio.Queue(maxsize=max(1, config.concurrency) * 2)
+    # 亮度比较和运动扫描都归这一个开关。关掉就不解码全片去找闪帧。
+    scan_task: asyncio.Task | None = None
+    if config.motion_enabled:
+        scan_task = asyncio.create_task(
+            scan_flashes(
+                video,
+                width=probe.width,
+                height=probe.height,
+                fps=probe.fps,
+                duration=probe.duration,
+                sample_fps=config.fps,
+                cancel=cancel,
+                motion_enabled=True,
+            ),
+            name="flash-scan",
+        )
 
     async def worker() -> None:
         nonlocal recognized, failed, last_error
@@ -232,6 +268,8 @@ async def _run(
 
     async def stop_workers_on_cancel() -> None:
         await cancel.wait()
+        if scan_task is not None and not scan_task.done():
+            scan_task.cancel()
         for task in workers:
             if not task.done():
                 task.cancel()
@@ -268,6 +306,56 @@ async def _run(
                         continue
             if cancel.is_set():
                 raise JobCancelled()
+            if scan_task is None:
+                spans = []
+            else:
+                try:
+                    spans = await scan_task
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log.warning("闪帧扫描失败，改为只按原抽帧继续：%s", exc)
+                    spans = []
+            if cancel.is_set():
+                raise JobCancelled()
+            flash_frames: list[Frame] = []
+            if spans:
+                try:
+                    flash_frames = await extract_source_frames(
+                        video,
+                        work_dir,
+                        spans,
+                        max_edge=recognition_max_edge(config.max_width, config.detail),
+                        jpeg_q=config.jpeg_q,
+                        cancel=cancel,
+                        on_process=on_process,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log.warning("闪帧截图失败，改为只按原抽帧继续：%s", exc)
+                    flash_frames = []
+                estimated += len(flash_frames)
+                for frame in flash_frames:
+                    await wait_while_paused(cancel, resume)
+                    if cancel.is_set():
+                        raise JobCancelled()
+                    async with lock:
+                        extracted += 1
+                        seen = extracted
+                        done = recognized
+                    await publish(
+                        "extracting" if done == 0 else "recognizing",
+                        f"已抽帧 {seen} 帧，其中 {len(flash_frames)} 帧是一闪而过的画面，已识别 {done}/{max(estimated, seen)} 帧",
+                    )
+                    while not cancel.is_set():
+                        try:
+                            await asyncio.wait_for(queue.put(frame), timeout=0.3)
+                            break
+                        except TimeoutError:
+                            continue
+                    else:
+                        raise JobCancelled()
             for _ in workers:
                 while not cancel.is_set():
                     try:
@@ -284,10 +372,15 @@ async def _run(
             raise
     finally:
         watcher.cancel()
+        if scan_task is not None and not scan_task.done():
+            scan_task.cancel()
         for task in workers:
             if not task.done():
                 task.cancel()
-        await asyncio.gather(*workers, return_exceptions=True)
+        pending: list[asyncio.Task] = list(workers)
+        if scan_task is not None:
+            pending.append(scan_task)
+        await asyncio.gather(*pending, return_exceptions=True)
         await asyncio.gather(watcher, return_exceptions=True)
 
     if cancel.is_set():
@@ -445,6 +538,13 @@ async def _run_selected(
                 if cancel.is_set():
                     raise JobCancelled()
                 dest = work_dir / f"retry_{index:06d}.jpg"
+                when = flash_time(index)
+                seek = None
+                step = 1.0 / probe.fps if probe.fps > 1 else 0.04
+                if when is not None:
+                    seek = when + min(step * 0.5, 0.02)
+                    if probe.duration > 0:
+                        seek = min(seek, max(0.0, probe.duration - 0.001))
                 try:
                     frame = await extract_one_frame(
                         video,
@@ -456,11 +556,27 @@ async def _run_selected(
                         jpeg_q=config.jpeg_q,
                         cancel=cancel,
                         on_process=on_process,
+                        at_sec=seek,
                     )
+                    if when is not None:
+                        end = when + step
+                        if probe.duration > 0:
+                            end = min(probe.duration, end)
+                        frame = Frame(
+                            index=index,
+                            start_sec=round(when, 3),
+                            end_sec=round(max(end, when + 0.001), 3),
+                            path=frame.path,
+                        )
                 except FFmpegError as exc:
                     if cancel.is_set() or "已取消" in str(exc):
                         raise JobCancelled() from exc
                     bounds = frame_bounds(index, config.fps, probe.duration)
+                    if when is not None:
+                        end = when + step
+                        if probe.duration > 0:
+                            end = min(probe.duration, end)
+                        bounds = (round(when, 3), round(max(end, when + 0.001), 3))
                     async with lock:
                         failed += 1
                         recognized += 1

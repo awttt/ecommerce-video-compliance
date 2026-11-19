@@ -4,18 +4,41 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
-from app.core.timeutil import format_fps
+from app.core.flash import (
+    FlashSpan,
+    FlashScanner,
+    block_means,
+    flash_frame_index,
+    merge_flash_spans,
+    scan_size,
+    spans_from_runs,
+)
+from app.core.motion import (
+    MotionScanner,
+    available as motion_available,
+    magnify_flash,
+    motion_runs,
+    stamp_crops,
+)
 from app.schemas import Frame
+
+log = logging.getLogger(__name__)
+
+_PTS_TIME = re.compile(r"pts_time:([0-9]+(?:\.[0-9]+)?)")
 
 _SCALE_DIVISIBLE: bool | None = None
 _ENCODERS: set[str] | None = None
+_VFR_ARGS: list[str] | None = None
 
 
 class FFmpegError(RuntimeError):
@@ -99,6 +122,32 @@ async def _run(cmd: list[str]) -> tuple[int, str]:
     return proc.returncode or 0, text
 
 
+def sample_filter(fps: float) -> str:
+    """从 0 秒起，每隔 1/fps 秒取当时那一帧。
+
+    不用 ffmpeg 的 fps 滤镜。它的相位跟着输出间隔走，1 FPS 抽到的画面
+    不在 2 FPS 那一组里，所以更高密度反而会漏掉低密度已经看见的字。
+    网格对齐之后，2 FPS 的整数秒和 1 FPS 是同一张图。
+    """
+    interval = max((1.0 / float(fps)) - 0.001, 0.001)
+    return f"select='isnan(prev_selected_t)+gte(t-prev_selected_t\\,{interval:.6f})'"
+
+
+async def vfr_args() -> list[str]:
+    """选出的帧按原时间戳写出。不补成固定帧率，否则同一张图会被重复写很多遍。"""
+    global _VFR_ARGS
+    if _VFR_ARGS is None:
+        try:
+            code, text = await _run([resolve_bin("ffmpeg"), "-hide_banner", "-h", "full"])
+        except FFmpegError:
+            code, text = 1, ""
+        if code == 0 and "-fps_mode" in text:
+            _VFR_ARGS = ["-fps_mode", "vfr"]
+        else:
+            _VFR_ARGS = ["-vsync", "vfr"]
+    return list(_VFR_ARGS)
+
+
 async def scale_filter(max_edge: int) -> str:
     global _SCALE_DIVISIBLE
     if _SCALE_DIVISIBLE is None:
@@ -116,12 +165,41 @@ async def scale_filter(max_edge: int) -> str:
 
 
 class VideoProbe:
-    def __init__(self, duration: float, has_video: bool, has_audio: bool, width: int, height: int):
+    def __init__(
+        self,
+        duration: float,
+        has_video: bool,
+        has_audio: bool,
+        width: int,
+        height: int,
+        fps: float = 0,
+    ):
         self.duration = duration
         self.has_video = has_video
         self.has_audio = has_audio
         self.width = width
         self.height = height
+        self.fps = fps
+
+
+def _parse_rate(value: object) -> float:
+    text = str(value or "").strip()
+    if not text or text == "0/0":
+        return 0.0
+    if "/" in text:
+        num, den = text.split("/", 1)
+        try:
+            num_f = float(num)
+            den_f = float(den)
+        except ValueError:
+            return 0.0
+        if den_f == 0:
+            return 0.0
+        return num_f / den_f
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
 
 
 async def probe_video(path: Path) -> VideoProbe:
@@ -159,7 +237,19 @@ async def probe_video(path: Path) -> VideoProbe:
             duration = 0.0
     width = int(video.get("width") or 0) if video else 0
     height = int(video.get("height") or 0) if video else 0
-    return VideoProbe(duration, video is not None, audio, width, height)
+    fps = 0.0
+    if video:
+        fps = _parse_rate(video.get("avg_frame_rate"))
+        if fps <= 0:
+            fps = _parse_rate(video.get("r_frame_rate"))
+        if fps <= 0 and duration > 0:
+            try:
+                count = int(video.get("nb_frames") or 0)
+            except (TypeError, ValueError):
+                count = 0
+            if count > 0:
+                fps = count / duration
+    return VideoProbe(duration, video is not None, audio, width, height, fps)
 
 
 def _frame_indexes(directory: Path) -> list[tuple[int, Path]]:
@@ -226,7 +316,7 @@ async def extract_frames(
 ) -> AsyncIterator[Frame]:
     """边写 jpg 边交出已经写完的帧。最新一张在 ffmpeg 退出前视为未写完。"""
     directory.mkdir(parents=True, exist_ok=True)
-    vf = f"fps={format_fps(fps)},{await scale_filter(max_edge)}"
+    vf = f"{sample_filter(fps)},{await scale_filter(max_edge)}"
     pattern = str(directory / "frame_%06d.jpg")
     cmd = [
         resolve_bin("ffmpeg"),
@@ -242,6 +332,7 @@ async def extract_frames(
         "-an",
         "-vf",
         vf,
+        *await vfr_args(),
         "-q:v",
         str(int(jpeg_q)),
         "-start_number",
@@ -314,12 +405,22 @@ async def extract_one_frame(
     jpeg_q: int,
     cancel: asyncio.Event,
     on_process: Callable[[asyncio.subprocess.Process | None], None] | None = None,
+    at_sec: float | None = None,
 ) -> Frame:
-    """按原来的帧号重抽一张。取消时删掉半成品。"""
-    bounds = frame_bounds(index, fps, duration)
-    if bounds is None:
-        raise FFmpegError("这一帧超出视频时长")
-    start, end = bounds
+    """按原来的帧号重抽一张。取消时删掉半成品。
+
+    at_sec 用来重抽闪帧：帧号不在 0.5–2 FPS 的网格上，按真实时间定位。
+    """
+    if at_sec is not None:
+        start = max(0.0, float(at_sec))
+        end = start
+        if duration > 0 and start >= duration:
+            raise FFmpegError("这一帧超出视频时长")
+    else:
+        bounds = frame_bounds(index, fps, duration)
+        if bounds is None:
+            raise FFmpegError("这一帧超出视频时长")
+        start, end = bounds
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
         dest.unlink()
@@ -331,10 +432,10 @@ async def extract_one_frame(
         "error",
         "-nostdin",
         "-y",
-        "-ss",
-        f"{start:.3f}",
         "-i",
         str(video),
+        "-ss",
+        f"{start:.3f}",
         "-map",
         "0:v:0",
         "-an",
@@ -373,6 +474,270 @@ async def extract_one_frame(
     return Frame(index=index, start_sec=start, end_sec=end, path=str(dest))
 
 
+async def _read_exact(stream: asyncio.StreamReader, size: int, cancel: asyncio.Event) -> bytes:
+    chunks: list[bytes] = []
+    got = 0
+    while got < size:
+        if cancel.is_set():
+            return b""
+        try:
+            piece = await asyncio.wait_for(stream.read(size - got), timeout=0.3)
+        except TimeoutError:
+            continue
+        if not piece:
+            break
+        chunks.append(piece)
+        got += len(piece)
+    return b"".join(chunks)
+
+
+async def _iter_gray_frames(
+    video: Path,
+    width: int,
+    height: int,
+    cancel: asyncio.Event,
+    times: list[float],
+) -> AsyncIterator[bytes]:
+    """按原始帧率吐出灰度图。时间戳从 showinfo 读，读不齐就留给调用方用帧率推算。"""
+    frame_bytes = width * height
+    cmd = [
+        resolve_bin("ffmpeg"),
+        "-hide_banner",
+        "-loglevel",
+        "info",
+        "-nostdin",
+        "-i",
+        str(video),
+        "-map",
+        "0:v:0",
+        "-an",
+        "-vf",
+        f"scale={width}:{height}:flags=fast_bilinear,showinfo",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "gray",
+        "pipe:1",
+    ]
+    proc = await spawn_process(*cmd)
+    assert proc.stdout is not None
+    assert proc.stderr is not None
+
+    async def read_stderr() -> None:
+        while True:
+            line = await proc.stderr.readline()
+            if not line:
+                break
+            for match in _PTS_TIME.finditer(decode_bytes(line)):
+                try:
+                    times.append(float(match.group(1)))
+                except ValueError:
+                    continue
+
+    reader = asyncio.create_task(read_stderr())
+    try:
+        while not cancel.is_set():
+            frame = await _read_exact(proc.stdout, frame_bytes, cancel)
+            if len(frame) != frame_bytes:
+                break
+            yield frame
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            try:
+                await proc.wait()
+            except ProcessLookupError:
+                pass
+        await reader
+
+
+async def scan_flashes(
+    video: Path,
+    *,
+    width: int,
+    height: int,
+    fps: float,
+    duration: float,
+    sample_fps: float,
+    cancel: asyncio.Event,
+    motion_enabled: bool = False,
+) -> list[FlashSpan]:
+    """扫完全部源帧，返回普通抽帧会漏掉的贴字时刻。扫描失败由调用方决定是否继续。
+
+    motion_enabled 为假时只做亮度比较。任务里的「闪帧检测」关掉时不会调用这里。
+    """
+    scanned_w, scanned_h = scan_size(width, height)
+    if scanned_w < 2 or scanned_h < 2:
+        return []
+    scanner = FlashScanner()
+    motion: MotionScanner | None = None
+    if motion_enabled and motion_available():
+        try:
+            import cv2
+
+            cv2.setNumThreads(2)
+            motion = MotionScanner(scanned_w, scanned_h)
+        except Exception as exc:
+            log.warning("运动扫描不可用，改为只按亮度比较：%s", exc)
+            motion = None
+    times: list[float] = []
+    seen = 0
+    started = time.perf_counter()
+    async for frame in _iter_gray_frames(video, scanned_w, scanned_h, cancel, times):
+        scanner.push(block_means(frame, scanned_w, scanned_h))
+        if motion is not None:
+            try:
+                await asyncio.to_thread(motion.push, bytes(frame))
+            except Exception as exc:
+                log.warning("运动扫描失败，改为只按亮度比较：%s", exc)
+                motion = None
+        seen += 1
+    if cancel.is_set() or seen < 3:
+        return []
+    if len(times) != seen:
+        times = [index / fps for index in range(seen)] if fps > 0 else []
+    rate = fps if fps > 0 else 30.0
+    bright = spans_from_runs(
+        scanner.finish(),
+        times,
+        fps=rate,
+        duration=duration,
+        sample_fps=sample_fps,
+    )
+    moved: list[FlashSpan] = []
+    if motion is not None:
+        try:
+            hits = motion.finish()
+            moved = stamp_crops(
+                spans_from_runs(
+                    motion_runs(hits),
+                    times,
+                    fps=rate,
+                    duration=duration,
+                    sample_fps=sample_fps,
+                ),
+                hits,
+                scanned_w,
+                scanned_h,
+            )
+        except Exception as exc:
+            log.warning("运动扫描失败，改为只按亮度比较：%s", exc)
+            moved = []
+    merged = merge_flash_spans(moved, bright)
+    log.info(
+        "闪帧扫描 %.1f 秒，亮度 %d 帧，运动 %d 帧，送去识别 %d 帧",
+        time.perf_counter() - started,
+        len(bright),
+        len(moved),
+        len(merged),
+    )
+    return merged
+
+
+async def extract_source_frames(
+    video: Path,
+    directory: Path,
+    spans: list[FlashSpan],
+    *,
+    max_edge: int,
+    jpeg_q: int,
+    cancel: asyncio.Event,
+    on_process: Callable[[asyncio.subprocess.Process | None], None] | None = None,
+) -> list[Frame]:
+    """按源帧号各抽一张。一次滤镜选中全部闪帧，避免逐张从片头解码。"""
+    ordered = sorted(spans, key=lambda item: item.source_index)
+    if not ordered or cancel.is_set():
+        return []
+    directory.mkdir(parents=True, exist_ok=True)
+    expr = "+".join(f"eq(n\\,{item.source_index})" for item in ordered)
+    vf = f"select='{expr}',{await scale_filter(max_edge)}"
+    pattern = str(directory / "flash_%06d.jpg")
+    cmd = [
+        resolve_bin("ffmpeg"),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-i",
+        str(video),
+        "-map",
+        "0:v:0",
+        "-an",
+        "-vf",
+        vf,
+        *await vfr_args(),
+        "-q:v",
+        str(int(jpeg_q)),
+        "-start_number",
+        "1",
+        pattern,
+    ]
+    proc = await spawn_process(*cmd, stdout=asyncio.subprocess.DEVNULL)
+    if on_process:
+        on_process(proc)
+    stderr_chunks: list[bytes] = []
+
+    async def read_stderr() -> None:
+        assert proc.stderr is not None
+        while True:
+            line = await proc.stderr.readline()
+            if not line:
+                break
+            stderr_chunks.append(line)
+            if sum(len(chunk) for chunk in stderr_chunks) > 16_384:
+                stderr_chunks.pop(0)
+
+    reader = asyncio.create_task(read_stderr())
+    try:
+        while proc.returncode is None:
+            if cancel.is_set():
+                break
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=0.3)
+            except TimeoutError:
+                continue
+        if cancel.is_set():
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            return []
+        if proc.returncode not in (0, None):
+            detail = decode_bytes(b"".join(stderr_chunks)).strip()
+            raise FFmpegError(detail or f"ffmpeg 抽帧失败，退出码 {proc.returncode}")
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            try:
+                await proc.wait()
+            except ProcessLookupError:
+                pass
+        if on_process:
+            on_process(None)
+        await reader
+    frames: list[Frame] = []
+    for offset, span in enumerate(ordered, start=1):
+        path = directory / f"flash_{offset:06d}.jpg"
+        if not path.is_file() or path.stat().st_size <= 0:
+            # 输出按顺序编号。缺一张就对不回后面的时刻，整批放弃，避免把价格标到别的时间。
+            log.warning("闪帧截图和检测到的时刻对不上，这批一闪而过的画面跳过")
+            return []
+        if span.crop is not None:
+            try:
+                magnify_flash(path, span.crop)
+            except Exception as exc:
+                log.warning("闪帧放大失败，这帧改用整张画面：%s", exc)
+        frames.append(
+            Frame(
+                index=flash_frame_index(span.start_sec),
+                start_sec=span.start_sec,
+                end_sec=span.end_sec,
+                path=str(path),
+            )
+        )
+    return frames
+
+
 async def extract_strip(video: Path, directory: Path) -> int:
     """大约每秒一张、高度约 48 像素的时间轴缩略图。失败时不留半成品。"""
     directory.mkdir(parents=True, exist_ok=True)
@@ -390,7 +755,8 @@ async def extract_strip(video: Path, directory: Path) -> int:
         "0:v:0",
         "-an",
         "-vf",
-        "fps=1,scale=-2:48",
+        f"{sample_filter(1)},scale=-2:48",
+        *await vfr_args(),
         "-q:v",
         "8",
         "-start_number",

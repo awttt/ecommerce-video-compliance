@@ -62,7 +62,7 @@ jobs:
           $setup = Get-ChildItem "dist\VideoCompliance-*-Setup.exe" | Select-Object -First 1
           if (-not $setup) { throw "installer was not produced" }
           $target = Join-Path $env:LOCALAPPDATA "Programs\VideoCompliance"
-          $installArgs = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
+          $installArgs = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$target")
           $proc = Start-Process -FilePath $setup.FullName -ArgumentList $installArgs -Wait -PassThru
           if ($proc.ExitCode -ne 0) { throw "installer exited with code $($proc.ExitCode)" }
           foreach ($name in @("VideoCompliance.exe", "ffmpeg.exe", "ffprobe.exe")) {
