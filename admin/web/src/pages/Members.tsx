@@ -1,10 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, App as AntApp, Button, Card, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Table, Typography } from "antd";
+import { Alert, App as AntApp, Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Table, Typography } from "antd";
 import { useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import { ApiError, api } from "../api";
 import { money } from "../format";
-import type { Device, Invite, Member, Tenant, User } from "../types";
+import type { Device, Member, Tenant, User } from "../types";
 import { PageHead, StatusTag } from "../ui";
 
 export function Members() {
@@ -12,7 +12,6 @@ export function Members() {
   const { message } = AntApp.useApp();
   const client = useQueryClient();
   const [open, setOpen] = useState(false);
-  const [link, setLink] = useState("");
   const [devicesOf, setDevicesOf] = useState<Member | null>(null);
   const [tenantId, setTenantId] = useState<number | undefined>(undefined);
   const tenants = useQuery({
@@ -25,10 +24,6 @@ export function Members() {
     queryKey: ["members", scope ?? "all"],
     queryFn: () => api<Member[]>(scope ? `/v1/members?tenant_id=${scope}` : "/v1/members"),
   });
-  const invites = useQuery({
-    queryKey: ["invites", scope ?? "all"],
-    queryFn: () => api<Invite[]>(scope ? `/v1/invites?tenant_id=${scope}` : "/v1/invites"),
-  });
   const devices = useQuery({
     queryKey: ["devices", devicesOf?.id],
     queryFn: () => api<Device[]>(`/v1/members/${devicesOf?.id}/devices`),
@@ -37,22 +32,21 @@ export function Members() {
 
   const refresh = () => {
     void client.invalidateQueries({ queryKey: ["members"] });
-    void client.invalidateQueries({ queryKey: ["invites"] });
     void client.invalidateQueries({ queryKey: ["devices"] });
   };
 
-  const invite = useMutation({
-    mutationFn: (values: { email: string; name: string; role: string; initial_amount: number }) =>
-      api<Invite>("/v1/members/invite", {
+  const create = useMutation({
+    mutationFn: (values: { email: string; name: string; password: string; role: string }) =>
+      api<Member>("/v1/members", {
         method: "POST",
         body: JSON.stringify({ ...values, tenant_id: scope ?? null }),
       }),
     onSuccess: (data) => {
       setOpen(false);
-      if (data.invite_token) setLink(`${location.origin}/invite/${data.invite_token}`);
+      message.success(`${data.name} 已创建，可从额度分配页划拨额度`);
       refresh();
     },
-    onError: (error) => message.error(error instanceof ApiError ? error.message : "邀请失败"),
+    onError: (error) => message.error(error instanceof ApiError ? error.message : "创建失败"),
   });
 
   const act = useMutation({
@@ -78,7 +72,7 @@ export function Members() {
     <>
       <PageHead
         title="成员管理"
-        description="每个成员对应一个中转站用户。邀请邮件里只有链接，没有密码。"
+        description="创建时立即开通中转站账号，并绑定审核专属分组。"
         extra={
           <Space>
             {user.role === "platform_admin" ? (
@@ -162,53 +156,34 @@ export function Members() {
           ]}
         />
       </Card>
-      {(invites.data ?? []).length > 0 ? (
-        <Card title="待接受的邀请" style={{ marginTop: 16 }}>
-          <Table
-            rowKey="id"
-            pagination={false}
-            dataSource={invites.data}
-            columns={[
-              { title: "姓名", dataIndex: "name" },
-              { title: "邮箱", dataIndex: "email" },
-              { title: "角色", dataIndex: "role_label" },
-              { title: "状态", render: () => <StatusTag status="invited" label="待接受" /> },
-            ]}
-          />
-        </Card>
-      ) : null}
       <Alert
         style={{ marginTop: 16 }}
         type="info"
         showIcon
-        message="对方设好密码后才创建中转站账号，并且只分配专属分组。分组不在可用列表里时，客户端不建画面密钥，提示联系管理员。"
+        message="账号会立即加入专属分组并创建审核 Key。额度需在额度分配页单独划拨。"
       />
-      <Modal title="邀请成员" open={open} onCancel={() => setOpen(false)} footer={null} destroyOnClose>
-        <Form layout="vertical" initialValues={{ role: "member", initial_amount: 0 }} onFinish={(values) => invite.mutate(values)}>
+      <Modal title="新建成员" open={open} onCancel={() => setOpen(false)} footer={null} destroyOnClose>
+        <Form layout="vertical" initialValues={{ role: "member" }} onFinish={(values) => create.mutate(values)}>
           <Form.Item name="name" label="姓名" rules={[{ required: true, message: "请填写姓名" }]}>
             <Input placeholder="例如：张剪辑" />
           </Form.Item>
           <Form.Item name="email" label="邮箱" rules={[{ required: true, type: "email", message: "请填写邮箱" }]}>
             <Input />
           </Form.Item>
+          <Form.Item name="password" label="初始密码" rules={[{ required: true, min: 8, message: "密码至少 8 位" }]}>
+            <Input.Password autoComplete="new-password" />
+          </Form.Item>
           <Form.Item name="role" label="角色">
             <Select
-              options={[
-                { value: "member", label: "普通用户" },
-                { value: "tenant_admin", label: "公司管理员" },
-              ]}
+              options={user.role === "platform_admin"
+                ? [{ value: "member", label: "普通用户" }, { value: "tenant_admin", label: "公司管理员" }]
+                : [{ value: "member", label: "普通用户" }]}
             />
           </Form.Item>
-          <Form.Item name="initial_amount" label="开通后分配的额度（元）">
-            <InputNumber min={0} style={{ width: "100%" }} />
-          </Form.Item>
-          <Button type="primary" htmlType="submit" loading={invite.isPending}>
-            生成邀请链接
+          <Button type="primary" htmlType="submit" loading={create.isPending}>
+            创建账号
           </Button>
         </Form>
-      </Modal>
-      <Modal title="邀请链接" open={Boolean(link)} onCancel={() => setLink("")} footer={null}>
-        <Typography.Paragraph copyable>{link}</Typography.Paragraph>
       </Modal>
       <Modal title={devicesOf ? `${devicesOf.name} 的设备` : "设备"} open={Boolean(devicesOf)} onCancel={() => setDevicesOf(null)} footer={null}>
         <Table

@@ -14,15 +14,14 @@ export function Tenants() {
   const [open, setOpen] = useState(false);
   const [stop, setStop] = useState<Tenant | null>(null);
   const [alsoDisable, setAlsoDisable] = useState(false);
-  const [link, setLink] = useState("");
   const query = useQuery({ queryKey: ["tenants"], queryFn: () => api<Tenant[]>("/v1/tenants") });
 
   const create = useMutation({
-    mutationFn: (values: { name: string; admin_email: string; admin_name: string; pool: number; seats: number }) =>
-      api<{ invite_token: string }>("/v1/tenants", { method: "POST", body: JSON.stringify(values) }),
+    mutationFn: (values: { name: string; admin_email: string; admin_name: string; admin_password: string; pool: number; seats: number }) =>
+      api<{ admin: { name: string } }>("/v1/tenants", { method: "POST", body: JSON.stringify(values) }),
     onSuccess: (data) => {
       setOpen(false);
-      setLink(`${location.origin}/invite/${data.invite_token}`);
+      message.success(`公司和管理员 ${data.admin.name} 已创建`);
       void client.invalidateQueries({ queryKey: ["tenants"] });
     },
     onError: (error) => message.error(error instanceof ApiError ? error.message : "创建失败"),
@@ -117,6 +116,9 @@ export function Tenants() {
           <Form.Item name="admin_email" label="管理员邮箱" rules={[{ required: true, type: "email", message: "请填写邮箱" }]}>
             <Input placeholder="用于登录管理后台" />
           </Form.Item>
+          <Form.Item name="admin_password" label="初始密码" rules={[{ required: true, min: 8, message: "密码至少 8 位" }]}>
+            <Input.Password autoComplete="new-password" />
+          </Form.Item>
           <Form.Item name="pool" label="初始公司池（元）">
             <InputNumber min={0} style={{ width: "100%" }} />
           </Form.Item>
@@ -124,13 +126,9 @@ export function Tenants() {
             <InputNumber min={1} max={10000} style={{ width: "100%" }} />
           </Form.Item>
           <Button type="primary" htmlType="submit" loading={create.isPending}>
-            创建并生成邀请链接
+            创建公司和管理员
           </Button>
         </Form>
-      </Modal>
-      <Modal title="邀请链接" open={Boolean(link)} onCancel={() => setLink("")} footer={null}>
-        <Typography.Paragraph>邮件发送还没接上，请把链接交给对方。链接 7 天内有效，对方自己设密码。</Typography.Paragraph>
-        <Typography.Paragraph copyable>{link}</Typography.Paragraph>
       </Modal>
       <Modal
         title={stop ? `停用 ${stop.name}` : "停用"}

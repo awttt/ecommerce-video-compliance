@@ -88,6 +88,7 @@ def member_dict(db: Session, member: Member) -> dict:
         "balance": yuan(shown),
         "overdraft": bool(member.balance_cents < 0 or member.overdraft),
         "month_cost": yuan(member.month_cost_cents),
+        "lifetime_cost": yuan(member.lifetime_cost_cents),
         "month_requests": member.month_requests,
         "month_input_tokens": member.month_input_tokens,
         "month_output_tokens": member.month_output_tokens,

@@ -1,5 +1,7 @@
 """中转站管理接口。没有管理密钥时走本地账本，不访问网络。"""
 
+import hashlib
+
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
@@ -73,7 +75,7 @@ class HttpRelay:
         self.client = httpx.Client(
             timeout=20.0,
             headers={
-                "Authorization": f"Bearer {settings.relay_admin_key}",
+                "x-api-key": settings.relay_admin_key,
                 "User-Agent": "evc-admin/0.1.0",
             },
         )
@@ -86,31 +88,76 @@ class HttpRelay:
             raise DomainError(502, f"中转站{action}失败（HTTP {response.status_code}）")
 
     def create_user(self, email: str, password: str) -> str:
-        if not self.group_id:
-            raise DomainError(400, "请先在接入设置填写专属分组 ID")
-        group: object = int(self.group_id) if self.group_id.isdigit() else self.group_id
+        group = self._configured_group_id()
         response = self.client.post(
             self._url("/admin/users"),
-            json={"email": email, "password": password, "allowed_groups": [group], "balance": 0},
+            headers={
+                "Idempotency-Key": hashlib.sha256(f"evc-admin-user:{email}".encode()).hexdigest()[:32],
+            },
+            # token4u 受限密钥的 users.create 明确拒绝附带余额，包括 balance: 0。
+            json={
+                "email": email,
+                "password": password,
+                "allowed_groups": [group],
+                "restrict_public_groups": True,
+            },
         )
         self._raise(response, "建号")
         data = response.json()
         user_id = data.get("id") or (data.get("data") or {}).get("id")
         if not user_id:
             raise DomainError(502, "中转站建号没有返回用户编号")
+        self._create_default_key(email, password)
         return str(user_id)
+
+    def _create_default_key(self, email: str, password: str) -> None:
+        import httpx
+
+        with httpx.Client(timeout=20.0) as user_client:
+            response = user_client.post(
+                self._url("/auth/login"),
+                json={"email": email, "password": password},
+            )
+            self._raise(response, "账号登录验证")
+            payload = response.json()
+            data = payload.get("data") if isinstance(payload, dict) else None
+            data = data if isinstance(data, dict) else payload
+            access_token = str(data.get("access_token") or "").strip()
+            if not access_token:
+                raise DomainError(502, "中转站没有返回新账号登录凭证")
+            group_id = self._configured_group_id()
+            response = user_client.post(
+                self._url("/keys"),
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Idempotency-Key": hashlib.sha256(f"evc-admin-key:{email}:{group_id}".encode()).hexdigest()[:32],
+                },
+                json={"name": "电商视频合规", "group_id": group_id},
+            )
+        self._raise(response, "创建审核密钥")
+
+    def _configured_group_id(self) -> int:
+        try:
+            group_id = int(self.group_id)
+        except (TypeError, ValueError) as exc:
+            raise DomainError(400, "请先在接入设置填写专属分组数字 ID") from exc
+        if group_id <= 0:
+            raise DomainError(400, "专属分组 ID 需要是正整数")
+        return group_id
 
     def add_balance(self, relay_user_id: str, cents: int, key: str) -> None:
         response = self.client.post(
             self._url(f"/admin/users/{relay_user_id}/balance"),
-            json={"amount": round(cents / 100, 2), "operation": "add", "idempotency_key": key},
+            headers={"Idempotency-Key": key},
+            json={"balance": round(cents / 100, 2), "operation": "add"},
         )
         self._raise(response, "加款")
 
     def subtract_balance(self, relay_user_id: str, cents: int, key: str) -> None:
         response = self.client.post(
             self._url(f"/admin/users/{relay_user_id}/balance"),
-            json={"amount": round(cents / 100, 2), "operation": "subtract", "idempotency_key": key},
+            headers={"Idempotency-Key": key},
+            json={"balance": round(cents / 100, 2), "operation": "subtract"},
         )
         self._raise(response, "扣款")
 

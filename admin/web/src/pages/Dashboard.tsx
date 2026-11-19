@@ -44,7 +44,7 @@ export function Dashboard() {
     <>
       <PageHead
         title="总览"
-        description={member ? "这里只看你自己的余额、消耗和提交。" : "成员余额和本月已消耗，数字来自中转站扣费，打开页面时不实时请求中转站。"}
+        description={member ? "这里只看你自己的余额、消耗和提交。" : "对账使用累计消耗；本月消耗单独展示。数字来自已同步的中转站扣费。"}
         extra={<Button onClick={() => void client.invalidateQueries({ queryKey: ["dashboard"] })}>刷新数据</Button>}
       />
       {report ? (
@@ -56,7 +56,7 @@ export function Dashboard() {
           description={
             member
               ? "命中词提交和查看自己的视频可以在这里进行。识别仍然使用你的中转站额度，后台不代理算力。"
-              : `${money(report.balance)} + ${money(report.month_cost)} ，对照已分配 ${money(report.allocated)}。公司池还可分配 ${money(report.pool_remaining)}。${
+              : `${money(report.balance)} + ${money(report.cumulative_cost)} ，对照已分配 ${money(report.allocated)}。公司池还可分配 ${money(report.pool_remaining)}。${
                   report.overdraft_members.length ? `透支按 0 计入：${report.overdraft_members.join("、")}。` : ""
                 }`
           }

@@ -80,7 +80,7 @@ export function Quota() {
                 <Statistic title="可分配" value={report?.pool_remaining ?? 0} precision={2} prefix="¥" valueStyle={{ color: "#52c41a" }} />
               </Col>
               <Col span={12} md={6}>
-                <Statistic title="本月消耗" value={report?.month_cost ?? 0} precision={2} prefix="¥" />
+                <Statistic title="累计已消耗" value={report?.cumulative_cost ?? 0} precision={2} prefix="¥" />
               </Col>
             </Row>
           </Card>

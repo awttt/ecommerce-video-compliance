@@ -53,6 +53,7 @@ from app.service import (
     approve_keyword,
     bind_device,
     create_tenant,
+    create_member,
     delete_keyword,
     disable_member,
     enable_member,
@@ -96,6 +97,7 @@ class TenantBody(BaseModel):
     name: str
     admin_email: str
     admin_name: str = ""
+    admin_password: str
     pool: float = 0
     seats: int = 10
 
@@ -111,6 +113,14 @@ class InviteBody(BaseModel):
     role: str = "member"
     tenant_id: int | None = None
     initial_amount: float = 0
+
+
+class CreateMemberBody(BaseModel):
+    email: str
+    name: str = ""
+    password: str
+    role: str = "member"
+    tenant_id: int | None = None
 
 
 class AcceptBody(BaseModel):
@@ -383,6 +393,7 @@ def dashboard(
             "ok": True,
             "balance": member_dict(db, own)["balance"] if own else 0,
             "month_cost": member_dict(db, own)["month_cost"] if own else 0,
+            "cumulative_cost": member_dict(db, own)["lifetime_cost"] if own else 0,
             "allocated": 0,
             "pool_remaining": 0,
             "previous_month_cost": 0,
@@ -434,17 +445,18 @@ def post_tenant(
     user: Member = Depends(require("tenant.manage")),
     db: Session = Depends(get_db),
 ) -> dict:
-    tenant, token = create_tenant(
+    tenant, member = create_tenant(
         db,
         user,
         name=body.name,
         admin_email=body.admin_email,
         admin_name=body.admin_name,
+        admin_password=body.admin_password,
         pool=body.pool,
         seats=body.seats,
         ip=client_ip(request),
     )
-    return {"tenant": tenant_dict(db, tenant), "invite_token": token}
+    return {"tenant": tenant_dict(db, tenant), "admin": member_dict(db, member)}
 
 
 @router.put("/tenants/{tenant_id}/status")
@@ -502,6 +514,26 @@ def post_invite(
     payload = invite_dict(row, tenant.name if tenant else "")
     payload["invite_token"] = token
     return payload
+
+
+@router.post("/members")
+def post_member(
+    body: CreateMemberBody,
+    request: Request,
+    user: Member = Depends(require("member.manage")),
+    db: Session = Depends(get_db),
+) -> dict:
+    member = create_member(
+        db,
+        user,
+        email=body.email,
+        name=body.name,
+        password=body.password,
+        role=body.role,
+        tenant_id=body.tenant_id,
+        ip=client_ip(request),
+    )
+    return member_dict(db, member)
 
 
 @router.get("/invites")
@@ -963,15 +995,16 @@ def test_settings(user: Member = Depends(require("settings.write")), db: Session
     base = (row.relay_base_url if row else env.relay_base_url).rstrip("/")
     try:
         response = httpx.get(
-            base + "/admin/users",
-            params={"page": 1, "page_size": 1},
-            headers={"Authorization": f"Bearer {env.relay_admin_key}", "User-Agent": "evc-admin/0.1.0"},
+            base + "/admin/users/9223372036854775807/balance-history",
+            headers={"x-api-key": env.relay_admin_key, "User-Agent": "evc-admin/0.1.0"},
             timeout=8,
         )
     except httpx.HTTPError:
         return {"ok": False, "mode": "remote", "message": "连不上中转站"}
     if response.status_code in (401, 403):
         return {"ok": False, "mode": "remote", "message": "管理密钥无效"}
+    if response.status_code == 404:
+        return {"ok": True, "mode": "remote", "message": "管理密钥有效，中转站连接正常"}
     if response.status_code >= 400:
         return {"ok": False, "mode": "remote", "message": f"中转站返回 HTTP {response.status_code}"}
     return {"ok": True, "mode": "remote", "message": "已连上中转站"}

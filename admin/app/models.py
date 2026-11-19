@@ -39,6 +39,7 @@ class Member(Base):
     status: Mapped[str] = mapped_column(String(16), default="active")
     balance_cents: Mapped[int] = mapped_column(Integer, default=0)
     month_cost_cents: Mapped[int] = mapped_column(Integer, default=0)
+    lifetime_cost_cents: Mapped[int] = mapped_column(Integer, default=0)
     previous_month_cost_cents: Mapped[int] = mapped_column(Integer, default=0)
     month_requests: Mapped[int] = mapped_column(Integer, default=0)
     month_input_tokens: Mapped[int] = mapped_column(Integer, default=0)

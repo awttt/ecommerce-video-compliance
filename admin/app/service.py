@@ -1,7 +1,7 @@
 """租户、成员、额度、命中词和用量。租户范围以登录账号为准，不读请求体里的租户来放权。"""
 
 import re
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 from sqlalchemy.exc import IntegrityError
@@ -149,10 +149,11 @@ def create_tenant(
     name: str,
     admin_email: str,
     admin_name: str,
+    admin_password: str,
     pool: object,
     seats: int,
     ip: str = "",
-) -> tuple[Tenant, str]:
+) -> tuple[Tenant, Member]:
     _require(actor, "tenant.manage")
     cleaned = name.strip()
     if not cleaned or len(cleaned) > 40:
@@ -164,6 +165,7 @@ def create_tenant(
         raise DomainError(400, "已经有这家公司")
     if db.query(Member).filter(Member.email == email).first():
         raise DomainError(400, "这个邮箱已经开通")
+    _password_ok(admin_password)
     if seats < 1 or seats > 10000:
         raise DomainError(400, "席位数需要在 1 到 10000 之间")
     cents = to_cents(pool)
@@ -183,6 +185,17 @@ def create_tenant(
     )
     db.add(tenant)
     db.flush()
+    relay_user_id = get_relay(db).create_user(email, admin_password)
+    admin_member = Member(
+        tenant_id=tenant.id,
+        email=email,
+        name=(admin_name or email.split("@", 1)[0])[:40],
+        role="tenant_admin",
+        password_hash=hash_password(admin_password),
+        relay_user_id=relay_user_id,
+        status="active",
+    )
+    db.add(admin_member)
     db.add(
         TenantRules(
             tenant_id=tenant.id,
@@ -192,22 +205,11 @@ def create_tenant(
             version=1,
         )
     )
-    token = new_invite_token()
-    db.add(
-        Invite(
-            tenant_id=tenant.id,
-            token_hash=sha256_text(token),
-            email=email,
-            name=(admin_name or email.split("@", 1)[0])[:40],
-            role="tenant_admin",
-            initial_amount_cents=0,
-            expires_at=utcnow() + timedelta(days=7),
-        )
-    )
     audit(db, actor, "tenant.create", cleaned, f"新建公司 {cleaned}", tenant_id=tenant.id, ip=ip)
+    audit(db, actor, "member.create", email, f"创建公司管理员 {admin_member.name}", tenant_id=tenant.id, after={"relay_user_id": relay_user_id, "role": "tenant_admin"}, ip=ip)
     db.commit()
     db.refresh(tenant)
-    return tenant, token
+    return tenant, admin_member
 
 
 def set_tenant_status(
@@ -303,6 +305,53 @@ def invite_member(
     db.commit()
     db.refresh(row)
     return row, token
+
+
+def create_member(
+    db: Session,
+    actor: Member,
+    *,
+    email: str,
+    name: str,
+    password: str,
+    role: str,
+    tenant_id: int | None,
+    ip: str = "",
+) -> Member:
+    _require(actor, "member.manage")
+    if role not in ("tenant_admin", "member"):
+        raise DomainError(400, "角色只能是公司管理员或普通用户")
+    if actor.role == "tenant_admin" and role != "member":
+        raise DomainError(403, "公司管理员只能创建普通员工")
+    target = resolve_tenant(actor, tenant_id)
+    if target is None:
+        raise DomainError(400, "请选择公司")
+    tenant = _tenant(db, target)
+    if tenant.status != "active":
+        raise DomainError(400, "公司已停用")
+    address = email.strip().lower()
+    if "@" not in address:
+        raise DomainError(400, "邮箱不正确")
+    if db.query(Member).filter(Member.email == address).first():
+        raise DomainError(400, "这个邮箱已经开通")
+    if seats_used(db, tenant.id) >= tenant.seat_quota:
+        raise DomainError(400, "席位已满")
+    _password_ok(password)
+    relay_user_id = get_relay(db).create_user(address, password)
+    member = Member(
+        tenant_id=tenant.id,
+        email=address,
+        name=(name or address.split("@", 1)[0]).strip()[:40],
+        role=role,
+        password_hash=hash_password(password),
+        relay_user_id=relay_user_id,
+        status="active",
+    )
+    db.add(member)
+    audit(db, actor, "member.create", member.email, f"创建成员 {member.name}", tenant_id=tenant.id, after={"relay_user_id": relay_user_id, "role": role}, ip=ip)
+    db.commit()
+    db.refresh(member)
+    return member
 
 
 def accept_invite(db: Session, token: str, password: str, name: str = "") -> tuple[Member, str]:
@@ -881,7 +930,7 @@ def rules_payload(db: Session, actor: Member, since: int, tenant_id: int | None)
     if actor.role == "member":
         target = actor.tenant_id
     else:
-        target = resolve_tenant(actor, tenant_id if actor.role == "platform_admin" else actor.tenant_id)
+        target = resolve_tenant(actor, tenant_id)
     meta = db.get(AppMeta, "rules_version")
     current = int(meta.value) if meta and meta.value else 0
     query = db.query(KeywordEntry).filter(KeywordEntry.version > since)
@@ -930,7 +979,7 @@ def visible_member_ids(db: Session, actor: Member, tenant_id: int | None) -> lis
 
 
 def reconcile(db: Session, tenant_ids: list[int]) -> dict:
-    balance = cost = allocated = pool = previous = 0
+    balance = cost = lifetime_cost = allocated = pool = previous = 0
     names: list[str] = []
     parts = []
     ok = True
@@ -940,6 +989,7 @@ def reconcile(db: Session, tenant_ids: list[int]) -> dict:
             continue
         part_balance = 0
         part_cost = 0
+        part_lifetime_cost = 0
         part_names: list[str] = []
         members = (
             db.query(Member)
@@ -950,14 +1000,16 @@ def reconcile(db: Session, tenant_ids: list[int]) -> dict:
             if member.status == "invited":
                 continue
             part_cost += member.month_cost_cents
+            part_lifetime_cost += max(member.lifetime_cost_cents, member.month_cost_cents)
             if member.balance_cents < 0 or member.overdraft:
                 part_names.append(member.name)
             else:
                 part_balance += member.balance_cents
-        part_ok = part_balance + part_cost == tenant.allocated_total_cents and not part_names
+        part_ok = part_balance + part_lifetime_cost == tenant.allocated_total_cents and not part_names
         ok = ok and part_ok
         balance += part_balance
         cost += part_cost
+        lifetime_cost += part_lifetime_cost
         allocated += tenant.allocated_total_cents
         pool += tenant.pool_balance_cents
         previous += tenant.previous_month_cost_cents
@@ -969,17 +1021,19 @@ def reconcile(db: Session, tenant_ids: list[int]) -> dict:
                 "ok": part_ok,
                 "balance": yuan(part_balance),
                 "month_cost": yuan(part_cost),
+                "cumulative_cost": yuan(part_lifetime_cost),
                 "allocated": yuan(tenant.allocated_total_cents),
                 "pool_remaining": yuan(tenant.pool_balance_cents),
                 "pool_total": yuan(tenant.pool_total_cents),
                 "overdraft_members": part_names,
             }
         )
-    overall = balance + cost == allocated and not names and ok
+    overall = balance + lifetime_cost == allocated and not names and ok
     return {
         "ok": overall,
         "balance": yuan(balance),
         "month_cost": yuan(cost),
+        "cumulative_cost": yuan(lifetime_cost),
         "allocated": yuan(allocated),
         "pool_remaining": yuan(pool),
         "previous_month_cost": yuan(previous),
@@ -1007,6 +1061,54 @@ def trend(db: Session, member_ids: list[int] | None) -> list[dict]:
         key = day.isoformat()
         days.append({"date": key, "cost": yuan(buckets.get(key, 0))})
     return days
+
+
+def record_usage_snapshot(
+    db: Session,
+    *,
+    tenant_id: int,
+    member_id: int,
+    day: date,
+    requests: int,
+    input_tokens: int,
+    output_tokens: int,
+    cost_cents: int,
+) -> UsageSnapshot:
+    member = db.query(Member).filter(Member.id == member_id, Member.tenant_id == tenant_id).one_or_none()
+    if member is None:
+        raise DomainError(404, "成员不存在")
+    row = (
+        db.query(UsageSnapshot)
+        .filter(UsageSnapshot.tenant_id == tenant_id, UsageSnapshot.member_id == member_id, UsageSnapshot.day == day)
+        .one_or_none()
+    )
+    previous_cost = row.cost_cents if row else 0
+    if row is None:
+        row = UsageSnapshot(tenant_id=tenant_id, member_id=member_id, day=day)
+        db.add(row)
+    row.requests = max(0, int(requests))
+    row.input_tokens = max(0, int(input_tokens))
+    row.output_tokens = max(0, int(output_tokens))
+    row.cost_cents = max(0, int(cost_cents))
+    member.lifetime_cost_cents = max(0, member.lifetime_cost_cents + row.cost_cents - previous_cost)
+    db.flush()
+    current_month = shanghai_now().date().replace(day=1)
+    if day.year == current_month.year and day.month == current_month.month:
+        month_rows = (
+            db.query(UsageSnapshot)
+            .filter(
+                UsageSnapshot.member_id == member_id,
+                UsageSnapshot.day >= current_month,
+                UsageSnapshot.day <= shanghai_now().date(),
+            )
+            .all()
+        )
+        member.month_cost_cents = sum(item.cost_cents for item in month_rows)
+        member.month_requests = sum(item.requests for item in month_rows)
+        member.month_input_tokens = sum(item.input_tokens for item in month_rows)
+        member.month_output_tokens = sum(item.output_tokens for item in month_rows)
+    db.flush()
+    return row
 
 
 def register_job(

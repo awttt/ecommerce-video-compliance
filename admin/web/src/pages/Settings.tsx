@@ -51,7 +51,7 @@ export function Settings() {
                 <Form.Item name="group_name" label="专属分组名称" rules={[{ required: true, message: "请填写分组" }]}>
                   <Input />
                 </Form.Item>
-                <Form.Item name="group_id" label="分组 ID（备用）" extra="名称对不上时，建号才用这个编号。">
+                <Form.Item name="group_id" label="审核专属分组 ID" extra="需要填写 token4u 中现有审核专属分组的数字 ID。">
                   <Input />
                 </Form.Item>
                 <Form.Item name="backend_mode_enabled" label="后台模式已开启" valuePropName="checked">
@@ -81,7 +81,7 @@ export function Settings() {
               type={data?.admin_key_configured ? "success" : "warning"}
               showIcon
               message={data?.admin_key_configured ? "管理密钥已配置" : "未配置管理密钥"}
-              description="权限范围是 users.read、users.write、users.balance.write、usage.read。没有密钥时，开通和划拨只写本地演示账本，不会请求中转站。"
+              description="至少需要 users.create、users.status.write、users.balance.read、users.balance.write 和 usage.read。没有密钥时，开通和划拨只写本地演示账本，不会请求中转站。"
             />
             <Table
               style={{ marginTop: 16 }}

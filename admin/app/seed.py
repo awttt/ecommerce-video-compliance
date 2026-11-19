@@ -95,6 +95,7 @@ def seed(db: Session) -> None:
             status=status,
             balance_cents=balance,
             month_cost_cents=cost,
+            lifetime_cost_cents=cost,
             month_requests=requests,
             month_input_tokens=tokens_in,
             month_output_tokens=tokens_out,

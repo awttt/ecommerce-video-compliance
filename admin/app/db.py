@@ -1,6 +1,6 @@
 from collections.abc import Generator
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -56,4 +56,14 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
-    Base.metadata.create_all(get_engine())
+    engine = get_engine()
+    Base.metadata.create_all(engine)
+    columns = {column["name"] for column in inspect(engine).get_columns("tenant_members")}
+    if "lifetime_cost_cents" not in columns:
+        with engine.begin() as connection:
+            connection.execute(
+                text("ALTER TABLE tenant_members ADD COLUMN lifetime_cost_cents INTEGER NOT NULL DEFAULT 0")
+            )
+            connection.execute(
+                text("UPDATE tenant_members SET lifetime_cost_cents = month_cost_cents + previous_month_cost_cents")
+            )

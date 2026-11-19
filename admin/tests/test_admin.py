@@ -100,6 +100,75 @@ def test_login_uses_relay_and_marks_super_admin(tmp_path, monkeypatch):
         assert stranger.json()["detail"] == "这个账号没有后台权限"
 
 
+def test_http_relay_matches_token4u_admin_contract(monkeypatch):
+    """evc-admin 发出的请求体必须符合 token4u 受限管理密钥契约。"""
+    import app.relay as relay
+    from app.config import Settings
+
+    calls: list[tuple[str, str, dict, object]] = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def _record(self, method: str, url: str, headers, body):
+            calls.append((method, url, dict(headers or {}), body))
+            if url.endswith("/admin/users"):
+                return httpx.Response(200, json={"code": 0, "data": {"id": 77}})
+            if url.endswith("/auth/login"):
+                return httpx.Response(200, json={"code": 0, "data": {"access_token": "user-token"}})
+            return httpx.Response(200, json={"code": 0, "data": {}})
+
+        def post(self, url, headers=None, json=None, **kwargs):
+            del kwargs
+            return self._record("POST", url, headers, json)
+
+        def put(self, url, headers=None, json=None, **kwargs):
+            del kwargs
+            return self._record("PUT", url, headers, json)
+
+    monkeypatch.setattr(httpx, "Client", FakeClient)
+    settings = Settings(
+        database_url="sqlite://",
+        jwt_secret="test-secret",
+        relay_base_url="https://relay.example/api/v1",
+        relay_gateway_url="https://relay.example/v1",
+        relay_admin_key="restricted-key",
+        relay_group_id="9",
+        relay_group_name="审核专属",
+        timezone="Asia/Shanghai",
+    )
+    sender = relay.HttpRelay.__new__(relay.HttpRelay)
+    sender.settings = settings
+    sender.group_id = "9"
+    sender.client = FakeClient()
+
+    assert sender.create_user("staff@example.com", "password123") == "77"
+    user_body = next(body for method, url, _, body in calls if method == "POST" and url.endswith("/admin/users"))
+    assert user_body["allowed_groups"] == [9]
+    assert user_body["restrict_public_groups"] is True
+    assert "balance" not in user_body
+
+    sender.add_balance("77", 1000, "idem-add")
+    method, _, headers, body = calls[-1]
+    assert method == "POST" and body == {"balance": 10.0, "operation": "add"}
+    assert headers["Idempotency-Key"] == "idem-add"
+
+    sender.subtract_balance("77", 300, "idem-sub")
+    assert calls[-1][2]["Idempotency-Key"] == "idem-sub"
+    assert calls[-1][3] == {"balance": 3.0, "operation": "subtract"}
+
+    sender.set_status("77", "disabled")
+    assert calls[-1][:2] == ("PUT", "https://relay.example/api/v1/admin/users/77")
+    assert calls[-1][3] == {"status": "disabled"}
+
+
 def test_login_2fa_keeps_temp_token_on_server(tmp_path, monkeypatch):
     import app.auth_relay as auth_relay
 
@@ -156,6 +225,10 @@ def test_tenant_cannot_cross_company_or_settings(tmp_path, monkeypatch):
         jie = next(item["id"] for item in tenants if item["name"] == "锦程商贸")
         denied = client.get("/v1/members", headers=tenant, params={"tenant_id": youpin})
         assert denied.status_code == 403
+        denied_rules = client.get("/v1/rules", headers=tenant, params={"tenant_id": youpin})
+        assert denied_rules.status_code == 403
+        own_rules = client.get("/v1/rules", headers=tenant)
+        assert own_rules.status_code == 200
         own = client.get("/v1/members", headers=tenant).json()
         assert {item["name"] for item in own} == {"李运营", "张剪辑", "王审核", "赵兼职"}
         assert client.get("/v1/tenants", headers=tenant).status_code == 403
@@ -379,3 +452,103 @@ def test_disable_frees_seat_and_invite_uses_only_exclusive_group(tmp_path, monke
         db.close()
         restored = client.post(f"/v1/members/{wang['id']}/enable", headers=tenant)
         assert restored.status_code == 200, restored.text
+
+
+def test_direct_company_and_employee_creation(tmp_path, monkeypatch):
+    with _client(tmp_path, monkeypatch) as client:
+        platform = _login(client, "admin@yujing.local")
+        created = client.post(
+            "/v1/tenants",
+            headers=platform,
+            json={
+                "name": "新入驻公司",
+                "admin_email": "boss@newco.example",
+                "admin_name": "公司管理员",
+                "admin_password": DEMO_PASSWORD,
+                "pool": 1000,
+                "seats": 3,
+            },
+        )
+        assert created.status_code == 200, created.text
+        assert created.json()["admin"]["role"] == "tenant_admin"
+        assert "invite_token" not in created.json()
+        tenant_id = created.json()["tenant"]["id"]
+        admin = _login(client, "boss@newco.example")
+        employee = client.post(
+            "/v1/members",
+            headers=admin,
+            json={"email": "worker@newco.example", "name": "员工", "password": DEMO_PASSWORD, "role": "member"},
+        )
+        assert employee.status_code == 200, employee.text
+        assert employee.json()["tenant_id"] == tenant_id
+        assert employee.json()["role"] == "member"
+        denied = client.post(
+            "/v1/members",
+            headers=admin,
+            json={"email": "boss2@newco.example", "password": DEMO_PASSWORD, "role": "tenant_admin"},
+        )
+        assert denied.status_code == 403
+
+
+def test_cumulative_reconciliation_survives_month_boundary(tmp_path, monkeypatch):
+    with _client(tmp_path, monkeypatch) as client:
+        tenant = _login(client, "li@jiecheng.com")
+        from app.db import session
+        from app.models import Member, Tenant
+
+        db = session()
+        person = db.query(Member).filter(Member.email == "zhang@jiecheng.com").one()
+        company = db.get(Tenant, person.tenant_id)
+        person.balance_cents = 50_000
+        person.month_cost_cents = 10_000
+        person.lifetime_cost_cents = 150_000
+        company.allocated_total_cents = sum(
+            row.balance_cents + max(row.lifetime_cost_cents, row.month_cost_cents)
+            for row in db.query(Member).filter(Member.tenant_id == company.id, Member.role != "platform_admin").all()
+        )
+        db.commit()
+        expected = company.allocated_total_cents / 100
+        db.close()
+        report = client.get("/v1/usage/reconcile", headers=tenant).json()
+        assert report["ok"] is True
+        assert report["cumulative_cost"] > report["month_cost"]
+        assert round(report["balance"] + report["cumulative_cost"], 2) == expected
+
+
+def test_usage_snapshot_upsert_does_not_double_count(tmp_path, monkeypatch):
+    with _client(tmp_path, monkeypatch):
+        from app.db import session
+        from app.models import Member, UsageSnapshot
+        from app.service import record_usage_snapshot
+        from app.timeutil import shanghai_now
+
+        db = session()
+        member = db.query(Member).filter(Member.email == "zhang@jiecheng.com").one()
+        member.lifetime_cost_cents = 20_000
+        today = shanghai_now().date()
+        record_usage_snapshot(
+            db,
+            tenant_id=member.tenant_id,
+            member_id=member.id,
+            day=today,
+            requests=3,
+            input_tokens=100,
+            output_tokens=40,
+            cost_cents=500,
+        )
+        record_usage_snapshot(
+            db,
+            tenant_id=member.tenant_id,
+            member_id=member.id,
+            day=today,
+            requests=4,
+            input_tokens=120,
+            output_tokens=50,
+            cost_cents=700,
+        )
+        db.commit()
+        db.refresh(member)
+        assert member.lifetime_cost_cents == 20_700
+        assert member.month_cost_cents == 700
+        assert db.query(UsageSnapshot).filter(UsageSnapshot.member_id == member.id, UsageSnapshot.day == today).count() == 1
+        db.close()

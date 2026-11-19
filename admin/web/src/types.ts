@@ -17,6 +17,7 @@ export interface Reconcile {
   ok: boolean;
   balance: number;
   month_cost: number;
+  cumulative_cost: number;
   allocated: number;
   pool_remaining: number;
   previous_month_cost: number;
@@ -102,6 +103,7 @@ export interface Member {
   balance: number;
   overdraft: boolean;
   month_cost: number;
+  lifetime_cost: number;
   month_requests: number;
   month_input_tokens: number;
   month_output_tokens: number;
