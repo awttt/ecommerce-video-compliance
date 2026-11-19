@@ -1,8 +1,8 @@
-"""画面模型是 GLM 5.3 Flash 时，固定把请求分给 glm-5.3-flash 和 gpt-6-luna。
+"""画面和口播都只请求当前选中的模型。
 
-一次逻辑请求是一帧画面，或一批口播判定。普通抽帧用帧号，口播用批次序号。
-闪帧帧号不连续，第一次出现时按本任务的抽出顺序编号，并在发出请求前写入任务快照。
-DeepSeek 和 Qwen 不分流。
+不再把 glm-5.3-flash 分到 gpt-6-luna。旧任务快照里的 Luna 分配在执行、
+失败帧重试和口播重判时改回当前模型，不会再发出 Luna 请求。
+DeepSeek 和 Qwen 仍用各自的模型名。
 """
 
 from __future__ import annotations
@@ -17,8 +17,7 @@ from app.core.relay import LUNA_MODEL, PICTURE_MODEL
 
 log = logging.getLogger(__name__)
 
-# 只在画面模型为 glm-5.3-flash 时使用。序号从 1 起，奇数 GLM，偶数 Luna。
-SPLIT_PERCENT = 50
+# 不再分流。保留函数名，调用点统一得到 0。
 
 # 一轮传输里，超时、断线和可重试状态码最多 POST 这么多次。这不是整次逻辑请求的上限。
 TRANSPORT_ATTEMPTS = 2
@@ -56,8 +55,7 @@ class HttpBudget:
 
 
 def split_percent(selected_model: str) -> int:
-    if selected_model == PICTURE_MODEL:
-        return SPLIT_PERCENT
+    del selected_model
     return 0
 
 
@@ -149,7 +147,11 @@ class ModelRoute:
         flush: Callable[[], Awaitable[None]] | None = None,
     ):
         self.selected_model = selected_model or PICTURE_MODEL
-        self.percent = percent if self.selected_model == PICTURE_MODEL else 0
+        if self.selected_model == LUNA_MODEL:
+            self.selected_model = PICTURE_MODEL
+        # 传入的旧比例一律不用，避免快照或调用方把请求再分到 Luna。
+        self.percent = 0
+        del percent
         self.assignments = assignments if assignments is not None else empty_assignments()
         self.stats = stats if stats is not None else {}
         self.allow_new_flash = allow_new_flash
@@ -227,6 +229,11 @@ class ModelRoute:
     def _bump_logical(self, model: str) -> None:
         self._bucket(model)["logical"] += 1
 
+    def _kept_assignment(self, stored: object) -> str | None:
+        if not isinstance(stored, str) or not stored.strip():
+            return None
+        return stored.strip()
+
     def _by_ordinal(self, ordinal: int) -> str:
         if uses_luna(ordinal, self.percent):
             return LUNA_MODEL
@@ -235,9 +242,12 @@ class ModelRoute:
     def _assign_picture(self, index: int) -> tuple[str, bool, str]:
         picture: dict[str, str] = self.assignments["picture"]
         key = str(int(index))
-        stored = picture.get(key)
-        if isinstance(stored, str) and stored.strip():
-            return stored.strip(), False, "picture"
+        stored = self._kept_assignment(picture.get(key))
+        if stored == LUNA_MODEL:
+            picture[key] = self.selected_model
+            return self.selected_model, False, "picture"
+        if stored:
+            return stored, False, "picture"
         model, kind = self._choose_picture(index)
         picture[key] = model
         self._bump_logical(model)
@@ -245,6 +255,12 @@ class ModelRoute:
 
     def _choose_picture(self, index: int) -> tuple[str, str]:
         if self.percent <= 0:
+            if index >= FLASH_INDEX_BASE:
+                order: list[str] = self.assignments["flash_order"]
+                key = str(int(index))
+                if key not in order and self.allow_new_flash:
+                    order.append(key)
+                return self.selected_model, "flash"
             return self.selected_model, "picture"
         if index >= FLASH_INDEX_BASE:
             order: list[str] = self.assignments["flash_order"]
@@ -263,9 +279,12 @@ class ModelRoute:
     def _assign_speech(self, batch_index: int) -> tuple[str, bool]:
         speech: dict[str, str] = self.assignments["speech"]
         key = str(int(batch_index))
-        stored = speech.get(key)
-        if isinstance(stored, str) and stored.strip():
-            return stored.strip(), False
+        stored = self._kept_assignment(speech.get(key))
+        if stored == LUNA_MODEL:
+            speech[key] = self.selected_model
+            return self.selected_model, False
+        if stored:
+            return stored, False
         model = self.selected_model if self.percent <= 0 else self._by_ordinal(int(batch_index) + 1)
         speech[key] = model
         self._bump_logical(model)
