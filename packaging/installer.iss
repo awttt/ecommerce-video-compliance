@@ -131,11 +131,10 @@ var
   DeleteButton, KeepButton: TNewButton;
 begin
   Result := False;
-  Form := CreateCustomForm();
+  { 6.6 起宽高在创建时传入，由安装程序自己缩放，之后不能再改。 }
+  Form := CreateCustomForm(460, 168, True, True);
   try
     Form.Caption := '安装完成';
-    Form.ClientWidth := ScaleX(460);
-    Form.ClientHeight := ScaleY(168);
     Form.Position := poScreenCenter;
     Prompt := TNewStaticText.Create(Form);
     Prompt.Parent := Form;

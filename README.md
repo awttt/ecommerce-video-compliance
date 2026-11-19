@@ -195,7 +195,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
 powershell -ExecutionPolicy Bypass -File scripts\build_installer.ps1
 ```
 
-脚本会依次做：构建程序 → 缺 FFmpeg 时自动下载到 `dist\VideoCompliance\` → 编译 `packaging\installer.iss`。产物是单个 `dist\VideoCompliance-<版本>-Setup.exe`，用户双击安装即可。需要 [Inno Setup](https://jrsoftware.org/isdl.php)（6.0 或更新版本），没有时会提示安装命令。
+脚本会依次做：构建程序 → 缺 FFmpeg 时自动下载到 `dist\VideoCompliance\` → 编译 `packaging\installer.iss`。产物是单个 `dist\VideoCompliance-<版本>-Setup.exe`，用户双击安装即可。需要 [Inno Setup](https://jrsoftware.org/isdl.php)（6.6 或更新版本），没有时会提示安装命令。
 
 安装行为：
 
