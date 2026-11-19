@@ -21,13 +21,22 @@ from app.core.prompts import speech_system_prompt, speech_user_prompt, user_prom
 from app.core.rules import apply_rules
 from app.core.timeutil import format_range
 from app.core.transcript import SpeechSentence
-from app.core.relay import QWEN_FLASH_MODEL, USER_AGENT
+from app.core.model_route import (
+    MAX_STRIP_ROUNDS,
+    TRANSPORT_ATTEMPTS,
+    HttpBudget,
+    ModelRoute,
+    max_http_per_logical_dispatch,
+)
+from app.core.relay import LUNA_MODEL, QWEN_FLASH_MODEL, USER_AGENT
 from app.logging_setup import redact
 from app.schemas import DetectionRules, Frame, RawHit, RunConfig
 
 log = logging.getLogger(__name__)
 
 _RETRY_STATUS = {408, 409, 429, 500, 502, 503, 504}
+# 保留这个名字，是因为口播和画面现在共用同一轮传输次数。
+_SPEECH_ATTEMPTS = TRANSPORT_ATTEMPTS
 _MAX_TOKENS = {"low": 2048, "high": 4096}
 # qwen3.8-flash 的 completion 含 reasoning_tokens，实测大约是 glm 的 2 倍。
 # 上限加倍，给 content 留出和 glm 相近的空间，避免思考过程把 JSON 截断。
@@ -79,8 +88,12 @@ def model_controls(thinking: bool, model: str | None = None) -> dict:
     """glm-5.3-flash 必须开启思考。强度用 low 代替以前的关闭，避免默认 max。
 
     qwen3.8-flash 默认也会思考，沿用同一组强度，只放宽 max_tokens。
+    gpt-6-luna 不带 thinking / reasoning_effort。这只在 mock 里核对过请求形状，
+    不表示线上已经接受这些字段或能够识图。
     """
     effort = "high" if thinking else "low"
+    if model == LUNA_MODEL:
+        return {"max_tokens": _MAX_TOKENS[effort]}
     limits = _QWEN_MAX_TOKENS if model == QWEN_FLASH_MODEL else _MAX_TOKENS
     return {
         "max_tokens": limits[effort],
@@ -97,8 +110,17 @@ def _encode_image(path: str) -> str:
 
 
 class DeepSeekRecognizer:
-    def __init__(self, config: RunConfig, transport: httpx.AsyncBaseTransport | None = None):
+    def __init__(
+        self,
+        config: RunConfig,
+        transport: httpx.AsyncBaseTransport | None = None,
+        route: ModelRoute | None = None,
+    ):
         self.config = config
+        self.route = route or ModelRoute(
+            selected_model=config.model,
+            percent=config.luna_request_percent,
+        )
         self._transport = transport
         self._client: httpx.AsyncClient | None = None
 
@@ -131,25 +153,35 @@ class DeepSeekRecognizer:
         client = self._client
         if client is None:
             raise RuntimeError("识别已取消")
-        encoded = await asyncio.to_thread(_encode_image, frame.path)
-        body = self._body(frame, encoded)
-        content = await self._complete_message(client, body)
+        model = await self.route.begin_picture(frame.index)
+        budget = HttpBudget(max_http_per_logical_dispatch())
         try:
-            hits = parse_frame_result(content, frame)
-        except ValueError:
-            log.warning("frame %s returned unparsed JSON, retrying", frame.index)
-            retry = self._body(frame, encoded)
-            if "response_format" not in body:
-                retry.pop("response_format", None)
-            retry["messages"].append({"role": "user", "content": _JSON_FIX})
-            content = await self._complete_message(client, retry)
+            encoded = await asyncio.to_thread(_encode_image, frame.path)
+            body = self._body(frame, encoded, model)
+            content = await self._complete_message(client, body, budget=budget)
             try:
                 hits = parse_frame_result(content, frame)
             except ValueError:
-                log.warning("frame %s unparsed response: %s", frame.index, redact(content)[:300])
-                raise
-        log.debug("frame %s response %s", frame.index, redact(content)[:300])
-        return apply_rules(hits, self.config.rules)
+                log.warning("frame %s returned unparsed JSON, retrying", frame.index)
+                retry = self._body(frame, encoded, model)
+                if "response_format" not in body:
+                    retry.pop("response_format", None)
+                retry["messages"].append({"role": "user", "content": _JSON_FIX})
+                content = await self._complete_message(client, retry, budget=budget)
+                try:
+                    hits = parse_frame_result(content, frame)
+                except ValueError:
+                    log.warning("frame %s unparsed response: %s", frame.index, redact(content)[:300])
+                    raise
+            log.debug("frame %s response %s", frame.index, redact(content)[:300])
+            hits = apply_rules(hits, self.config.rules)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self.route.finish(model, exc)
+            raise
+        await self.route.finish(model, None)
+        return hits
 
     async def judge_speech(self, sentences: list[SpeechSentence]) -> list[RawHit]:
         client = self._client
@@ -157,25 +189,31 @@ class DeepSeekRecognizer:
             raise RuntimeError("识别已取消")
         hits: list[RawHit] = []
         errors: list[str] = []
-        for batch in _speech_batches(sentences):
-            body = self._speech_body(batch)
+        for batch_index, batch in enumerate(_speech_batches(sentences)):
+            model = await self.route.begin_speech(batch_index)
+            budget = HttpBudget(max_http_per_logical_dispatch())
             try:
-                content = await self._complete_message(client, body)
+                body = self._speech_body(batch, model)
+                content = await self._complete_message(client, body, budget=budget)
                 try:
                     batch_hits = parse_speech_result(content, batch, corpus=sentences)
                 except ValueError:
-                    retry = self._speech_body(batch)
+                    retry = self._speech_body(batch, model)
                     if "response_format" not in body:
                         retry.pop("response_format", None)
                     retry["messages"].append({"role": "user", "content": _JSON_FIX})
-                    content = await self._complete_message(client, retry)
+                    content = await self._complete_message(client, retry, budget=budget)
                     batch_hits = parse_speech_result(content, batch, corpus=sentences)
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
+                await self.route.finish(model, exc)
                 message = str(exc)
                 if "JSON" in message or "json" in message or "Expecting" in message:
                     message = "口播判定结果不是合法 JSON"
                 errors.append(message)
                 continue
+            await self.route.finish(model, None)
             hits.extend(batch_hits)
         if errors and not hits:
             local = apply_rules([], self.config.rules, sentences=sentences)
@@ -184,35 +222,44 @@ class DeepSeekRecognizer:
             raise RuntimeError(errors[0])
         return apply_rules(hits, self.config.rules, sentences=sentences)
 
-    async def _complete_message(self, client: httpx.AsyncClient, body: dict) -> str:
+    async def _complete_message(self, client: httpx.AsyncClient, body: dict, *, budget: HttpBudget) -> str:
         timeout = speech_request_timeout(self.config.timeout_sec)
+        strips = 0
+        model = str(body.get("model") or self.config.model)
         while True:
             try:
-                return await self._complete(client, body, timeout=timeout, attempts=_SPEECH_ATTEMPTS)
+                return await self._complete(client, body, timeout=timeout, attempts=_SPEECH_ATTEMPTS, budget=budget)
             except APIStatusError as exc:
-                if exc.status == 400 and _drop_rejected_controls(body, exc.detail, model=self.config.model):
+                if (
+                    exc.status == 400
+                    and strips < MAX_STRIP_ROUNDS
+                    and _drop_rejected_controls(body, exc.detail, model=model)
+                ):
+                    strips += 1
                     continue
                 raise
 
-    def _speech_body(self, sentences: list[SpeechSentence]) -> dict:
+    def _speech_body(self, sentences: list[SpeechSentence], model: str | None = None) -> dict:
         lines = [
             f"{index}. [{format_range(item.start_sec, item.end_sec)}] {item.text}"
             for index, item in enumerate(sentences, start=1)
         ]
+        chosen = model or self.config.model
         body: dict = {
-            "model": self.config.model,
+            "model": chosen,
             "messages": [
                 {"role": "system", "content": speech_system_prompt(self.config.rules)},
                 {"role": "user", "content": speech_user_prompt(lines, self.config.rules)},
             ],
             "response_format": {"type": "json_object"},
         }
-        body.update(model_controls(self.config.thinking, self.config.model))
+        body.update(model_controls(self.config.thinking, chosen))
         return body
 
-    def _body(self, frame: Frame, encoded: str) -> dict:
+    def _body(self, frame: Frame, encoded: str, model: str | None = None) -> dict:
+        chosen = model or self.config.model
         body: dict = {
-            "model": self.config.model,
+            "model": chosen,
             "messages": [
                 {"role": "system", "content": visual_system_prompt(self.config.rules)},
                 {
@@ -228,7 +275,7 @@ class DeepSeekRecognizer:
             ],
             "response_format": {"type": "json_object"},
         }
-        body.update(model_controls(self.config.thinking, self.config.model))
+        body.update(model_controls(self.config.thinking, chosen))
         return body
 
     async def _complete(
@@ -237,10 +284,15 @@ class DeepSeekRecognizer:
         body: dict,
         *,
         timeout: httpx.Timeout | None = None,
-        attempts: int = 3,
+        attempts: int = TRANSPORT_ATTEMPTS,
+        budget: HttpBudget | None = None,
     ) -> str:
+        chosen = str(body.get("model") or self.config.model)
         last_error = "模型请求失败"
         for attempt in range(attempts):
+            if budget is not None:
+                budget.take()
+            await self.route.note_http(chosen)
             try:
                 response = await client.post(
                     chat_url(self.config.base_url),
@@ -458,13 +510,13 @@ class FaultRecognizer:
         return await self.inner.judge_speech(sentences)
 
 
-def build_recognizer(config: RunConfig) -> Recognizer:
+def build_recognizer(config: RunConfig, route: ModelRoute | None = None) -> Recognizer:
     if config.fault_bad_json or config.mock:
         inner: Recognizer = MockRecognizer(config.rules)
     else:
         if not config.api_key:
             raise RuntimeError("未配置画面识别 API Key。请登录后再开始检测。")
-        inner = DeepSeekRecognizer(config)
+        inner = DeepSeekRecognizer(config, route=route)
     if config.fault_bad_json or config.fault_partial_frames:
         return FaultRecognizer(inner, config)
     return inner

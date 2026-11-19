@@ -27,6 +27,8 @@ DEFAULT_RELAY_GROUP_NAME = "电商审核专属-bot创建"
 PICTURE_MODEL = "glm-5.3-flash"
 DEEPSEEK_FLASH_MODEL = "deepseek-flash"
 QWEN_FLASH_MODEL = "qwen3.8-flash"
+# 只作为 GLM 分流的请求体模型名。不能写进画面模型设置，否则 configured_model 会收成 GLM。
+LUNA_MODEL = "gpt-6-luna"
 PICTURE_MODELS = (PICTURE_MODEL, DEEPSEEK_FLASH_MODEL, QWEN_FLASH_MODEL)
 # Cloudflare 会拦截 Python-urllib 的默认 UA（403 error 1010）。这里标明应用，不用库默认值。
 USER_AGENT = f"ecommerce-video-compliance/{__version__}"

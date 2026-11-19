@@ -650,9 +650,10 @@ async def test_speech_timeout_keeps_phrase_hits():
     recognizer._client = object()
     seen: dict = {}
 
-    async def fail(client, body, *, timeout=None, attempts=3):
+    async def fail(client, body, *, timeout=None, attempts=3, budget=None):
         seen["timeout"] = timeout
         seen["attempts"] = attempts
+        seen["budget"] = budget
         raise RuntimeError("模型请求超时")
 
     recognizer._complete = fail
@@ -747,10 +748,13 @@ def test_glm_request_enables_thinking_and_drops_image_detail():
     assert configured_model("qwen3.8-flash") == QWEN_FLASH_MODEL
     assert configured_model("Qwen3.8-Flash") == QWEN_FLASH_MODEL
     assert configured_model("qwen-max") == PICTURE_MODEL
+    assert configured_model("gpt-6-luna") == PICTURE_MODEL
     assert RunConfig().model == PICTURE_MODEL
     assert RunConfig().timeout_sec == 120
+    assert RunConfig().luna_request_percent == 0
     assert DEFAULT_SETTINGS["model"] == PICTURE_MODEL
     assert DEFAULT_SETTINGS["timeout_sec"] == 120.0
+    assert DEFAULT_SETTINGS["luna_request_percent"] == 0
 
     assert model_controls(False) == {
         "max_tokens": 2048,

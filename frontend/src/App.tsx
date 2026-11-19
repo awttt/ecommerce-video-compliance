@@ -104,6 +104,19 @@ const MODEL_OPTIONS = [
   { value: "qwen3.8-flash", label: "Qwen 3.8 Flash" },
 ];
 
+const LUNA_RATIO_HELP =
+  "按逻辑请求数分配，不是按 token 或金额，也不是中转站分组里的账号权重。0 是全部 GLM，100 是全部 gpt-6-luna。50 时第 1 帧和第 1 批口播仍是 GLM，所以只有一帧、或只有一批口播的任务会全部走 GLM。每个任务各自计算，换一个视频或一整批视频都不保证凑成全局对半。DeepSeek / Qwen 不使用这份比例。并发仍是原来的一个池，超时仍是现在的单帧超时（默认 120 秒），不按模型分开，避免在途请求翻倍或改掉现有超时。只影响之后新建的任务。Luna 的请求形状只在本地 mock 里核对过，不能当成线上可用。（bot创建）";
+
+function modelStatLine(job: Job): string | null {
+  const stats = job.model_stats;
+  if (!stats || Object.keys(stats).length === 0) return null;
+  const parts = Object.entries(stats).map(([model, item]) => {
+    const name = model === "gpt-6-luna" ? "Luna" : model === "glm-5.3-flash" ? "GLM" : model;
+    return `${name} 逻辑 ${item.logical}（成功 ${item.ok} / 失败 ${item.failed}，超时 ${item.timeout} 已含在失败里）、HTTP ${item.http_attempts}`;
+  });
+  return `本机请求计数（bot创建）：${parts.join("；")}。逻辑数按帧或口播批次去重，重试同一帧或重判同一批文字不加逻辑数；重新转写会把新的口播批次再计一次。HTTP 是真实调用次数，模拟识别不加。这不是 token 或金额。`;
+}
+
 /** 剪辑入口和 JSON 导出先不露出，功能代码保留。 */
 const SHOW_JSON_EXPORT = false;
 const SHOW_CUT_BUTTON = false;
@@ -318,6 +331,8 @@ export function Shell() {
   sourceRef.current = source;
   editorOnRef.current = editorOn;
   const [form] = Form.useForm();
+  const watchedModel = Form.useWatch("model", form);
+  const [lunaDraft, setLunaDraft] = useState<number | null>(null);
 
   async function refreshSettings() {
     const next = await getSettings();
@@ -410,6 +425,7 @@ export function Shell() {
       timeout_sec: settings.timeout_sec,
       asr_enabled: settings.asr_enabled,
       model: settings.model,
+      luna_request_percent: settings.luna_request_percent ?? 0,
       asr_engine: settings.asr_engine,
     });
   }, [form, settings]);
@@ -1010,6 +1026,31 @@ export function Shell() {
                   }}
                 />
               </div>
+              <div className="slider-row" style={{ marginBottom: 12 }}>
+                <Text>Luna 请求比例（bot创建） {lunaDraft ?? settings.luna_request_percent ?? 0}</Text>
+                <Slider
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={lunaDraft ?? settings.luna_request_percent ?? 0}
+                  disabled={uploading || settings.model !== "glm-5.3-flash"}
+                  marks={{ 0: "0", 50: "50", 100: "100" }}
+                  onChange={(value) => setLunaDraft(typeof value === "number" ? value : 0)}
+                  onChangeComplete={(value) => {
+                    const percent = typeof value === "number" ? value : 0;
+                    void saveSettings({ luna_request_percent: percent })
+                      .then((next) => {
+                        setSettings(next);
+                        setLunaDraft(null);
+                      })
+                      .catch((error: Error) => message.error(error.message));
+                  }}
+                />
+                <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                  按逻辑请求数，不是 token 或金额。单帧或只有一批口播时，50% 仍全部是 GLM。每个任务分开算，跨任务不保证对半。
+                  {settings.model === "glm-5.3-flash" ? "" : " 当前不是 GLM，这份比例先留着，不会参加分配。"}
+                </Paragraph>
+              </div>
               <div ref={dropRef}>
                 <Dragger
                   multiple
@@ -1167,6 +1208,12 @@ export function Shell() {
                   </div>
                   {job.speech_message && job.speech_message !== job.asr_error ? (
                     <div className="job-meta is-muted">口播：{job.speech_message}</div>
+                  ) : null}
+                  {modelStatLine(job) ? <div className="job-meta is-muted">{modelStatLine(job)}</div> : null}
+                  {(job.luna_request_percent ?? 0) > 0 ? (
+                    <div className="job-meta is-muted">
+                      本任务快照的 Luna 比例是 {job.luna_request_percent}。按逻辑请求数，不是 token 或金额，也不保证和别的任务凑成对半。
+                    </div>
                   ) : null}
                   {job.mock ? (
                     <Alert style={{ marginTop: 12 }} type="warning" showIcon message="这次是模拟识别，原文不是模型读出来的。" />
@@ -1517,6 +1564,19 @@ export function Shell() {
         >
           <Form.Item label="画面模型" name="model" rules={[{ required: true }]}>
             <Select options={MODEL_OPTIONS} />
+          </Form.Item>
+          <Form.Item
+            label="Luna 请求比例（bot创建）"
+            name="luna_request_percent"
+            extra={LUNA_RATIO_HELP}
+          >
+            <Slider
+              min={0}
+              max={100}
+              step={1}
+              marks={{ 0: "0 全 GLM", 50: "50", 100: "100 全 Luna" }}
+              disabled={(watchedModel ?? settings?.model) !== "glm-5.3-flash"}
+            />
           </Form.Item>
           <Form.Item label="默认抽帧 FPS" name="fps" rules={[{ required: true }]}>
             <InputNumber min={0.5} max={2} step={0.1} style={{ width: "100%" }} />

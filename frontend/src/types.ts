@@ -52,6 +52,17 @@ export interface Job {
   hold_sec?: number;
   paused_at?: string | null;
   findings: Finding[];
+  luna_request_percent?: number;
+  model_stats?: Record<string, ModelStat>;
+}
+
+export interface ModelStat {
+  logical: number;
+  runs: number;
+  http_attempts: number;
+  ok: number;
+  failed: number;
+  timeout: number;
 }
 
 export interface PhraseRule {
@@ -73,6 +84,7 @@ export interface Settings {
   api_key_source: string;
   base_url: string;
   model: string;
+  luna_request_percent: number;
   fps: number;
   concurrency: number;
   max_width: number;

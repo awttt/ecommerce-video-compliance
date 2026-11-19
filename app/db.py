@@ -10,6 +10,7 @@ from pathlib import Path
 import aiosqlite
 
 from app.core.asr_engine import configured_engine
+from app.core.model_route import clamp_luna_percent
 from app.core.relay import configured_model
 from app.core.rule_catalog import apply_builtin_rules, enable_exaggeration
 from app.schemas import DEFAULT_SETTINGS, FIXED_TENCENT_REGION, DetectionRules, Finding, clamp_concurrency
@@ -186,6 +187,7 @@ class Database:
             if isinstance(stored, dict):
                 merged.update(stored)
         merged["model"] = configured_model(merged.get("model"))
+        merged["luna_request_percent"] = clamp_luna_percent(merged.get("luna_request_percent"))
         engine = configured_engine(merged.get("asr_engine"))
         engine_changed = merged.get("asr_engine") != engine
         merged["asr_engine"] = engine

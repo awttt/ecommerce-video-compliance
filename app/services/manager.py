@@ -17,6 +17,7 @@ from pathlib import Path
 
 from app.core.aggregate import aggregate, refold_findings
 from app.core.deepseek import build_recognizer
+from app.core.model_route import ModelRoute, clamp_luna_percent, initial_route_fields, public_stats
 from app.core.relay import (
     CHAT_BASE,
     KEY_NAME,
@@ -320,6 +321,8 @@ class JobState:
             hold_sec=self.hold_sec,
             paused_at=self.paused_at,
             findings=list(self.findings) if include_findings else [],
+            luna_request_percent=clamp_luna_percent(self.options.get("luna_request_percent")),
+            model_stats=public_stats(self.options.get("model_stats")),
         )
 
 
@@ -358,6 +361,13 @@ def _retry_part(raw) -> str:
 
 def _load_transcript(raw) -> list[dict]:
     return dump_sentences(load_sentences(raw))
+
+
+def _clear_speech_assignments(options: dict) -> None:
+    """重新转写后的口播批次是新内容。清掉旧序号，避免沿用上一份转写的模型。"""
+    assignments = options.get("model_assignments")
+    if isinstance(assignments, dict) and isinstance(assignments.get("speech"), dict):
+        assignments["speech"] = {}
 
 
 def speech_retry_kind(state: JobState) -> str:
@@ -556,6 +566,7 @@ class JobManager:
             api_key_source=source,
             base_url=str(self._settings["base_url"]),
             model=str(self._settings["model"]),
+            luna_request_percent=clamp_luna_percent(self._settings.get("luna_request_percent")),
             fps=float(self._settings["fps"]),
             concurrency=clamp_concurrency(self._settings.get("concurrency")),
             max_width=int(self._settings["max_width"]),
@@ -614,6 +625,7 @@ class JobManager:
             "timeout_sec",
             "mcp_enabled",
             "model",
+            "luna_request_percent",
             "asr_enabled",
             "asr_engine",
         ):
@@ -723,6 +735,7 @@ class JobManager:
             "max_width": int(self._settings["max_width"]),
             "jpeg_q": int(self._settings["jpeg_q"]),
             "model": str(self._settings["model"]),
+            **initial_route_fields(self._settings.get("luna_request_percent")),
             "detail": str(self._settings["detail"]),
             "thinking": bool(self._settings["thinking"]),
             "motion_enabled": bool(self._settings.get("motion_enabled", False)),
@@ -1065,9 +1078,18 @@ class JobManager:
         self._publish(state)
         holder: dict = {"proc": None, "audio_proc": None, "recognizer": None, "asr": None}
         state.holder = holder
+        if part == "transcribe":
+            _clear_speech_assignments(state.options)
         config = self._config_for(state)
+        route = ModelRoute.bind(
+            state.options,
+            selected_model=config.model,
+            allow_new_flash=not (part == "frames" and bool(selective)),
+            flush=lambda: self._flush_route(state),
+        )
+        await self._flush_route(state)
         try:
-            recognizer = build_recognizer(config)
+            recognizer = build_recognizer(config, route)
             holder["recognizer"] = recognizer
 
             async def on_progress(progress: Progress) -> None:
@@ -1235,6 +1257,7 @@ class JobManager:
             api_key=key,
             base_url=base_url,
             model=model,
+            luna_request_percent=clamp_luna_percent(options.get("luna_request_percent")),
             detail=str(options.get("detail") or "original"),
             thinking=bool(options.get("thinking", False)),
             motion_enabled=bool(options.get("motion_enabled", False)),
@@ -1484,6 +1507,16 @@ class JobManager:
             state.progress = min(99.0, (visual_ratio * 0.7 + state.speech_ratio * 0.3) * 100)
         else:
             state.progress = min(99.0, visual_ratio * 100)
+
+    async def _flush_route(self, state: JobState) -> None:
+        """闪帧和口播的新分配在发出请求前落盘，重启后仍用原来的模型。"""
+        async with state.progress_lock:
+            try:
+                await self.db.upsert_job(state.to_row())
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("save model route failed")
 
     async def _maybe_save(self, state: JobState) -> None:
         now = time.monotonic()
