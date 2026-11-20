@@ -13,7 +13,7 @@ import time
 
 import httpx
 
-from app.config import get_settings
+from admin_app.config import get_settings
 
 SUPER_ADMIN_EMAIL = "350944364@qq.com"
 USER_AGENT = "ecommerce-video-compliance/0.1.0"

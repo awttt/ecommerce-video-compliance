@@ -5,7 +5,6 @@ import { AcceptInvite } from "./pages/Invite";
 import { Login } from "./pages/Login";
 import { Dashboard } from "./pages/Dashboard";
 import { Flow } from "./pages/Flow";
-import { Review } from "./pages/Review";
 import { Tenants } from "./pages/Tenants";
 import { Members } from "./pages/Members";
 import { Quota } from "./pages/Quota";
@@ -27,7 +26,6 @@ export function App() {
       <Route element={<RequireAuth />}>
         <Route path="/" element={<Dashboard />} />
         <Route path="/flow" element={<Flow />} />
-        <Route path="/review" element={<Review />} />
         <Route path="/tenants" element={<Tenants />} />
         <Route path="/members" element={<Members />} />
         <Route path="/quota" element={<Quota />} />

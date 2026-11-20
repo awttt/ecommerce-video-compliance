@@ -2,20 +2,17 @@ import csv
 import io
 import re
 from datetime import timedelta
-from pathlib import Path
-from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
-from openpyxl import Workbook
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app import auth_relay
-from app.config import get_settings
-from app.db import get_db
-from app.deps import client_ip, current_user, require
-from app.models import (
+from admin_app import auth_relay
+from admin_app.config import get_settings
+from admin_app.db import get_db
+from admin_app.deps import client_ip, current_user, require
+from admin_app.models import (
     AppSetting,
     AuditLog,
     Device,
@@ -23,17 +20,15 @@ from app.models import (
     KeywordSubmission,
     Member,
     QuotaAllocation,
-    ReviewJob,
     SessionToken,
     Tenant,
     TenantRules,
 )
-from app.present import (
+from admin_app.present import (
     audit_dict,
     device_dict,
     entry_dict,
     invite_dict,
-    job_dict,
     member_brief,
     member_dict,
     quota_dict,
@@ -41,12 +36,13 @@ from app.present import (
     submission_dict,
     tenant_dict,
 )
-from app.security import (
+from admin_app.relay import apply_credentials, relay_mode
+from admin_app.security import (
     new_access_token,
     new_refresh_value,
     sha256_text,
 )
-from app.service import (
+from admin_app.service import (
     accept_invite,
     allocate,
     audit,
@@ -60,20 +56,20 @@ from app.service import (
     invite_member,
     pending_count,
     reconcile,
-    register_job,
     reject_keyword,
+    relay_report,
     resolve_tenant,
     revoke_device,
     rules_payload,
     save_rule_settings,
-    set_queue_paused,
     set_tenant_status,
     submit_keyword,
+    sync_relay,
     trend,
     usage_rows,
     visible_member_ids,
 )
-from app.timeutil import utcnow
+from admin_app.timeutil import utcnow
 
 router = APIRouter(prefix="/v1")
 _COLUMNS = ("时间点", "类别", "来源", "原文", "位置", "置信度", "判定理由", "备注")
@@ -283,6 +279,15 @@ def _session_from_relay(db: Session, response: Response, email: str, data: dict)
             pass
     member = _prepare_member(db, email, user)
     _ensure_can_enter(db, member)
+    apply_credentials(
+        member,
+        {
+            "access_token": data.get("access_token"),
+            "refresh_token": data.get("refresh_token"),
+            "expires_in": data.get("expires_in"),
+        },
+    )
+    db.commit()
     return _issue(db, member, response)
 
 
@@ -365,8 +370,7 @@ def logout(body: RefreshBody, response: Response, db: Session = Depends(get_db))
 def me(user: Member = Depends(current_user), db: Session = Depends(get_db)) -> dict:
     body = member_brief(db, user) or {}
     body["pending_keywords"] = pending_count(db, user)
-    setting = db.get(AppSetting, 1)
-    body["queue_paused"] = bool(setting.queue_paused) if setting else False
+    body["relay_live"] = relay_mode() == "remote"
     return body
 
 
@@ -670,6 +674,25 @@ def post_quota(
     return quota_dict(db, row)
 
 
+@router.get("/relay/status")
+def relay_status(
+    tenant_id: int | None = None,
+    user: Member = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    return relay_report(db, user, tenant_id)
+
+
+@router.post("/relay/sync")
+def relay_sync(
+    request: Request,
+    tenant_id: int | None = None,
+    user: Member = Depends(require("quota.allocate")),
+    db: Session = Depends(get_db),
+) -> dict:
+    return sync_relay(db, user, tenant_id, ip=client_ip(request))
+
+
 @router.get("/rules")
 def get_rules(
     response: Response,
@@ -923,7 +946,6 @@ def _settings_payload(db: Session) -> dict:
         "backend_mode_enabled": backend_on,
         "registration_enabled": registration_on,
         "email_verify_ok": email_ok,
-        "queue_paused": bool(row.queue_paused) if row else False,
         "timezone": env.timezone,
         "checks": [
             {
@@ -964,7 +986,7 @@ def put_settings(
     user: Member = Depends(require("settings.write")),
     db: Session = Depends(get_db),
 ) -> dict:
-    from app.service import audit
+    from admin_app.service import audit
 
     row = db.get(AppSetting, 1)
     if row is None:
@@ -1008,110 +1030,6 @@ def test_settings(user: Member = Depends(require("settings.write")), db: Session
     if response.status_code >= 400:
         return {"ok": False, "mode": "remote", "message": f"中转站返回 HTTP {response.status_code}"}
     return {"ok": True, "mode": "remote", "message": "已连上中转站"}
-
-
-def _job_or_404(db: Session, user: Member, job_id: int) -> ReviewJob:
-    from fastapi import HTTPException
-
-    job = db.get(ReviewJob, job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="视频不存在")
-    if user.role == "member" and job.member_id != user.id:
-        raise HTTPException(status_code=404, detail="视频不存在")
-    if user.role == "tenant_admin" and job.tenant_id != user.tenant_id:
-        raise HTTPException(status_code=404, detail="视频不存在")
-    return job
-
-
-@router.get("/jobs")
-def list_jobs(
-    tenant_id: int | None = None,
-    user: Member = Depends(current_user),
-    db: Session = Depends(get_db),
-) -> list:
-    query = db.query(ReviewJob)
-    if user.role == "member":
-        query = query.filter(ReviewJob.member_id == user.id)
-    elif user.role == "tenant_admin":
-        query = query.filter(ReviewJob.tenant_id == user.tenant_id)
-    elif tenant_id is not None:
-        query = query.filter(ReviewJob.tenant_id == tenant_id)
-    rows = query.order_by(ReviewJob.id.desc()).limit(50).all()
-    return [job_dict(db, row) for row in rows]
-
-
-@router.get("/jobs/{job_id}")
-def get_job(job_id: int, user: Member = Depends(current_user), db: Session = Depends(get_db)) -> dict:
-    return job_dict(db, _job_or_404(db, user, job_id), with_findings=True)
-
-
-@router.post("/jobs")
-def post_job(
-    request: Request,
-    file: UploadFile = File(...),
-    member_id: int | None = Form(None),
-    user: Member = Depends(current_user),
-    db: Session = Depends(get_db),
-) -> dict:
-    job = register_job(
-        db,
-        user,
-        filename=file.filename or "",
-        member_id=member_id,
-        chunks=file.file,
-        ip=client_ip(request),
-    )
-    return job_dict(db, job)
-
-
-@router.get("/jobs/{job_id}/media")
-def job_media(job_id: int, user: Member = Depends(current_user), db: Session = Depends(get_db)) -> FileResponse:
-    from fastapi import HTTPException
-
-    job = _job_or_404(db, user, job_id)
-    if not job.file_path or not Path(job.file_path).is_file():
-        raise HTTPException(status_code=404, detail="没有视频文件")
-    suffix = Path(job.filename).suffix.lower()
-    media = "video/webm" if suffix == ".webm" else "video/ogg" if suffix == ".ogg" else "video/mp4"
-    return FileResponse(job.file_path, media_type=media, filename=job.filename)
-
-
-@router.get("/jobs/{job_id}/export")
-def export_job(job_id: int, user: Member = Depends(current_user), db: Session = Depends(get_db)) -> StreamingResponse:
-    job = _job_or_404(db, user, job_id)
-    detail = job_dict(db, job, with_findings=True)
-    book = Workbook()
-    sheet = book.active
-    sheet.title = "结果"
-    sheet.append(list(_COLUMNS))
-    for row in detail["findings"]:
-        sheet.append([row[column] for column in _COLUMNS])
-    buffer = io.BytesIO()
-    book.save(buffer)
-    buffer.seek(0)
-    filename = f"{Path(job.filename).stem}_合规结果.xlsx"
-    return StreamingResponse(
-        buffer,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
-    )
-
-
-@router.get("/queue")
-def get_queue(user: Member = Depends(current_user), db: Session = Depends(get_db)) -> dict:
-    del user
-    row = db.get(AppSetting, 1)
-    return {"paused": bool(row.queue_paused) if row else False}
-
-
-@router.post("/queue/pause")
-def pause_queue(request: Request, user: Member = Depends(current_user), db: Session = Depends(get_db)) -> dict:
-    return {"paused": set_queue_paused(db, user, True, ip=client_ip(request))}
-
-
-@router.post("/queue/resume")
-def resume_queue(request: Request, user: Member = Depends(current_user), db: Session = Depends(get_db)) -> dict:
-    return {"paused": set_queue_paused(db, user, False, ip=client_ip(request))}
 
 
 @router.get("/search")

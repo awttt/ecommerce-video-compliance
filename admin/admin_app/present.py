@@ -1,22 +1,20 @@
 from sqlalchemy.orm import Session
 
-from app.models import (
+from admin_app.models import (
     AuditLog,
     Device,
-    Finding,
     Invite,
     KeywordEntry,
     KeywordSubmission,
     Member,
     QuotaAllocation,
-    ReviewJob,
     Tenant,
     TenantRules,
 )
-from app.money import yuan
-from app.permissions import PERMISSIONS, ROLE_LABEL
-from app.service import seats_used
-from app.timeutil import iso
+from admin_app.money import yuan
+from admin_app.permissions import PERMISSIONS, ROLE_LABEL
+from admin_app.service import seats_used
+from admin_app.timeutil import iso
 
 ROLE_STATUS = {
     "active": "正常",
@@ -25,7 +23,6 @@ ROLE_STATUS = {
 }
 TENANT_STATUS = {"active": "在营", "disabled": "已停用"}
 KEYWORD_STATUS = {"pending": "待审", "approved": "已通过", "rejected": "已驳回"}
-JOB_STATUS = {"queued": "排队", "running": "识别中", "done": "已完成", "failed": "失败"}
 
 
 def member_brief(db: Session, member: Member | None) -> dict | None:
@@ -46,8 +43,16 @@ def member_brief(db: Session, member: Member | None) -> dict | None:
 
 def tenant_dict(db: Session, tenant: Tenant) -> dict:
     month = 0
+    relay_balance = 0
+    local_balance = 0
+    checked_at = None
     for member in db.query(Member).filter(Member.tenant_id == tenant.id, Member.deleted_at.is_(None)):
         month += member.month_cost_cents
+        if member.relay_checked_at is not None:
+            relay_balance += member.relay_balance_cents
+            local_balance += member.balance_cents
+            if checked_at is None or member.relay_checked_at > checked_at:
+                checked_at = member.relay_checked_at
     return {
         "id": tenant.id,
         "name": tenant.name,
@@ -61,6 +66,9 @@ def tenant_dict(db: Session, tenant: Tenant) -> dict:
         "pool_remaining": yuan(tenant.pool_balance_cents),
         "allocated": yuan(tenant.allocated_total_cents),
         "month_cost": yuan(month),
+        "relay_balance": yuan(relay_balance),
+        "relay_diff": yuan(relay_balance - local_balance) if checked_at else None,
+        "relay_checked_at": iso(checked_at),
         "created_at": iso(tenant.created_at),
     }
 
@@ -86,6 +94,10 @@ def member_dict(db: Session, member: Member) -> dict:
         "status": member.status,
         "status_label": ROLE_STATUS.get(member.status, member.status),
         "balance": yuan(shown),
+        "relay_balance": yuan(member.relay_balance_cents),
+        "relay_diff": yuan(member.relay_balance_cents - member.balance_cents) if member.relay_checked_at else None,
+        "relay_status": member.relay_status,
+        "relay_checked_at": iso(member.relay_checked_at),
         "overdraft": bool(member.balance_cents < 0 or member.overdraft),
         "month_cost": yuan(member.month_cost_cents),
         "lifetime_cost": yuan(member.lifetime_cost_cents),
@@ -211,43 +223,3 @@ def audit_dict(db: Session, row: AuditLog) -> dict:
         "after": row.after,
         "ip": row.ip,
     }
-
-
-def finding_dict(row: Finding) -> dict:
-    return {
-        "时间点": row.time_range,
-        "类别": row.category,
-        "来源": row.source,
-        "原文": row.text,
-        "位置": row.position,
-        "置信度": row.confidence,
-        "判定理由": row.reason,
-        "备注": row.note,
-    }
-
-
-def job_dict(db: Session, job: ReviewJob, *, with_findings: bool = False) -> dict:
-    member = db.get(Member, job.member_id)
-    tenant = db.get(Tenant, job.tenant_id)
-    hits = db.query(Finding).filter(Finding.job_id == job.id).count()
-    body = {
-        "id": job.id,
-        "filename": job.filename,
-        "tenant_id": job.tenant_id,
-        "tenant_name": tenant.name if tenant else "",
-        "member_id": job.member_id,
-        "member_name": member.name if member else "",
-        "duration_label": job.duration_label,
-        "status": job.status,
-        "status_label": JOB_STATUS.get(job.status, job.status),
-        "frame_done": job.frame_done,
-        "frame_total": job.frame_total,
-        "hit_count": hits,
-        "message": job.message,
-        "has_file": bool(job.file_path),
-        "created_at": iso(job.created_at),
-    }
-    if with_findings:
-        rows = db.query(Finding).filter(Finding.job_id == job.id).order_by(Finding.sort, Finding.id).all()
-        body["findings"] = [finding_dict(row) for row in rows]
-    return body

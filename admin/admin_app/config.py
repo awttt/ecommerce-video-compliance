@@ -12,6 +12,7 @@ DEFAULT_DB = ROOT / "data" / "admin.db"
 
 class Settings(BaseModel):
     database_url: str
+    cloud_database_url: str = ""
     jwt_secret: str
     relay_base_url: str
     relay_gateway_url: str
@@ -19,6 +20,7 @@ class Settings(BaseModel):
     relay_group_id: str
     relay_group_name: str
     timezone: str
+    engine_api_key: str = ""
 
 
 @lru_cache
@@ -29,8 +31,10 @@ def get_settings() -> Settings:
     if not url:
         DEFAULT_DB.parent.mkdir(parents=True, exist_ok=True)
         url = f"sqlite:///{DEFAULT_DB}"
+    cloud = os.environ.get("EVC_ADMIN_CLOUD_DATABASE_URL", "").strip()
     return Settings(
         database_url=url,
+        cloud_database_url=cloud,
         jwt_secret=os.environ.get("EVC_ADMIN_JWT_SECRET", "").strip() or "dev-evc-admin-change-me-32bytes!!",
         relay_base_url=os.environ.get("EVC_RELAY_BASE_URL", "https://token4u.cc/api/v1").rstrip("/"),
         relay_gateway_url=os.environ.get("EVC_RELAY_GATEWAY_URL", "https://token4u.cc/v1").rstrip("/"),
@@ -39,4 +43,5 @@ def get_settings() -> Settings:
         relay_group_name=os.environ.get("EVC_RELAY_GROUP_NAME", "电商审核专属-bot创建").strip()
         or "电商审核专属-bot创建",
         timezone=os.environ.get("EVC_RELAY_TIMEZONE", "Asia/Shanghai").strip() or "Asia/Shanghai",
+        engine_api_key=os.environ.get("EVC_ENGINE_API_KEY", "").strip(),
     )

@@ -1,4 +1,4 @@
-"""启动管理后台。只监听本机。"""
+"""启动管理后台。"""
 
 import os
 import sys
@@ -10,13 +10,11 @@ if str(ROOT) not in sys.path:
 
 import uvicorn
 
-from app.main import create_app
+from admin_app.main import create_app
 
 
 def main() -> None:
     host = os.environ.get("EVC_ADMIN_HOST", "127.0.0.1")
-    if host not in ("127.0.0.1", "localhost"):
-        raise SystemExit("管理后台只监听 127.0.0.1")
     port = int(os.environ.get("EVC_ADMIN_PORT", "8780"))
     uvicorn.run(create_app(), host=host, port=port, log_level="info")
 

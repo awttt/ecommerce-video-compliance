@@ -1,12 +1,12 @@
-import io
 import json
+from datetime import date
+from pathlib import Path
 
 import httpx
 from fastapi.testclient import TestClient
-from openpyxl import load_workbook
 
-from app.auth_relay import SUPER_ADMIN_EMAIL, RelayLoginError
-from app.seed import DEMO_PASSWORD
+from admin_app.auth_relay import SUPER_ADMIN_EMAIL, RelayLoginError
+from admin_app.seed import DEMO_PASSWORD
 
 
 def _fake_login(email: str, password: str) -> dict:
@@ -21,18 +21,19 @@ def _fake_login(email: str, password: str) -> dict:
 
 def _client(tmp_path, monkeypatch, *, fake_login: bool = True) -> TestClient:
     monkeypatch.setenv("EVC_ADMIN_DATABASE_URL", f"sqlite:///{tmp_path / 'admin.db'}")
+    monkeypatch.setenv("EVC_DATA_DIR", str(tmp_path / "engine"))
     monkeypatch.setenv("EVC_ADMIN_JWT_SECRET", "test-secret-test-secret")
     monkeypatch.delenv("EVC_RELAY_ADMIN_KEY", raising=False)
-    from app.config import get_settings
-    from app.db import reset_engine
+    from admin_app.config import get_settings
+    from admin_app.db import reset_engine
 
     get_settings.cache_clear()
     reset_engine()
     if fake_login:
-        import app.auth_relay as auth_relay
+        import admin_app.auth_relay as auth_relay
 
         monkeypatch.setattr(auth_relay, "login_password", _fake_login)
-    from app.main import create_app
+    from admin_app.main import create_app
 
     return TestClient(create_app())
 
@@ -71,7 +72,7 @@ def test_login_uses_relay_and_marks_super_admin(tmp_path, monkeypatch):
             },
         )
 
-    import app.auth_relay as auth_relay
+    import admin_app.auth_relay as auth_relay
 
     monkeypatch.setattr(auth_relay, "_transport", httpx.MockTransport(handler))
     monkeypatch.setenv("EVC_RELAY_BASE_URL", "https://token4u.cc/api/v1")
@@ -102,8 +103,8 @@ def test_login_uses_relay_and_marks_super_admin(tmp_path, monkeypatch):
 
 def test_http_relay_matches_token4u_admin_contract(monkeypatch):
     """evc-admin 发出的请求体必须符合 token4u 受限管理密钥契约。"""
-    import app.relay as relay
-    from app.config import Settings
+    import admin_app.relay as relay
+    from admin_app.config import Settings
 
     calls: list[tuple[str, str, dict, object]] = []
 
@@ -133,6 +134,44 @@ def test_http_relay_matches_token4u_admin_contract(monkeypatch):
             del kwargs
             return self._record("PUT", url, headers, json)
 
+        def get(self, url, params=None, **kwargs):
+            del kwargs
+            calls.append(("GET", url, {}, params))
+            if url.endswith("/balance-history"):
+                return httpx.Response(
+                    200,
+                    json={"code": 0, "data": {"items": [{"notes": "evc-admin:idem-add", "value": 10}]}},
+                )
+            if url.endswith("/admin/usage/stats"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "code": 0,
+                        "data": {
+                            "total_requests": 4,
+                            "total_input_tokens": 100,
+                            "total_output_tokens": 20,
+                            "total_cost": 9.9,
+                            "total_actual_cost": 3.6,
+                        },
+                    },
+                )
+            if url.endswith("/admin/users/77"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "code": 0,
+                        "data": {
+                            "id": 77,
+                            "email": "staff@example.com",
+                            "status": "active",
+                            "balance": 12.5,
+                            "total_recharged": 30,
+                        },
+                    },
+                )
+            return httpx.Response(200, json={"code": 0, "data": {}})
+
     monkeypatch.setattr(httpx, "Client", FakeClient)
     settings = Settings(
         database_url="sqlite://",
@@ -147,9 +186,12 @@ def test_http_relay_matches_token4u_admin_contract(monkeypatch):
     sender = relay.HttpRelay.__new__(relay.HttpRelay)
     sender.settings = settings
     sender.group_id = "9"
+    sender.base_url = settings.relay_base_url.rstrip("/")
     sender.client = FakeClient()
 
-    assert sender.create_user("staff@example.com", "password123") == "77"
+    user_id, credentials = sender.create_user("staff@example.com", "password123")
+    assert user_id == "77"
+    assert credentials["access_token"] == "user-token"
     user_body = next(body for method, url, _, body in calls if method == "POST" and url.endswith("/admin/users"))
     assert user_body["allowed_groups"] == [9]
     assert user_body["restrict_public_groups"] is True
@@ -157,20 +199,30 @@ def test_http_relay_matches_token4u_admin_contract(monkeypatch):
 
     sender.add_balance("77", 1000, "idem-add")
     method, _, headers, body = calls[-1]
-    assert method == "POST" and body == {"balance": 10.0, "operation": "add"}
+    assert method == "POST" and body == {"balance": 10.0, "operation": "add", "notes": "evc-admin:idem-add"}
     assert headers["Idempotency-Key"] == "idem-add"
 
     sender.subtract_balance("77", 300, "idem-sub")
     assert calls[-1][2]["Idempotency-Key"] == "idem-sub"
-    assert calls[-1][3] == {"balance": 3.0, "operation": "subtract"}
+    assert calls[-1][3] == {"balance": 3.0, "operation": "subtract", "notes": "evc-admin:idem-sub"}
 
     sender.set_status("77", "disabled")
     assert calls[-1][:2] == ("PUT", "https://relay.example/api/v1/admin/users/77")
     assert calls[-1][3] == {"status": "disabled"}
 
+    # 读取侧：余额、状态、用量和中转站流水都必须能取回并按分换算。
+    snapshot = sender.user_snapshot("77")
+    assert snapshot["status"] == "active"
+    assert snapshot["balance_cents"] == 1250
+    month = sender.usage_summary("77", date(2026, 11, 1), date(2026, 11, 20))
+    assert month == {"requests": 4, "input_tokens": 100, "output_tokens": 20, "cost_cents": 360}
+    assert sender.was_applied("idem-add", "77") is True
+    assert sender.was_applied("idem-other", "77") is False
+    assert calls[-1][0] == "GET" and calls[-1][3]["page_size"] == 100
+
 
 def test_login_2fa_keeps_temp_token_on_server(tmp_path, monkeypatch):
-    import app.auth_relay as auth_relay
+    import admin_app.auth_relay as auth_relay
 
     def login_password(email: str, password: str) -> dict:
         del email, password
@@ -362,9 +414,9 @@ def test_quota_is_idempotent_and_reclaim_stays_reconciled(tmp_path, monkeypatch)
 def test_overdraft_shows_zero_and_breaks_reconcile(tmp_path, monkeypatch):
     with _client(tmp_path, monkeypatch) as client:
         tenant = _login(client, "li@jiecheng.com")
-        from app.config import get_settings
-        from app.db import session
-        from app.models import Member
+        from admin_app.config import get_settings
+        from admin_app.db import session
+        from admin_app.models import Member
 
         get_settings.cache_clear()
         db = session()
@@ -380,39 +432,6 @@ def test_overdraft_shows_zero_and_breaks_reconcile(tmp_path, monkeypatch):
         shown = next(item for item in client.get("/v1/members", headers=tenant).json() if item["name"] == "赵兼职")
         assert shown["balance"] == 0
         assert shown["overdraft"] is True
-
-
-def test_jobs_follow_role_and_export_columns(tmp_path, monkeypatch):
-    with _client(tmp_path, monkeypatch) as client:
-        platform = _login(client, "admin@yujing.local")
-        tenant = _login(client, "li@jiecheng.com")
-        member = _login(client, "zhang@jiecheng.com")
-        other = _login(client, "chen@youpin.com")
-        assert {item["filename"] for item in client.get("/v1/jobs", headers=platform).json()} == {
-            "直播间-1117.mp4",
-            "主图视频.mp4",
-            "详情页口播.mp4",
-        }
-        assert {item["filename"] for item in client.get("/v1/jobs", headers=tenant).json()} == {
-            "直播间-1117.mp4",
-            "主图视频.mp4",
-        }
-        assert {item["filename"] for item in client.get("/v1/jobs", headers=member).json()} == {
-            "直播间-1117.mp4",
-            "主图视频.mp4",
-        }
-        assert [item["filename"] for item in client.get("/v1/jobs", headers=other).json()] == ["详情页口播.mp4"]
-        done = next(item for item in client.get("/v1/jobs", headers=member).json() if item["filename"] == "主图视频.mp4")
-        detail = client.get(f"/v1/jobs/{done['id']}", headers=member).json()
-        assert [row["类别"] for row in detail["findings"]] == ["价格", "品牌", "夸大宣传", "解析失败"]
-        hidden = client.get(f"/v1/jobs/{done['id']}", headers=other)
-        assert hidden.status_code == 404
-        exported = client.get(f"/v1/jobs/{done['id']}/export", headers=member)
-        assert exported.status_code == 200
-        book = load_workbook(io.BytesIO(exported.content))
-        sheet = book.active
-        assert [cell.value for cell in sheet[1]] == ["时间点", "类别", "来源", "原文", "位置", "置信度", "判定理由", "备注"]
-        assert sheet["D2"].value == "只要九十九元"
 
 
 def test_disable_frees_seat_and_invite_uses_only_exclusive_group(tmp_path, monkeypatch):
@@ -442,8 +461,8 @@ def test_disable_frees_seat_and_invite_uses_only_exclusive_group(tmp_path, monke
             json={"password": "Newpass123", "name": "新同事"},
         )
         assert accepted.status_code == 200, accepted.text
-        from app.db import session
-        from app.models import RelayAccount
+        from admin_app.db import session
+        from admin_app.models import RelayAccount
 
         db = session()
         account = db.query(RelayAccount).filter(RelayAccount.email == "new@jiecheng.com").one()
@@ -493,8 +512,8 @@ def test_direct_company_and_employee_creation(tmp_path, monkeypatch):
 def test_cumulative_reconciliation_survives_month_boundary(tmp_path, monkeypatch):
     with _client(tmp_path, monkeypatch) as client:
         tenant = _login(client, "li@jiecheng.com")
-        from app.db import session
-        from app.models import Member, Tenant
+        from admin_app.db import session
+        from admin_app.models import Member, Tenant
 
         db = session()
         person = db.query(Member).filter(Member.email == "zhang@jiecheng.com").one()
@@ -517,10 +536,10 @@ def test_cumulative_reconciliation_survives_month_boundary(tmp_path, monkeypatch
 
 def test_usage_snapshot_upsert_does_not_double_count(tmp_path, monkeypatch):
     with _client(tmp_path, monkeypatch):
-        from app.db import session
-        from app.models import Member, UsageSnapshot
-        from app.service import record_usage_snapshot
-        from app.timeutil import shanghai_now
+        from admin_app.db import session
+        from admin_app.models import Member, UsageSnapshot
+        from admin_app.service import record_usage_snapshot
+        from admin_app.timeutil import shanghai_now
 
         db = session()
         member = db.query(Member).filter(Member.email == "zhang@jiecheng.com").one()
@@ -552,3 +571,132 @@ def test_usage_snapshot_upsert_does_not_double_count(tmp_path, monkeypatch):
         assert member.month_cost_cents == 700
         assert db.query(UsageSnapshot).filter(UsageSnapshot.member_id == member.id, UsageSnapshot.day == today).count() == 1
         db.close()
+
+def test_relay_sync_pulls_balance_and_usage(tmp_path, monkeypatch):
+    with _client(tmp_path, monkeypatch) as client:
+        tenant = _login(client, "li@jiecheng.com")
+        member = _login(client, "zhang@jiecheng.com")
+        from admin_app.db import session
+        from admin_app.models import Member
+
+        db = session()
+        zhang = db.query(Member).filter(Member.email == "zhang@jiecheng.com").one()
+        zhang.balance_cents = 5000
+        db.commit()
+        zhang_id = zhang.id
+        relay_user_id = zhang.relay_user_id
+        db.close()
+        assert relay_user_id
+
+        class FakeRemote:
+            mode = "remote"
+
+            def user_snapshot(self, rid: str) -> dict:
+                return {
+                    "id": rid,
+                    "email": "",
+                    "status": "active",
+                    "balance_cents": 4800,
+                    "total_recharged_cents": 5000,
+                }
+
+            def usage_summary(self, rid: str, start: date, end: date) -> dict:
+                del rid, end
+                if start.year >= 2026:
+                    return {"requests": 3, "input_tokens": 100, "output_tokens": 50, "cost_cents": 200}
+                return {"requests": 9, "input_tokens": 300, "output_tokens": 150, "cost_cents": 900}
+
+        import admin_app.service as service
+
+        monkeypatch.setattr(service, "get_relay", lambda db: FakeRemote())
+        assert client.post("/v1/relay/sync", headers=member).status_code == 403
+        synced = client.post("/v1/relay/sync", headers=tenant)
+        assert synced.status_code == 200, synced.text
+        body = synced.json()
+        assert body["mode"] == "remote"
+        assert body["synced"] is True
+        row = next(item for item in body["members"] if item["member_id"] == zhang_id)
+        assert row["relay_user_id"] == relay_user_id
+        assert row["relay_balance"] == 48.0
+        assert row["local_balance"] == 50.0
+        assert row["diff"] == -2.0
+        assert row["ok"] is False
+        assert row["month_cost"] == 2.0
+        assert row["lifetime_cost"] == 9.0
+        assert body["ok"] is False
+
+        # 快照落库后，成员页和租户页不请求中转站也能看到对账结果。
+        shown = next(item for item in client.get("/v1/members", headers=tenant).json() if item["id"] == zhang_id)
+        assert shown["relay_balance"] == 48.0
+        assert shown["relay_diff"] == -2.0
+        assert shown["relay_status"] == "active"
+        assert shown["relay_checked_at"]
+        tenant_rows = client.get("/v1/tenants", headers=tenant)
+        assert tenant_rows.status_code == 403
+        platform = _login(client, "admin@yujing.local")
+        company = next(item for item in client.get("/v1/tenants", headers=platform).json() if item["name"] == "锦程商贸")
+        assert company["relay_checked_at"]
+        assert company["relay_diff"] is not None
+
+        status = client.get("/v1/relay/status", headers=tenant)
+        assert status.status_code == 200
+        assert status.json()["totals"]["relay_balance"] == body["totals"]["relay_balance"]
+
+
+def test_relay_sync_refuses_local_mode(tmp_path, monkeypatch):
+    with _client(tmp_path, monkeypatch) as client:
+        tenant = _login(client, "li@jiecheng.com")
+        response = client.post("/v1/relay/sync", headers=tenant)
+        assert response.status_code == 400
+        assert "管理密钥" in response.json()["detail"]
+        status = client.get("/v1/relay/status", headers=tenant).json()
+        assert status["mode"] == "local"
+        assert status["synced"] is False
+def test_split_database_routing(tmp_path, monkeypatch):
+    """词库与本机设置落本机库，租户/成员/额度落云端库，两边不串表。"""
+    local = tmp_path / "local.db"
+    cloud = tmp_path / "cloud.db"
+    monkeypatch.setenv("EVC_ADMIN_DATABASE_URL", f"sqlite:///{local}")
+    monkeypatch.setenv("EVC_ADMIN_CLOUD_DATABASE_URL", f"sqlite:///{cloud}")
+    monkeypatch.setenv("EVC_DATA_DIR", str(tmp_path / "engine"))
+    monkeypatch.setenv("EVC_ADMIN_JWT_SECRET", "test-secret-test-secret")
+    monkeypatch.delenv("EVC_RELAY_ADMIN_KEY", raising=False)
+    monkeypatch.setattr("admin_app.auth_relay.login_password", _fake_login)
+    from admin_app.config import get_settings
+    from admin_app.db import reset_engine
+
+    get_settings.cache_clear()
+    reset_engine()
+    from admin_app.main import create_app
+
+    with TestClient(create_app()) as client:
+        platform = _login(client, "admin@yujing.local")
+        tenants = client.get("/v1/tenants", headers=platform)
+        assert tenants.status_code == 200, tenants.text
+        assert tenants.json()
+
+        from admin_app.db import session
+        from admin_app.models import KeywordEntry
+
+        db = session()
+        db.add(KeywordEntry(tenant_id=1, text="本机词", category="价格", source="口播"))
+        db.commit()
+        assert db.query(KeywordEntry).filter(KeywordEntry.text == "本机词").count() == 1
+        db.close()
+
+    import sqlite3
+
+    def tables(path) -> set[str]:
+        connection = sqlite3.connect(path)
+        try:
+            return {row[0] for row in connection.execute("select name from sqlite_master where type='table'")}
+        finally:
+            connection.close()
+
+    local_tables = tables(local)
+    cloud_tables = tables(cloud)
+    assert {"keyword_entries", "keyword_submissions", "tenant_rules"} <= local_tables
+    assert not {"tenants", "tenant_members", "quota_allocations"} & local_tables
+    assert {"tenants", "tenant_members", "quota_allocations", "usage_snapshots"} <= cloud_tables
+    assert "keyword_entries" not in cloud_tables
+

@@ -1,11 +1,11 @@
 from fastapi import Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
-from app.db import get_db
-from app.models import Member, MemberToken, Tenant
-from app.permissions import has_perm
-from app.security import decode_token, sha256_text
-from app.timeutil import utcnow
+from admin_app.db import get_db
+from admin_app.models import Member, MemberToken, Tenant
+from admin_app.permissions import has_perm
+from admin_app.security import decode_token, sha256_text
+from admin_app.timeutil import utcnow
 
 
 def current_user(request: Request, db: Session = Depends(get_db)) -> Member:

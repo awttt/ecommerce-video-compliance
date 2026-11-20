@@ -6,8 +6,8 @@ import jwt
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 
-from app.config import get_settings
-from app.timeutil import utcnow
+from admin_app.config import get_settings
+from admin_app.timeutil import utcnow
 
 _hasher = PasswordHasher(time_cost=2, memory_cost=19456, parallelism=1)
 _ACCESS_HOURS = 12

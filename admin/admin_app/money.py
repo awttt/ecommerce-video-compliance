@@ -1,6 +1,6 @@
 from decimal import Decimal, ROUND_HALF_UP
 
-from app.errors import DomainError
+from admin_app.errors import DomainError
 
 
 def to_cents(value: object) -> int:

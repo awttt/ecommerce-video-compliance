@@ -6,10 +6,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.db import init_db, session
-from app.errors import DomainError
-from app.routes import router
-from app.seed import seed
+from admin_app.db import init_db, session
+from admin_app.errors import DomainError
+from admin_app.routes import router
+from admin_app.seed import seed
 
 DIST = Path(__file__).resolve().parents[1] / "web" / "dist"
 

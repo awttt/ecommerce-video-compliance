@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, App as AntApp, Button, Card, Checkbox, Form, Input, InputNumber, Modal, Space, Table, Typography } from "antd";
+import { Alert, App as AntApp, Button, Card, Checkbox, Form, Input, InputNumber, Modal, Space, Table, Tag, Typography } from "antd";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ApiError, api } from "../api";
@@ -46,7 +46,7 @@ export function Tenants() {
     <>
       <PageHead
         title="租户管理"
-        description="一个租户是一家入驻公司。中转站不感知公司，只保存对应的用户和余额。"
+        description="一个租户是一家入驻公司。中转站不感知公司，只保存对应的用户和余额；余额合计来自最近一次在成员管理页的刷新。"
         extra={
           <Button type="primary" onClick={() => setOpen(true)}>
             新建公司
@@ -58,7 +58,7 @@ export function Tenants() {
           rowKey="id"
           dataSource={query.data ?? []}
           pagination={false}
-          scroll={{ x: 960 }}
+          scroll={{ x: 1100 }}
           columns={[
             {
               title: "公司",
@@ -76,6 +76,23 @@ export function Tenants() {
             { title: "中转站分组", dataIndex: "relay_group_name", render: (value: string) => value || "—" },
             { title: "公司池", dataIndex: "pool_total", render: (value: number) => money(value) },
             { title: "本月消耗", dataIndex: "month_cost", render: (value: number) => money(value) },
+            {
+              title: "中转站余额",
+              dataIndex: "relay_balance",
+              render: (value: number, row) =>
+                row.relay_checked_at ? money(value) : <Typography.Text type="secondary">未同步</Typography.Text>,
+            },
+            {
+              title: "与本地差额",
+              render: (_value, row) => {
+                if (!row.relay_checked_at || row.relay_diff === null) return "—";
+                return row.relay_diff === 0 ? (
+                  <Tag color="green">一致</Tag>
+                ) : (
+                  <Tag color="red">{row.relay_diff.toFixed(2)}</Tag>
+                );
+              },
+            },
             { title: "创建时间", dataIndex: "created_at", render: (value: string) => when(value) },
             {
               title: "操作",

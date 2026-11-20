@@ -7,38 +7,33 @@ from pathlib import Path
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.errors import DomainError
-from app.models import (
+from admin_app.errors import DomainError
+from admin_app.models import (
     AppMeta,
     AppSetting,
     AuditLog,
     Device,
-    Finding,
     Invite,
     KeywordEntry,
     KeywordSubmission,
     Member,
     MemberToken,
     QuotaAllocation,
-    ReviewJob,
     SessionToken,
     Tenant,
     TenantRules,
     UsageSnapshot,
 )
-from app.money import to_cents, yuan
-from app.permissions import ROLE_LABEL, has_perm
-from app.relay import get_relay
-from app.security import hash_password, new_invite_token, sha256_text
-from app.timeutil import iso, shanghai_now, utcnow
+from admin_app.money import to_cents, yuan
+from admin_app.permissions import ROLE_LABEL, has_perm
+from admin_app.relay import apply_credentials, get_relay, relay_mode
+from admin_app.security import hash_password, new_invite_token, sha256_text
+from admin_app.timeutil import iso, shanghai_now, utcnow
 
 CATEGORIES = ("价格", "规格", "品牌", "夸大宣传")
 SOURCES = ("口播", "画面")
 DEFAULT_CATEGORIES = ["价格", "规格", "品牌", "夸大宣传"]
 _NOTE_BLOCK = ("允许推测", "可以推测", "允许猜测", "可以猜测")
-_REGISTERED = "已登记。画面和口播识别在御镜桌面客户端完成，这里不调用模型，也不代理算力。"
-_ALLOWED_VIDEO = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".flv", ".wmv", ".mpeg", ".mpg", ".ts"}
-_MAX_VIDEO = 2 * 1024 * 1024 * 1024
 
 
 def audit(
@@ -171,7 +166,7 @@ def create_tenant(
     cents = to_cents(pool)
     if cents < 0:
         raise DomainError(400, "公司池不能是负数")
-    from app.relay import group_id_of, group_name_of
+    from admin_app.relay import group_id_of, group_name_of
 
     tenant = Tenant(
         name=cleaned,
@@ -185,7 +180,7 @@ def create_tenant(
     )
     db.add(tenant)
     db.flush()
-    relay_user_id = get_relay(db).create_user(email, admin_password)
+    relay_user_id, credentials = get_relay(db).create_user(email, admin_password)
     admin_member = Member(
         tenant_id=tenant.id,
         email=email,
@@ -195,6 +190,7 @@ def create_tenant(
         relay_user_id=relay_user_id,
         status="active",
     )
+    apply_credentials(admin_member, credentials)
     db.add(admin_member)
     db.add(
         TenantRules(
@@ -337,7 +333,7 @@ def create_member(
     if seats_used(db, tenant.id) >= tenant.seat_quota:
         raise DomainError(400, "席位已满")
     _password_ok(password)
-    relay_user_id = get_relay(db).create_user(address, password)
+    relay_user_id, credentials = get_relay(db).create_user(address, password)
     member = Member(
         tenant_id=tenant.id,
         email=address,
@@ -347,6 +343,7 @@ def create_member(
         relay_user_id=relay_user_id,
         status="active",
     )
+    apply_credentials(member, credentials)
     db.add(member)
     audit(db, actor, "member.create", member.email, f"创建成员 {member.name}", tenant_id=tenant.id, after={"relay_user_id": relay_user_id, "role": role}, ip=ip)
     db.commit()
@@ -367,7 +364,7 @@ def accept_invite(db: Session, token: str, password: str, name: str = "") -> tup
     if db.query(Member).filter(Member.email == row.email).first():
         raise DomainError(400, "这个邮箱已经开通")
     relay = get_relay(db)
-    relay_user_id = relay.create_user(row.email, password)
+    relay_user_id, credentials = relay.create_user(row.email, password)
     member = Member(
         tenant_id=tenant.id,
         email=row.email,
@@ -377,6 +374,7 @@ def accept_invite(db: Session, token: str, password: str, name: str = "") -> tup
         relay_user_id=relay_user_id,
         status="active",
     )
+    apply_credentials(member, credentials)
     row.used_at = utcnow()
     db.add(member)
     audit(
@@ -1043,6 +1041,121 @@ def reconcile(db: Session, tenant_ids: list[int]) -> dict:
     }
 
 
+def _relay_members(db: Session, actor: Member, tenant_id: int | None) -> list[Member]:
+    query = db.query(Member).filter(Member.deleted_at.is_(None), Member.role != "platform_admin")
+    if actor.role == "member":
+        return query.filter(Member.id == actor.id).all()
+    target = resolve_tenant(actor, tenant_id)
+    if target is not None:
+        query = query.filter(Member.tenant_id == target)
+    elif actor.role != "platform_admin":
+        query = query.filter(Member.tenant_id == actor.tenant_id)
+    return query.order_by(Member.id).all()
+
+
+def relay_report(db: Session, actor: Member, tenant_id: int | None, mode: str | None = None) -> dict:
+    """只用最近一次同步落下的快照，打开页面不打中转站。"""
+    members = _relay_members(db, actor, tenant_id)
+    rows: list[dict] = []
+    local_total = relay_total = month_total = lifetime_total = 0
+    checked_at = None
+    expected = 0
+    for member in members:
+        if not member.relay_user_id:
+            continue
+        expected += 1
+        diff = member.relay_balance_cents - member.balance_cents if member.relay_checked_at else 0
+        status_ok = not member.relay_status or member.relay_status == member.status
+        ok = bool(member.relay_checked_at) and diff == 0 and status_ok
+        local_total += member.balance_cents
+        relay_total += member.relay_balance_cents
+        month_total += member.month_cost_cents
+        lifetime_total += member.lifetime_cost_cents
+        if member.relay_checked_at and (checked_at is None or member.relay_checked_at > checked_at):
+            checked_at = member.relay_checked_at
+        rows.append(
+            {
+                "member_id": member.id,
+                "name": member.name,
+                "email": member.email,
+                "relay_user_id": member.relay_user_id,
+                "local_balance": yuan(member.balance_cents),
+                "relay_balance": yuan(member.relay_balance_cents),
+                "diff": yuan(diff),
+                "local_status": member.status,
+                "relay_status": member.relay_status,
+                "month_cost": yuan(member.month_cost_cents),
+                "lifetime_cost": yuan(member.lifetime_cost_cents),
+                "checked_at": iso(member.relay_checked_at),
+                "ok": ok,
+            }
+        )
+    return {
+        "mode": mode or relay_mode(),
+        "synced": checked_at is not None,
+        "checked_at": iso(checked_at),
+        "ok": bool(rows) and all(row["ok"] for row in rows),
+        "members": rows,
+        "totals": {
+            "local_balance": yuan(local_total),
+            "relay_balance": yuan(relay_total),
+            "diff": yuan(relay_total - local_total),
+            "month_cost": yuan(month_total),
+            "lifetime_cost": yuan(lifetime_total),
+            "members": expected,
+        },
+    }
+
+
+def sync_relay(db: Session, actor: Member, tenant_id: int | None, ip: str = "") -> dict:
+    """从中转站拉余额和用量，写成成员快照。只读中转站，不动本地账本。"""
+    _require(actor, "quota.allocate")
+    members = _relay_members(db, actor, tenant_id)
+    relayer = get_relay(db)
+    if relayer.mode == "local":
+        raise DomainError(400, "未配置中转站管理密钥，当前是本地演示，不能从中转站同步")
+    today = shanghai_now().date()
+    month_start = today.replace(day=1)
+    lifetime_start = date(2000, 1, 1)
+    now = utcnow()
+    synced = 0
+    missing: list[str] = []
+    for member in members:
+        if not member.relay_user_id:
+            continue
+        snapshot = relayer.user_snapshot(member.relay_user_id)
+        member.relay_checked_at = now
+        if snapshot is None:
+            member.relay_balance_cents = 0
+            member.relay_status = "missing"
+            missing.append(member.name)
+            continue
+        month = relayer.usage_summary(member.relay_user_id, month_start, today)
+        lifetime = relayer.usage_summary(member.relay_user_id, lifetime_start, today)
+        member.relay_balance_cents = int(snapshot["balance_cents"])
+        member.relay_status = str(snapshot.get("status") or "")[:16]
+        member.month_requests = int(month["requests"])
+        member.month_input_tokens = int(month["input_tokens"])
+        member.month_output_tokens = int(month["output_tokens"])
+        member.month_cost_cents = int(month["cost_cents"])
+        member.lifetime_cost_cents = max(int(lifetime["cost_cents"]), member.month_cost_cents)
+        synced += 1
+    audit(
+        db,
+        actor,
+        "relay.sync",
+        "relay",
+        f"从中转站同步 {synced} 名成员" + (f"，{len(missing)} 个账号在中转站不存在" if missing else ""),
+        tenant_id=resolve_tenant(actor, tenant_id),
+        after={"synced": synced, "missing": missing},
+        ip=ip,
+    )
+    db.commit()
+    report = relay_report(db, actor, tenant_id, mode=relayer.mode)
+    report["missing"] = missing
+    return report
+
+
 def trend(db: Session, member_ids: list[int] | None) -> list[dict]:
     end = shanghai_now().date()
     start = end - timedelta(days=6)
@@ -1111,82 +1224,6 @@ def record_usage_snapshot(
     return row
 
 
-def register_job(
-    db: Session,
-    actor: Member,
-    *,
-    filename: str,
-    member_id: int | None,
-    chunks,
-    ip: str = "",
-) -> ReviewJob:
-    target_id = actor.id if actor.role == "member" or member_id is None else member_id
-    member = db.get(Member, target_id)
-    if member is None or member.tenant_id is None:
-        raise DomainError(404, "成员不存在")
-    if actor.role == "member" and member.id != actor.id:
-        raise DomainError(403, "只能登记自己的视频")
-    if actor.role != "member":
-        resolve_tenant(actor, member.tenant_id)
-    safe = Path(filename or "").name
-    suffix = Path(safe).suffix.lower()
-    if suffix not in _ALLOWED_VIDEO:
-        raise DomainError(400, "只接收 mp4、mov、mkv、avi、webm、m4v、flv、wmv、mpeg、mpg、ts")
-    setting = db.get(AppSetting, 1)
-    status = "queued"
-    message = _REGISTERED
-    if setting is not None and setting.queue_paused:
-        message = "队列已暂停。" + _REGISTERED
-    job = ReviewJob(
-        tenant_id=member.tenant_id,
-        member_id=member.id,
-        filename=safe[:200],
-        status=status,
-        message=message[:300],
-    )
-    db.add(job)
-    db.flush()
-    root = Path(__file__).resolve().parents[1] / "data" / "videos" / str(job.id)
-    root.mkdir(parents=True, exist_ok=True)
-    path = root / safe
-    size = 0
-    try:
-        with path.open("wb") as handle:
-            while True:
-                chunk = chunks.read(1024 * 1024)
-                if not chunk:
-                    break
-                size += len(chunk)
-                if size > _MAX_VIDEO:
-                    raise DomainError(400, "单个视频不能超过 2GB")
-                handle.write(chunk)
-        if size <= 0:
-            raise DomainError(400, "视频是空的")
-    except Exception:
-        if path.exists():
-            path.unlink()
-        db.rollback()
-        raise
-    job.file_path = str(path)
-    audit(db, actor, "job.register", safe, f"登记视频 {safe}", tenant_id=member.tenant_id, ip=ip)
-    db.commit()
-    db.refresh(job)
-    return job
-
-
-def set_queue_paused(db: Session, actor: Member, paused: bool, ip: str = "") -> bool:
-    if actor.role not in ("platform_admin", "tenant_admin"):
-        raise DomainError(403, "没有权限")
-    row = db.get(AppSetting, 1)
-    if row is None:
-        raise DomainError(500, "设置还没有初始化")
-    row.queue_paused = paused
-    row.updated_at = utcnow()
-    audit(db, actor, "queue.pause" if paused else "queue.resume", "queue", "暂停队列" if paused else "开始队列", ip=ip)
-    db.commit()
-    return row.queue_paused
-
-
 def pending_count(db: Session, actor: Member) -> int:
     query = db.query(KeywordSubmission).filter(KeywordSubmission.status == "pending")
     if actor.role == "platform_admin":
@@ -1208,7 +1245,7 @@ def bind_device(
     client_version: str = "",
 ) -> tuple[str, Member, Device]:
     """对上公司成员后签发设备令牌。对不上就拒绝，客户端继续用本机规则。"""
-    from app.security import new_member_token
+    from admin_app.security import new_member_token
 
     address = (email or "").strip().lower()
     member = db.query(Member).filter(Member.email == address).one_or_none()

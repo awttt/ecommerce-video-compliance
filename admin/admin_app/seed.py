@@ -4,25 +4,23 @@ from datetime import timedelta
 
 from sqlalchemy.orm import Session
 
-from app.config import get_settings
-from app.models import (
+from admin_app.config import get_settings
+from admin_app.models import (
     AppMeta,
     AppSetting,
     AuditLog,
     Device,
-    Finding,
     KeywordEntry,
     KeywordSubmission,
     Member,
     QuotaAllocation,
     RelayAccount,
-    ReviewJob,
     Tenant,
     TenantRules,
     UsageSnapshot,
 )
-from app.security import hash_password
-from app.timeutil import shanghai_now, utcnow
+from admin_app.security import hash_password
+from admin_app.timeutil import shanghai_now, utcnow
 
 DEMO_PASSWORD = "Yujing123"
 GROUP = "电商审核专属-bot创建"
@@ -45,7 +43,6 @@ def seed(db: Session) -> None:
             backend_mode_enabled=False,
             registration_enabled=False,
             email_verify_ok=True,
-            queue_paused=False,
         )
     )
     db.add(AppMeta(key="rules_version", value="1"))
@@ -315,88 +312,6 @@ def seed(db: Session) -> None:
                 after={"seats": 3},
                 ip="192.168.1.22",
                 created_at=now - timedelta(days=1),
-            ),
-        ]
-    )
-    running = ReviewJob(
-        tenant_id=jie.id,
-        member_id=zhang.id,
-        filename="直播间-1117.mp4",
-        duration_label="03:12",
-        status="running",
-        frame_done=73,
-        frame_total=248,
-        message="画面识别中。口播成本已经含在该成员的中转站扣费里。",
-        created_at=now - timedelta(minutes=20),
-    )
-    done = ReviewJob(
-        tenant_id=jie.id,
-        member_id=zhang.id,
-        filename="主图视频.mp4",
-        duration_label="00:46",
-        status="done",
-        frame_done=46,
-        frame_total=46,
-        message="识别完成。命中列和桌面客户端导出的 8 列一致。",
-        created_at=now - timedelta(hours=2),
-    )
-    queued = ReviewJob(
-        tenant_id=you.id,
-        member_id=chen.id,
-        filename="详情页口播.mp4",
-        duration_label="01:05",
-        status="queued",
-        message="排队。已经排队的任务用当时抄下的规则。",
-        created_at=now - timedelta(minutes=8),
-    )
-    db.add_all([running, done, queued])
-    db.flush()
-    db.add_all(
-        [
-            Finding(
-                job_id=done.id,
-                time_range="0:08–0:11",
-                category="价格",
-                source="口播",
-                text="只要九十九元",
-                position="口播内容",
-                confidence="确定",
-                reason="口播里连续说出价格",
-                sort=1,
-            ),
-            Finding(
-                job_id=done.id,
-                time_range="0:21–0:24",
-                category="品牌",
-                source="画面",
-                text="锦程",
-                position="画面左上",
-                confidence="确定",
-                reason="画面中看得见品牌文字",
-                sort=2,
-            ),
-            Finding(
-                job_id=done.id,
-                time_range="0:29–0:32",
-                category="夸大宣传",
-                source="口播",
-                text="全网最低",
-                position="口播内容",
-                confidence="确定",
-                reason="绝对化用语",
-                sort=3,
-            ),
-            Finding(
-                job_id=done.id,
-                time_range="0:33–0:35",
-                category="解析失败",
-                source="画面",
-                text="",
-                position="第 18 帧",
-                confidence="—",
-                reason="这一帧没有返回可解析结果",
-                note="解析失败，需要人工审核",
-                sort=4,
             ),
         ]
     )

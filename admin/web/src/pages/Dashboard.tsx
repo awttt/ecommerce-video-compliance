@@ -52,10 +52,10 @@ export function Dashboard() {
           style={{ marginBottom: 16 }}
           showIcon
           type={member ? "info" : report.ok ? "success" : "error"}
-          message={member ? "普通用户主要在御镜客户端里审核视频" : report.ok ? "对账状态：正常" : report.overdraft ? "对账状态：不平，有成员透支" : "对账状态：不平"}
+          message={member ? "你可以在后台直接审核视频" : report.ok ? "对账状态：正常" : report.overdraft ? "对账状态：不平，有成员透支" : "对账状态：不平"}
           description={
             member
-              ? "命中词提交和查看自己的视频可以在这里进行。识别仍然使用你的中转站额度，后台不代理算力。"
+              ? "上传、抽帧、画面和口播识别、剪辑和导出都在后台完成。识别使用你的中转站额度。"
               : `${money(report.balance)} + ${money(report.cumulative_cost)} ，对照已分配 ${money(report.allocated)}。公司池还可分配 ${money(report.pool_remaining)}。${
                   report.overdraft_members.length ? `透支按 0 计入：${report.overdraft_members.join("、")}。` : ""
                 }`

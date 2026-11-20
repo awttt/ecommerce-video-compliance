@@ -10,7 +10,7 @@ export interface User {
   tenant_name: string;
   permissions: string[];
   pending_keywords: number;
-  queue_paused: boolean;
+  relay_live: boolean;
 }
 
 export interface Reconcile {
@@ -24,6 +24,39 @@ export interface Reconcile {
   overdraft: boolean;
   overdraft_members: string[];
   tenants?: { tenant_id: number; name: string; pool_remaining: number; pool_total: number }[];
+}
+
+export interface RelayMemberRow {
+  member_id: number;
+  name: string;
+  email: string;
+  relay_user_id: string;
+  local_balance: number;
+  relay_balance: number;
+  diff: number;
+  local_status: string;
+  relay_status: string;
+  month_cost: number;
+  lifetime_cost: number;
+  checked_at: string | null;
+  ok: boolean;
+}
+
+export interface RelayReport {
+  mode: "local" | "remote";
+  synced: boolean;
+  checked_at: string | null;
+  ok: boolean;
+  members: RelayMemberRow[];
+  missing?: string[];
+  totals: {
+    local_balance: number;
+    relay_balance: number;
+    diff: number;
+    month_cost: number;
+    lifetime_cost: number;
+    members: number;
+  };
 }
 
 export interface TrendPoint {
@@ -85,6 +118,9 @@ export interface Tenant {
   pool_remaining: number;
   allocated: number;
   month_cost: number;
+  relay_balance: number;
+  relay_diff: number | null;
+  relay_checked_at: string | null;
   created_at: string;
 }
 
@@ -101,6 +137,10 @@ export interface Member {
   status: string;
   status_label: string;
   balance: number;
+  relay_balance: number;
+  relay_diff: number | null;
+  relay_status: string;
+  relay_checked_at: string | null;
   overdraft: boolean;
   month_cost: number;
   lifetime_cost: number;
@@ -152,22 +192,10 @@ export interface Finding {
   置信度: string;
   判定理由: string;
   备注: string;
-}
-
-export interface Job {
-  id: number;
-  filename: string;
-  tenant_name: string;
-  member_name: string;
-  duration_label: string;
-  status: string;
-  status_label: string;
-  frame_done: number;
-  frame_total: number;
-  hit_count: number;
-  message: string;
-  has_file: boolean;
-  findings?: Finding[];
+  start_sec: number;
+  end_sec: number;
+  sentence_start?: number | null;
+  sentence_end?: number | null;
 }
 
 export interface Phrase {
@@ -226,7 +254,6 @@ export interface Settings {
   backend_mode_enabled: boolean;
   registration_enabled: boolean;
   email_verify_ok: boolean;
-  queue_paused: boolean;
   timezone: string;
   checks: SettingCheck[];
 }

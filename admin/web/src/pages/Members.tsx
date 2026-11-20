@@ -1,10 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, App as AntApp, Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Table, Typography } from "antd";
+import { Alert, App as AntApp, Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Table, Tag, Typography } from "antd";
 import { useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import { ApiError, api } from "../api";
-import { money } from "../format";
-import type { Device, Member, Tenant, User } from "../types";
+import { money, when } from "../format";
+import type { Device, Member, RelayReport, Tenant, User } from "../types";
 import { PageHead, StatusTag } from "../ui";
 
 export function Members() {
@@ -59,6 +59,21 @@ export function Members() {
     onError: (error) => message.error(error instanceof ApiError ? error.message : "操作失败"),
   });
 
+  const sync = useMutation({
+    mutationFn: () =>
+      api<RelayReport>(scope ? `/v1/relay/sync?tenant_id=${scope}` : "/v1/relay/sync", { method: "POST" }),
+    onSuccess: (data) => {
+      const bad = data.members.filter((item) => !item.ok).length;
+      if (bad) message.warning(`已同步，${bad} 名成员的中转站余额或状态与本地不一致`);
+      else message.success("已从中转站同步，余额和状态一致");
+      void client.invalidateQueries({ queryKey: ["members"] });
+      void client.invalidateQueries({ queryKey: ["tenants"] });
+      void client.invalidateQueries({ queryKey: ["quota-summary"] });
+      void client.invalidateQueries({ queryKey: ["relay-status"] });
+    },
+    onError: (error) => message.error(error instanceof ApiError ? error.message : "同步失败"),
+  });
+
   const revoke = useMutation({
     mutationFn: (id: number) => api(`/v1/devices/${id}/revoke`, { method: "POST" }),
     onSuccess: () => {
@@ -84,6 +99,11 @@ export function Members() {
                 onChange={setTenantId}
                 options={(tenants.data ?? []).map((item) => ({ value: item.id, label: item.name }))}
               />
+            ) : null}
+            {user.relay_live ? (
+              <Button onClick={() => sync.mutate()} loading={sync.isPending}>
+                从中转站刷新
+              </Button>
             ) : null}
             <Button type="primary" onClick={() => setOpen(true)} disabled={user.role === "platform_admin" && !scope}>
               邀请成员
@@ -123,6 +143,26 @@ export function Members() {
               render: (_value, row) => <StatusTag status={row.status} label={row.overdraft ? "透支" : row.status_label} />,
             },
             { title: "余额", render: (_value, row) => (row.overdraft ? "¥0.00" : money(row.balance)) },
+            {
+              title: "中转站余额",
+              render: (_value, row) => {
+                if (!row.relay_checked_at) return <Typography.Text type="secondary">未同步</Typography.Text>;
+                const diff = row.relay_diff ?? 0;
+                const statusBad = row.relay_status && row.relay_status !== row.status;
+                return (
+                  <Space size={4} wrap>
+                    <span>{money(row.relay_balance)}</span>
+                    {diff === 0 ? <Tag color="green">一致</Tag> : <Tag color="red">差额 {diff.toFixed(2)}</Tag>}
+                    {statusBad ? <Tag color="orange">状态 {row.relay_status}</Tag> : null}
+                  </Space>
+                );
+              },
+            },
+            {
+              title: "最近同步",
+              dataIndex: "relay_checked_at",
+              render: (value: string | null) => (value ? when(value) : "—"),
+            },
             { title: "本月消耗", dataIndex: "month_cost", render: (value: number) => money(value) },
             {
               title: "设备",
@@ -160,7 +200,7 @@ export function Members() {
         style={{ marginTop: 16 }}
         type="info"
         showIcon
-        message="账号会立即加入专属分组并创建审核 Key。额度需在额度分配页单独划拨。"
+        message="账号会立即加入专属分组并创建审核 Key。额度需在额度分配页单独划拨。「从中转站刷新」只读余额和用量，不会改动本地账本。"
       />
       <Modal title="新建成员" open={open} onCancel={() => setOpen(false)} footer={null} destroyOnClose>
         <Form layout="vertical" initialValues={{ role: "member" }} onFinish={(values) => create.mutate(values)}>
