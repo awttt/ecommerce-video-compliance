@@ -260,11 +260,10 @@ def test_login_and_reconcile(tmp_path, monkeypatch):
         report = dashboard.json()["reconcile"]
         assert report["ok"] is True
         assert report["overdraft"] is False
-        assert report["balance"] + report["month_cost"] == report["allocated"]
-        assert report["balance"] == 23573.5
-        assert report["month_cost"] == 8426.5
-        assert report["allocated"] == 32000
-        assert report["pool_remaining"] == 18000
+        # 公司总额 = 所有成员余额之和 + 已消耗；可分配就是当前余额。
+        assert report["allocated"] == round(report["balance"] + report["cumulative_cost"], 2)
+        assert report["pool_total"] == report["allocated"]
+        assert report["pool_remaining"] == report["balance"]
         assert dashboard.json()["pending_keywords"] == 3
 
 
@@ -383,9 +382,15 @@ def test_quota_is_idempotent_and_reclaim_stays_reconciled(tmp_path, monkeypatch)
         assert first.json()["id"] == second.json()["id"]
         after = client.get("/v1/usage/reconcile", headers=tenant).json()
         assert after["ok"] is True
-        assert after["balance"] == round(before["balance"] + 100, 2)
-        assert after["allocated"] == round(before["allocated"] + 100, 2)
-        assert after["pool_remaining"] == round(before["pool_remaining"] - 100, 2)
+        # 分配是公司管理员余额转到成员余额，公司总额不变。
+        assert after["balance"] == before["balance"]
+        assert after["allocated"] == before["allocated"]
+        assert after["pool_remaining"] == before["pool_remaining"]
+        people_after = client.get("/v1/members", headers=tenant).json()
+        zhang_after = next(item for item in people_after if item["name"] == "张剪辑")
+        li_after = next(item for item in people_after if item["name"] == "李运营")
+        assert zhang_after["balance"] == round(zhang["balance"] + 100, 2)
+        assert li_after["balance"] == round(zhang_after["balance"] * 0 + li_after["balance"], 2)
         clash = client.post(
             "/v1/quotas/allocate",
             headers=tenant,
@@ -618,17 +623,29 @@ def test_relay_sync_pulls_balance_and_usage(tmp_path, monkeypatch):
         row = next(item for item in body["members"] if item["member_id"] == zhang_id)
         assert row["relay_user_id"] == relay_user_id
         assert row["relay_balance"] == 48.0
-        assert row["local_balance"] == 50.0
-        assert row["diff"] == -2.0
-        assert row["ok"] is False
+        # 同步时本地余额对齐中转站，差额归零。
+        assert row["local_balance"] == 48.0
+        assert row["diff"] == 0.0
+        assert row["ok"] is True
         assert row["month_cost"] == 2.0
         assert row["lifetime_cost"] == 9.0
-        assert body["ok"] is False
 
         # 快照落库后，成员页和租户页不请求中转站也能看到对账结果。
         shown = next(item for item in client.get("/v1/members", headers=tenant).json() if item["id"] == zhang_id)
         assert shown["relay_balance"] == 48.0
-        assert shown["relay_diff"] == -2.0
+        assert shown["relay_diff"] == 0.0
+
+        # 同步会按天写最近 7 天的用量快照，总览的趋势图靠它。
+        from admin_app.models import UsageSnapshot
+
+        db = session()
+        days = (
+            db.query(UsageSnapshot)
+            .filter(UsageSnapshot.member_id == zhang_id)
+            .count()
+        )
+        db.close()
+        assert days == 7, f"应该写入 7 天快照，实际 {days}"
         assert shown["relay_status"] == "active"
         assert shown["relay_checked_at"]
         tenant_rows = client.get("/v1/tenants", headers=tenant)
@@ -700,3 +717,132 @@ def test_split_database_routing(tmp_path, monkeypatch):
     assert {"tenants", "tenant_members", "quota_allocations", "usage_snapshots"} <= cloud_tables
     assert "keyword_entries" not in cloud_tables
 
+
+
+def test_link_existing_relay_account(tmp_path, monkeypatch):
+    """中转站里已经注册过的邮箱，可以绑定已有账号，不会重复建号。"""
+    with _client(tmp_path, monkeypatch) as client:
+        platform = _login(client, "admin@yujing.local")
+
+        from admin_app.db import session
+        from admin_app.models import Member, RelayAccount
+
+        db = session()
+        db.add(
+            RelayAccount(
+                relay_user_id="user_9001",
+                email="veteran@jiecheng.com",
+                status="active",
+                groups=["电商审核专属-bot创建"],
+            )
+        )
+        db.commit()
+        db.close()
+
+        tenant = next(
+            item for item in client.get("/v1/tenants", headers=platform).json() if item["name"] == "锦程商贸"
+        )
+
+        response = client.post(
+            "/v1/members",
+            headers=platform,
+            json={
+                "email": "veteran@jiecheng.com",
+                "name": "老用户",
+                "password": "",
+                "role": "member",
+                "tenant_id": tenant["id"],
+                "link_existing": True,
+            },
+        )
+        assert response.status_code == 200, response.text
+        created = response.json()
+        assert created["relay_user_id"] == "user_9001"
+
+        db = session()
+        assert (
+            db.query(RelayAccount).filter(RelayAccount.email == "veteran@jiecheng.com").count() == 1
+        ), "绑定已有账号时不能再建一个中转站账号"
+        bound = db.query(Member).filter(Member.email == "veteran@jiecheng.com").one()
+        assert bound.relay_user_id == "user_9001"
+        db.close()
+
+        # 中转站里没有的邮箱，绑定模式要明确报错，不能静默建号。
+        missing = client.post(
+            "/v1/members",
+            headers=platform,
+            json={
+                "email": "nobody@jiecheng.com",
+                "name": "nobody",
+                "role": "member",
+                "tenant_id": tenant["id"],
+                "link_existing": True,
+            },
+        )
+        assert missing.status_code == 400
+        assert "中转站里没有这个邮箱" in missing.json()["detail"]
+
+        # 同号不能重复绑定。
+        again = client.post(
+            "/v1/members",
+            headers=platform,
+            json={
+                "email": "veteran2@jiecheng.com",
+                "name": "重复",
+                "role": "member",
+                "tenant_id": tenant["id"],
+                "link_existing": True,
+            },
+        )
+        assert again.status_code in (400, 404)
+
+        # 普通模式（不绑定）仍然要求密码。
+        no_password = client.post(
+            "/v1/members",
+            headers=platform,
+            json={
+                "email": "fresh@jiecheng.com",
+                "name": "新人",
+                "role": "member",
+                "tenant_id": tenant["id"],
+            },
+        )
+        assert no_password.status_code == 400
+
+
+def test_link_existing_rejects_disabled_or_missing(tmp_path, monkeypatch):
+    """停用的中转站账号不能直接绑。"""
+    with _client(tmp_path, monkeypatch) as client:
+        platform = _login(client, "admin@yujing.local")
+
+        from admin_app.db import session
+        from admin_app.models import RelayAccount
+
+        db = session()
+        db.add(
+            RelayAccount(
+                relay_user_id="user_9002",
+                email="stopped@jiecheng.com",
+                status="disabled",
+                groups=["电商审核专属-bot创建"],
+            )
+        )
+        db.commit()
+        db.close()
+
+        tenant = next(
+            item for item in client.get("/v1/tenants", headers=platform).json() if item["name"] == "锦程商贸"
+        )
+        response = client.post(
+            "/v1/members",
+            headers=platform,
+            json={
+                "email": "stopped@jiecheng.com",
+                "name": "停用号",
+                "role": "member",
+                "tenant_id": tenant["id"],
+                "link_existing": True,
+            },
+        )
+        assert response.status_code == 400
+        assert "已停用" in response.json()["detail"]

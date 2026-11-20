@@ -89,13 +89,13 @@ export function Quota() {
           <Card title="公司池">
             <Row gutter={16}>
               <Col span={12} md={6}>
-                <Statistic title="成员余额合计" value={report?.balance ?? 0} precision={2} prefix="¥" />
+                <Statistic title="公司余额" value={report?.balance ?? 0} precision={2} prefix="¥" />
               </Col>
               <Col span={12} md={6}>
-                <Statistic title="已分配" value={report?.allocated ?? 0} precision={2} prefix="¥" />
+                <Statistic title="公司总额" value={report?.pool_total ?? 0} precision={2} prefix="¥" />
               </Col>
               <Col span={12} md={6}>
-                <Statistic title="可分配" value={report?.pool_remaining ?? 0} precision={2} prefix="¥" valueStyle={{ color: "#52c41a" }} />
+                <Statistic title="可划拨" value={report?.pool_remaining ?? 0} precision={2} prefix="¥" valueStyle={{ color: "#52c41a" }} />
               </Col>
               <Col span={12} md={6}>
                 <Statistic title="累计已消耗" value={report?.cumulative_cost ?? 0} precision={2} prefix="¥" />

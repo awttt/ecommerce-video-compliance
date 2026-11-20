@@ -14,13 +14,15 @@ export function Tenants() {
   const [open, setOpen] = useState(false);
   const [stop, setStop] = useState<Tenant | null>(null);
   const [alsoDisable, setAlsoDisable] = useState(false);
+  const [linkExisting, setLinkExisting] = useState(false);
   const query = useQuery({ queryKey: ["tenants"], queryFn: () => api<Tenant[]>("/v1/tenants") });
 
   const create = useMutation({
-    mutationFn: (values: { name: string; admin_email: string; admin_name: string; admin_password: string; pool: number; seats: number }) =>
+    mutationFn: (values: { name: string; admin_email: string; admin_name: string; admin_password: string; seats: number; link_existing: boolean }) =>
       api<{ admin: { name: string } }>("/v1/tenants", { method: "POST", body: JSON.stringify(values) }),
     onSuccess: (data) => {
       setOpen(false);
+      setLinkExisting(false);
       message.success(`公司和管理员 ${data.admin.name} 已创建`);
       void client.invalidateQueries({ queryKey: ["tenants"] });
     },
@@ -74,7 +76,7 @@ export function Tenants() {
             { title: "状态", render: (_value, row) => <StatusTag status={row.status} label={row.status_label} /> },
             { title: "成员 / 席位", render: (_value, row) => `${row.seats_used} / ${row.seat_quota}` },
             { title: "中转站分组", dataIndex: "relay_group_name", render: (value: string) => value || "—" },
-            { title: "公司池", dataIndex: "pool_total", render: (value: number) => money(value) },
+            { title: "公司余额", dataIndex: "pool_remaining", render: (value: number) => money(value) },
             { title: "本月消耗", dataIndex: "month_cost", render: (value: number) => money(value) },
             {
               title: "中转站余额",
@@ -123,7 +125,7 @@ export function Tenants() {
         message="新建公司只绑定专属分组「电商审核专属-bot创建」。中转站建号不再自动挂上其他分组。第二版再改成每家公司一个分组。"
       />
       <Modal title="新建公司" open={open} onCancel={() => setOpen(false)} footer={null} destroyOnClose>
-        <Form layout="vertical" onFinish={(values) => create.mutate(values)} initialValues={{ pool: 5000, seats: 10 }}>
+        <Form layout="vertical" onFinish={(values) => create.mutate(values)} initialValues={{ seats: 10, link_existing: false }}>
           <Form.Item name="name" label="公司名称" rules={[{ required: true, message: "请填写公司名称" }]}>
             <Input placeholder="例如：锦程商贸" />
           </Form.Item>
@@ -133,11 +135,22 @@ export function Tenants() {
           <Form.Item name="admin_email" label="管理员邮箱" rules={[{ required: true, type: "email", message: "请填写邮箱" }]}>
             <Input placeholder="用于登录管理后台" />
           </Form.Item>
-          <Form.Item name="admin_password" label="初始密码" rules={[{ required: true, min: 8, message: "密码至少 8 位" }]}>
-            <Input.Password autoComplete="new-password" />
+          <Form.Item name="link_existing" valuePropName="checked">
+            <Checkbox onChange={(event) => setLinkExisting(event.target.checked)}>
+              该邮箱已经在中转站注册过，直接绑定已有账号
+            </Checkbox>
           </Form.Item>
-          <Form.Item name="pool" label="初始公司池（元）">
-            <InputNumber min={0} style={{ width: "100%" }} />
+          <Form.Item
+            name="admin_password"
+            label="初始密码"
+            rules={linkExisting ? [] : [{ required: true, min: 8, message: "密码至少 8 位" }]}
+            extra={linkExisting ? "绑定已有账号时不改密码，沿用中转站的密码。" : undefined}
+          >
+            <Input.Password
+              autoComplete="new-password"
+              disabled={linkExisting}
+              placeholder={linkExisting ? "无需填写" : undefined}
+            />
           </Form.Item>
           <Form.Item name="seats" label="席位数">
             <InputNumber min={1} max={10000} style={{ width: "100%" }} />

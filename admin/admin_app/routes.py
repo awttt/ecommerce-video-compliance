@@ -93,9 +93,10 @@ class TenantBody(BaseModel):
     name: str
     admin_email: str
     admin_name: str = ""
-    admin_password: str
-    pool: float = 0
+    admin_password: str = ""
     seats: int = 10
+    # 公司管理员邮箱已经在中转站注册过时，绑定已有账号，不再新建。
+    link_existing: bool = False
 
 
 class StatusBody(BaseModel):
@@ -114,9 +115,11 @@ class InviteBody(BaseModel):
 class CreateMemberBody(BaseModel):
     email: str
     name: str = ""
-    password: str
+    password: str = ""
     role: str = "member"
     tenant_id: int | None = None
+    # 该邮箱已经在中转站注册过时，绑定已有账号，不再新建。
+    link_existing: bool = False
 
 
 class AcceptBody(BaseModel):
@@ -456,8 +459,8 @@ def post_tenant(
         admin_email=body.admin_email,
         admin_name=body.admin_name,
         admin_password=body.admin_password,
-        pool=body.pool,
         seats=body.seats,
+        link_existing=body.link_existing,
         ip=client_ip(request),
     )
     return {"tenant": tenant_dict(db, tenant), "admin": member_dict(db, member)}
@@ -535,6 +538,7 @@ def post_member(
         password=body.password,
         role=body.role,
         tenant_id=body.tenant_id,
+        link_existing=body.link_existing,
         ip=client_ip(request),
     )
     return member_dict(db, member)

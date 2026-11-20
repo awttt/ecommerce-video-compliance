@@ -1,6 +1,5 @@
 import {
   AccountBookOutlined,
-  ApartmentOutlined,
   AuditOutlined,
   BarChartOutlined,
   DashboardOutlined,
@@ -24,7 +23,6 @@ const GROUPS = ["工作台", "业务管理", "系统"];
 
 const NAV: { key: string; label: string; group: string; roles: Role[]; icon: ReactNode }[] = [
   { key: "/", label: "总览", group: "工作台", roles: ["platform_admin", "tenant_admin", "member"], icon: <DashboardOutlined /> },
-  { key: "/flow", label: "流程图与权限", group: "工作台", roles: ["platform_admin", "tenant_admin", "member"], icon: <ApartmentOutlined /> },
   { key: "/tenants", label: "租户管理", group: "业务管理", roles: ["platform_admin"], icon: <BankOutlined /> },
   { key: "/members", label: "成员管理", group: "业务管理", roles: ["platform_admin", "tenant_admin"], icon: <TeamOutlined /> },
   { key: "/quota", label: "额度分配", group: "业务管理", roles: ["platform_admin", "tenant_admin"], icon: <AccountBookOutlined /> },

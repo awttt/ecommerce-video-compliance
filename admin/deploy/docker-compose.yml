@@ -1,0 +1,24 @@
+services:
+  evc-admin:
+    build:
+      context: ../../admin
+      network: host          # 默认 bridge 没有出网，构建阶段用宿主网络装 pip 依赖
+    image: evc-admin:latest
+    container_name: evc-admin
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "127.0.0.1:8780:8780"   # 只给本机 nginx 用，不直接暴露公网
+    networks:
+      - relay
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  relay:
+    external: true
+    name: sub2api-deploy_sub2api-network

@@ -20,6 +20,7 @@ export interface Reconcile {
   cumulative_cost: number;
   allocated: number;
   pool_remaining: number;
+  pool_total: number;
   previous_month_cost: number;
   overdraft: boolean;
   overdraft_members: string[];

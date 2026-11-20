@@ -1,5 +1,6 @@
-"""演示数据。已经有成员时不会覆盖。"""
+"""演示数据。已经有成员时不会覆盖；正式环境用 EVC_ADMIN_SEED=0 彻底关掉。"""
 
+import os
 from datetime import timedelta
 
 from sqlalchemy.orm import Session
@@ -27,6 +28,8 @@ GROUP = "电商审核专属-bot创建"
 
 
 def seed(db: Session) -> None:
+    if os.environ.get("EVC_ADMIN_SEED", "1").strip().lower() in ("0", "false", "no", "off"):
+        return
     if db.query(Member).first() is not None:
         return
     settings = get_settings()

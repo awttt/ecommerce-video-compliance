@@ -43,14 +43,17 @@ def member_brief(db: Session, member: Member | None) -> dict | None:
 
 def tenant_dict(db: Session, tenant: Tenant) -> dict:
     month = 0
+    lifetime = 0
     relay_balance = 0
     local_balance = 0
     checked_at = None
     for member in db.query(Member).filter(Member.tenant_id == tenant.id, Member.deleted_at.is_(None)):
         month += member.month_cost_cents
+        lifetime += max(member.lifetime_cost_cents, member.month_cost_cents)
+        # 公司总额 = 所有成员余额之和（公司管理员也是成员）。
+        local_balance += max(member.balance_cents, 0)
         if member.relay_checked_at is not None:
             relay_balance += member.relay_balance_cents
-            local_balance += member.balance_cents
             if checked_at is None or member.relay_checked_at > checked_at:
                 checked_at = member.relay_checked_at
     return {
@@ -62,9 +65,10 @@ def tenant_dict(db: Session, tenant: Tenant) -> dict:
         "seat_quota": tenant.seat_quota,
         "relay_group_id": tenant.relay_group_id,
         "relay_group_name": tenant.relay_group_name,
-        "pool_total": yuan(tenant.pool_total_cents),
-        "pool_remaining": yuan(tenant.pool_balance_cents),
-        "allocated": yuan(tenant.allocated_total_cents),
+        # 公司不单独充值：总额 = 余额 + 已消耗，可分配就是当前余额。
+        "pool_total": yuan(local_balance + lifetime),
+        "pool_remaining": yuan(local_balance),
+        "allocated": yuan(local_balance + lifetime),
         "month_cost": yuan(month),
         "relay_balance": yuan(relay_balance),
         "relay_diff": yuan(relay_balance - local_balance) if checked_at else None,

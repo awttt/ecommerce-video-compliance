@@ -4,7 +4,6 @@ import { AdminLayout } from "./layout";
 import { AcceptInvite } from "./pages/Invite";
 import { Login } from "./pages/Login";
 import { Dashboard } from "./pages/Dashboard";
-import { Flow } from "./pages/Flow";
 import { Tenants } from "./pages/Tenants";
 import { Members } from "./pages/Members";
 import { Quota } from "./pages/Quota";
@@ -25,7 +24,6 @@ export function App() {
       <Route path="/invite/:token" element={<AcceptInvite />} />
       <Route element={<RequireAuth />}>
         <Route path="/" element={<Dashboard />} />
-        <Route path="/flow" element={<Flow />} />
         <Route path="/tenants" element={<Tenants />} />
         <Route path="/members" element={<Members />} />
         <Route path="/quota" element={<Quota />} />

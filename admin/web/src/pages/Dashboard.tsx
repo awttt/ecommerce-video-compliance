@@ -56,7 +56,7 @@ export function Dashboard() {
           description={
             member
               ? "上传、抽帧、画面和口播识别、剪辑和导出都在后台完成。识别使用你的中转站额度。"
-              : `${money(report.balance)} + ${money(report.cumulative_cost)} ，对照已分配 ${money(report.allocated)}。公司池还可分配 ${money(report.pool_remaining)}。${
+              : `公司余额 ${money(report.balance)}，累计已消耗 ${money(report.cumulative_cost)}，公司总额 ${money(report.pool_total)}。${
                   report.overdraft_members.length ? `透支按 0 计入：${report.overdraft_members.join("、")}。` : ""
                 }`
           }
@@ -72,7 +72,7 @@ export function Dashboard() {
         <Col xs={24} sm={12} lg={6}>
           <Card>
             <Statistic title={member ? "本月消耗" : "已分配累计"} value={member ? report?.month_cost ?? 0 : report?.allocated ?? 0} precision={2} prefix="¥" />
-            <Typography.Text type="secondary">{member ? "已含分组倍率" : `还可分配 ${money(report?.pool_remaining ?? 0)}`}</Typography.Text>
+            <Typography.Text type="secondary">{member ? "已含分组倍率" : `公司余额 ${money(report?.pool_remaining ?? 0)}`}</Typography.Text>
           </Card>
         </Col>
         <Col xs={24} sm={12} lg={6}>

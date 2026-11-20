@@ -132,9 +132,72 @@ def _period() -> str:
     return shanghai_now().strftime("%Y-%m")
 
 
+def _sync_member_balance(relay, member: Member) -> None:
+    """把成员本地余额对齐中转站。读不到时跳过，不阻断建号。"""
+    if not member.relay_user_id:
+        return
+    try:
+        snapshot = relay.user_snapshot(member.relay_user_id)
+    except DomainError:
+        return
+    if snapshot is None:
+        return
+    balance = int(snapshot["balance_cents"])
+    member.relay_balance_cents = balance
+    member.relay_status = str(snapshot.get("status") or "")[:16]
+    member.relay_checked_at = utcnow()
+    member.balance_cents = balance
+    member.overdraft = balance < 0
+
+
+def _wallet_owner(db: Session, tenant: Tenant) -> Member:
+    """公司的钱放在公司管理员自己的中转站账号里，分配和回收都在这个账号上进出。"""
+    owner = (
+        db.query(Member)
+        .filter(
+            Member.tenant_id == tenant.id,
+            Member.role == "tenant_admin",
+            Member.deleted_at.is_(None),
+        )
+        .order_by(Member.id)
+        .first()
+    )
+    if owner is None:
+        raise DomainError(400, "这家公司还没有公司管理员，不能分配额度")
+    return owner
+
+
 def _password_ok(password: str) -> None:
     if len(password or "") < 8 or len(password) > 72:
         raise DomainError(400, "密码需要在 8 到 72 位之间")
+
+
+def _relay_account(
+    db: Session,
+    relay,
+    email: str,
+    password: str,
+    link_existing: bool,
+) -> tuple[str, dict]:
+    """建新号，或把中转站里已经注册过的账号绑进来。返回 (relay_user_id, credentials)。"""
+    if not link_existing:
+        return relay.create_user(email, password)
+    found = relay.find_user_by_email(email)
+    if found is None:
+        raise DomainError(400, "中转站里没有这个邮箱，请先让该账号在中转站注册，或关闭「绑定已有账号」")
+    status = str(found.get("status") or "").strip().lower()
+    if status and status != "active":
+        raise DomainError(400, "这个中转站账号已停用，请先在中转站启用")
+    relay_user_id = str(found["id"])
+    taken = (
+        db.query(Member)
+        .filter(Member.relay_user_id == relay_user_id, Member.deleted_at.is_(None))
+        .first()
+    )
+    if taken is not None:
+        raise DomainError(400, "这个中转站账号已经绑定了其他成员")
+    # 已有账号的密码在中转站那边，后台不知道，也不该重置；密钥等成员自己登录后写入。
+    return relay_user_id, {}
 
 
 def create_tenant(
@@ -145,8 +208,8 @@ def create_tenant(
     admin_email: str,
     admin_name: str,
     admin_password: str,
-    pool: object,
     seats: int,
+    link_existing: bool = False,
     ip: str = "",
 ) -> tuple[Tenant, Member]:
     _require(actor, "tenant.manage")
@@ -160,37 +223,38 @@ def create_tenant(
         raise DomainError(400, "已经有这家公司")
     if db.query(Member).filter(Member.email == email).first():
         raise DomainError(400, "这个邮箱已经开通")
-    _password_ok(admin_password)
+    if not link_existing:
+        _password_ok(admin_password)
     if seats < 1 or seats > 10000:
         raise DomainError(400, "席位数需要在 1 到 10000 之间")
-    cents = to_cents(pool)
-    if cents < 0:
-        raise DomainError(400, "公司池不能是负数")
     from admin_app.relay import group_id_of, group_name_of
 
+    # 公司不单独充值。总额等于所有成员余额之和，初始余额以管理员在中转站的余额为准。
     tenant = Tenant(
         name=cleaned,
         status="active",
         seat_quota=seats,
         relay_group_id=group_id_of(db),
         relay_group_name=group_name_of(db),
-        pool_balance_cents=cents,
-        pool_total_cents=cents,
+        pool_balance_cents=0,
+        pool_total_cents=0,
         allocated_total_cents=0,
     )
     db.add(tenant)
     db.flush()
-    relay_user_id, credentials = get_relay(db).create_user(email, admin_password)
+    relay = get_relay(db)
+    relay_user_id, credentials = _relay_account(db, relay, email, admin_password, link_existing)
     admin_member = Member(
         tenant_id=tenant.id,
         email=email,
         name=(admin_name or email.split("@", 1)[0])[:40],
         role="tenant_admin",
-        password_hash=hash_password(admin_password),
+        password_hash=hash_password(admin_password) if admin_password else "",
         relay_user_id=relay_user_id,
         status="active",
     )
     apply_credentials(admin_member, credentials)
+    _sync_member_balance(relay, admin_member)
     db.add(admin_member)
     db.add(
         TenantRules(
@@ -312,6 +376,7 @@ def create_member(
     password: str,
     role: str,
     tenant_id: int | None,
+    link_existing: bool = False,
     ip: str = "",
 ) -> Member:
     _require(actor, "member.manage")
@@ -332,14 +397,16 @@ def create_member(
         raise DomainError(400, "这个邮箱已经开通")
     if seats_used(db, tenant.id) >= tenant.seat_quota:
         raise DomainError(400, "席位已满")
-    _password_ok(password)
-    relay_user_id, credentials = get_relay(db).create_user(address, password)
+    if not link_existing:
+        _password_ok(password)
+    relay = get_relay(db)
+    relay_user_id, credentials = _relay_account(db, relay, address, password, link_existing)
     member = Member(
         tenant_id=tenant.id,
         email=address,
         name=(name or address.split("@", 1)[0]).strip()[:40],
         role=role,
-        password_hash=hash_password(password),
+        password_hash=hash_password(password) if password else "",
         relay_user_id=relay_user_id,
         status="active",
     )
@@ -587,29 +654,40 @@ def _finish_quota(db: Session, actor: Member, row: QuotaAllocation, ip: str) -> 
     if member is None or tenant is None:
         raise DomainError(404, "额度记录缺少成员或公司")
     relay = get_relay(db)
+    owner = _wallet_owner(db, tenant)
+    if member.id == owner.id:
+        row.status = "failed"
+        db.commit()
+        raise DomainError(400, "公司管理员的余额就是公司余额，不需要分配给自己")
     if row.direction == "add" and member.status != "active":
         row.status = "failed"
         db.commit()
         raise DomainError(400, "成员已停用，不能再分配")
-    if row.direction == "add" and tenant.pool_balance_cents < row.amount_cents:
+    if row.direction == "add" and owner.balance_cents < row.amount_cents:
         row.status = "failed"
         db.commit()
-        raise DomainError(400, "公司池剩余不足")
+        raise DomainError(400, "公司管理员在中转站的余额不足，请先在 token4u 充值")
     if row.direction == "subtract" and row.amount_cents > max(member.balance_cents, 0):
         row.status = "failed"
         db.commit()
         raise DomainError(400, "成员可退回的余额不足")
     try:
-        applied = bool(row.relay_applied) or relay.was_applied(row.idempotency_key, member.relay_user_id)
-        if not applied:
-            if row.direction == "add":
-                relay.add_balance(member.relay_user_id, row.amount_cents, row.idempotency_key)
-            else:
-                relay.subtract_balance(member.relay_user_id, row.amount_cents, row.idempotency_key)
+        # 分配和回收都是公司管理员与成员之间的转账，公司总额不变。
+        # 两个方向用独立的幂等键，中途失败时重试只会补做没完成的那一半。
+        if row.direction == "add":
+            out_key, in_key = f"{row.idempotency_key}:out", f"{row.idempotency_key}:in"
+        else:
+            out_key, in_key = f"{row.idempotency_key}:out", f"{row.idempotency_key}:in"
+        out_id = owner.relay_user_id if row.direction == "add" else member.relay_user_id
+        in_id = member.relay_user_id if row.direction == "add" else owner.relay_user_id
+        if not row.relay_applied:
+            if not relay.was_applied(out_key, out_id):
+                relay.subtract_balance(out_id, row.amount_cents, out_key)
+            if not relay.was_applied(in_key, in_id):
+                relay.add_balance(in_id, row.amount_cents, in_key)
             row.relay_applied = True
         if row.direction == "add":
-            tenant.pool_balance_cents -= row.amount_cents
-            tenant.allocated_total_cents += row.amount_cents
+            owner.balance_cents -= row.amount_cents
             member.balance_cents += row.amount_cents
             if member.balance_cents >= 0:
                 member.overdraft = False
@@ -617,8 +695,7 @@ def _finish_quota(db: Session, actor: Member, row: QuotaAllocation, ip: str) -> 
             action = "quota.allocate"
         else:
             member.balance_cents -= row.amount_cents
-            tenant.pool_balance_cents += row.amount_cents
-            tenant.allocated_total_cents -= row.amount_cents
+            owner.balance_cents += row.amount_cents
             summary = f"从 {member.name} 退回 ¥{yuan(row.amount_cents):.2f}"
             action = "quota.reclaim"
         row.status = "success"
@@ -977,7 +1054,11 @@ def visible_member_ids(db: Session, actor: Member, tenant_id: int | None) -> lis
 
 
 def reconcile(db: Session, tenant_ids: list[int]) -> dict:
-    balance = cost = lifetime_cost = allocated = pool = previous = 0
+    """钱以中转站为准：每个成员本地余额对齐中转站余额，差额为 0 才算平。
+
+    公司总额 = 所有成员余额之和（公司管理员也是成员），消耗会让余额下降。
+    """
+    balance = cost = lifetime_cost = previous = 0
     names: list[str] = []
     parts = []
     ok = True
@@ -989,6 +1070,7 @@ def reconcile(db: Session, tenant_ids: list[int]) -> dict:
         part_cost = 0
         part_lifetime_cost = 0
         part_names: list[str] = []
+        part_ok = True
         members = (
             db.query(Member)
             .filter(Member.tenant_id == tenant_id, Member.deleted_at.is_(None), Member.role != "platform_admin")
@@ -1001,15 +1083,16 @@ def reconcile(db: Session, tenant_ids: list[int]) -> dict:
             part_lifetime_cost += max(member.lifetime_cost_cents, member.month_cost_cents)
             if member.balance_cents < 0 or member.overdraft:
                 part_names.append(member.name)
-            else:
-                part_balance += member.balance_cents
-        part_ok = part_balance + part_lifetime_cost == tenant.allocated_total_cents and not part_names
+                part_ok = False
+                continue
+            part_balance += member.balance_cents
+            # 同步过就要求本地余额和中转站一致；没同步过的不做判断。
+            if member.relay_checked_at is not None and member.balance_cents != member.relay_balance_cents:
+                part_ok = False
         ok = ok and part_ok
         balance += part_balance
         cost += part_cost
         lifetime_cost += part_lifetime_cost
-        allocated += tenant.allocated_total_cents
-        pool += tenant.pool_balance_cents
         previous += tenant.previous_month_cost_cents
         names.extend(part_names)
         parts.append(
@@ -1020,20 +1103,23 @@ def reconcile(db: Session, tenant_ids: list[int]) -> dict:
                 "balance": yuan(part_balance),
                 "month_cost": yuan(part_cost),
                 "cumulative_cost": yuan(part_lifetime_cost),
-                "allocated": yuan(tenant.allocated_total_cents),
-                "pool_remaining": yuan(tenant.pool_balance_cents),
-                "pool_total": yuan(tenant.pool_total_cents),
+                # 公司总额 = 余额 + 已消耗；池剩余就是当前余额。
+                "allocated": yuan(part_balance + part_lifetime_cost),
+                "pool_remaining": yuan(part_balance),
+                "pool_total": yuan(part_balance + part_lifetime_cost),
                 "overdraft_members": part_names,
             }
         )
-    overall = balance + lifetime_cost == allocated and not names and ok
+    overall = not names and ok
     return {
         "ok": overall,
         "balance": yuan(balance),
         "month_cost": yuan(cost),
         "cumulative_cost": yuan(lifetime_cost),
-        "allocated": yuan(allocated),
-        "pool_remaining": yuan(pool),
+        # 公司总额 = 余额 + 已消耗；可分配就是当前余额。
+        "allocated": yuan(balance + lifetime_cost),
+        "pool_remaining": yuan(balance),
+        "pool_total": yuan(balance + lifetime_cost),
         "previous_month_cost": yuan(previous),
         "overdraft": bool(names),
         "overdraft_members": names,
@@ -1107,6 +1193,30 @@ def relay_report(db: Session, actor: Member, tenant_id: int | None, mode: str | 
     }
 
 
+def _sync_daily_snapshots(db: Session, relayer, member: Member, days: int = 7) -> None:
+    """按天拉最近 N 天的用量，写进快照表，供总览的 7 天趋势图使用。
+
+    逐个自然日请求中转站；某一天失败就跳过，不影响其他天，也不影响同步主流程。
+    """
+    today = shanghai_now().date()
+    for offset in range(days):
+        day = today - timedelta(days=offset)
+        try:
+            stats = relayer.usage_summary(member.relay_user_id, day, day)
+        except DomainError:
+            continue
+        record_usage_snapshot(
+            db,
+            tenant_id=member.tenant_id,
+            member_id=member.id,
+            day=day,
+            requests=int(stats["requests"]),
+            input_tokens=int(stats["input_tokens"]),
+            output_tokens=int(stats["output_tokens"]),
+            cost_cents=int(stats["cost_cents"]),
+        )
+
+
 def sync_relay(db: Session, actor: Member, tenant_id: int | None, ip: str = "") -> dict:
     """从中转站拉余额和用量，写成成员快照。只读中转站，不动本地账本。"""
     _require(actor, "quota.allocate")
@@ -1132,8 +1242,13 @@ def sync_relay(db: Session, actor: Member, tenant_id: int | None, ip: str = "") 
             continue
         month = relayer.usage_summary(member.relay_user_id, month_start, today)
         lifetime = relayer.usage_summary(member.relay_user_id, lifetime_start, today)
+        # 先写 7 天明细快照；它的 upsert 会重算月度合计，所以后面再用中转站的权威值覆盖。
+        _sync_daily_snapshots(db, relayer, member)
         member.relay_balance_cents = int(snapshot["balance_cents"])
         member.relay_status = str(snapshot.get("status") or "")[:16]
+        # 钱以中转站为准：同步时把本地余额对齐中转站，消耗自然从余额里减掉。
+        member.balance_cents = int(snapshot["balance_cents"])
+        member.overdraft = member.balance_cents < 0
         member.month_requests = int(month["requests"])
         member.month_input_tokens = int(month["input_tokens"])
         member.month_output_tokens = int(month["output_tokens"])

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, App as AntApp, Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Table, Tag, Typography } from "antd";
+import { Alert, App as AntApp, Button, Card, Checkbox, Form, Input, Modal, Popconfirm, Select, Space, Table, Tag, Typography } from "antd";
 import { useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import { ApiError, api } from "../api";
@@ -12,6 +12,7 @@ export function Members() {
   const { message } = AntApp.useApp();
   const client = useQueryClient();
   const [open, setOpen] = useState(false);
+  const [linkExisting, setLinkExisting] = useState(false);
   const [devicesOf, setDevicesOf] = useState<Member | null>(null);
   const [tenantId, setTenantId] = useState<number | undefined>(undefined);
   const tenants = useQuery({
@@ -36,13 +37,14 @@ export function Members() {
   };
 
   const create = useMutation({
-    mutationFn: (values: { email: string; name: string; password: string; role: string }) =>
+    mutationFn: (values: { email: string; name: string; password: string; role: string; link_existing: boolean }) =>
       api<Member>("/v1/members", {
         method: "POST",
         body: JSON.stringify({ ...values, tenant_id: scope ?? null }),
       }),
     onSuccess: (data) => {
       setOpen(false);
+      setLinkExisting(false);
       message.success(`${data.name} 已创建，可从额度分配页划拨额度`);
       refresh();
     },
@@ -203,15 +205,29 @@ export function Members() {
         message="账号会立即加入专属分组并创建审核 Key。额度需在额度分配页单独划拨。「从中转站刷新」只读余额和用量，不会改动本地账本。"
       />
       <Modal title="新建成员" open={open} onCancel={() => setOpen(false)} footer={null} destroyOnClose>
-        <Form layout="vertical" initialValues={{ role: "member" }} onFinish={(values) => create.mutate(values)}>
+        <Form layout="vertical" initialValues={{ role: "member", link_existing: false }} onFinish={(values) => create.mutate(values)}>
           <Form.Item name="name" label="姓名" rules={[{ required: true, message: "请填写姓名" }]}>
             <Input placeholder="例如：张剪辑" />
           </Form.Item>
           <Form.Item name="email" label="邮箱" rules={[{ required: true, type: "email", message: "请填写邮箱" }]}>
             <Input />
           </Form.Item>
-          <Form.Item name="password" label="初始密码" rules={[{ required: true, min: 8, message: "密码至少 8 位" }]}>
-            <Input.Password autoComplete="new-password" />
+          <Form.Item name="link_existing" valuePropName="checked">
+            <Checkbox onChange={(event) => setLinkExisting(event.target.checked)}>
+              该邮箱已经在中转站注册过，直接绑定已有账号
+            </Checkbox>
+          </Form.Item>
+          <Form.Item
+            name="password"
+            label="初始密码"
+            rules={linkExisting ? [] : [{ required: true, min: 8, message: "密码至少 8 位" }]}
+            extra={linkExisting ? "绑定已有账号时不改密码，沿用中转站的密码。" : undefined}
+          >
+            <Input.Password
+              autoComplete="new-password"
+              disabled={linkExisting}
+              placeholder={linkExisting ? "无需填写" : undefined}
+            />
           </Form.Item>
           <Form.Item name="role" label="角色">
             <Select

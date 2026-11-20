@@ -67,6 +67,13 @@ class LocalRelay:
         self.db.flush()
         return relay_user_id, {}
 
+    def find_user_by_email(self, email: str) -> dict | None:
+        """按邮箱查已有账号。找不到返回 None，用于把中转站里已注册的人绑进公司。"""
+        row = self.db.query(RelayAccount).filter(RelayAccount.email == email).one_or_none()
+        if row is None:
+            return None
+        return {"id": row.relay_user_id, "email": row.email, "status": row.status}
+
     def _apply(self, relay_user_id: str, cents: int, key: str, kind: str) -> None:
         if self.was_applied(key, relay_user_id):
             return
@@ -181,6 +188,24 @@ class HttpRelay:
             raise DomainError(502, "中转站建号没有返回用户编号")
         credentials = self._create_default_key(email, password)
         return str(user_id), credentials
+
+    def find_user_by_email(self, email: str) -> dict | None:
+        """按邮箱查中转站已有账号。列表接口支持 search，再按邮箱做精确匹配，避免搜到前缀相同的其他账号。"""
+        wanted = email.strip().lower()
+        data = self._get("/admin/users", params={"search": wanted, "page": 1, "page_size": 50})
+        rows = data if isinstance(data, list) else []
+        if isinstance(data, dict):
+            rows = data.get("items") or data.get("list") or []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("email") or "").strip().lower() != wanted:
+                continue
+            user_id = row.get("id") or row.get("user_id")
+            if not user_id:
+                continue
+            return {"id": str(user_id), "email": wanted, "status": str(row.get("status") or "active")}
+        return None
 
     def _create_default_key(self, email: str, password: str) -> dict:
         import httpx
