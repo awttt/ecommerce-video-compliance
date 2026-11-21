@@ -1,11 +1,11 @@
-import { Alert, Button, Card, InputNumber, Modal, QRCode, Spin, Table, App as AntApp } from "antd";
+import { Alert, Button, Card, InputNumber, Modal, QRCode, Spin, Statistic, Table, Typography, App as AntApp } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { CheckOutlined, InfoCircleOutlined, LinkOutlined, QrcodeOutlined, ScanOutlined, WalletOutlined } from "@ant-design/icons";
+import { CheckOutlined, InfoCircleOutlined, LinkOutlined, QrcodeOutlined, ScanOutlined } from "@ant-design/icons";
 import dayjs from "dayjs";
 import { useEffect, useRef, useState } from "react";
-import { cancelRechargeOrder, createRecharge, getRechargeOrder, listRechargeOrders, rechargeInfo } from "./api";
-import { formatBalance } from "./AuthPages";
-import type { RechargeInfo, RechargeMethod, RechargeOrder, Settings } from "./types";
+import { PageHead } from "../ui";
+import { cancelRechargeOrder, createRecharge, getRechargeOrder, listRechargeOrders, localBalance, rechargeInfo } from "../local";
+import type { RechargeInfo, RechargeMethod, RechargeOrder } from "../types";
 
 const PRESETS = [10, 30, 50, 100, 200, 500];
 const OPEN = new Set(["PENDING", "PAID", "RECHARGING"]);
@@ -88,7 +88,6 @@ function stamp(value: string): string {
   return parsed.isValid() ? parsed.format("MM-DD HH:mm") : value;
 }
 
-/** 下单时的一次性支付凭证。查单接口不返回二维码，不能跟着轮询结果一起更新。 */
 interface PayTarget {
   orderId: number;
   code: string;
@@ -100,13 +99,7 @@ interface PayTarget {
   methodName: string;
 }
 
-export function RechargePage({
-  settings,
-  onSettings,
-}: {
-  settings: Settings;
-  onSettings: (next: Settings) => void;
-}) {
+export function Recharge() {
   const { message } = AntApp.useApp();
   const [info, setInfo] = useState<RechargeInfo | null>(null);
   const [orders, setOrders] = useState<RechargeOrder[]>([]);
@@ -119,6 +112,8 @@ export function RechargePage({
   const [current, setCurrent] = useState<RechargeOrder | null>(null);
   const [payTarget, setPayTarget] = useState<PayTarget | null>(null);
   const [payOpen, setPayOpen] = useState(false);
+  const [balanceError, setBalanceError] = useState("");
+  const [account, setAccount] = useState<{ email: string; balance: number | null }>({ email: "", balance: null });
   const currentId = useRef(0);
   const told = useRef(0);
   const seeded = useRef(false);
@@ -126,10 +121,21 @@ export function RechargePage({
   async function load() {
     setLoading(true);
     setError("");
+    setBalanceError("");
     try {
-      const [nextInfo, nextOrders] = await Promise.all([rechargeInfo(), listRechargeOrders()]);
+      const [nextInfo, nextOrders, bal] = await Promise.all([
+        rechargeInfo(),
+        listRechargeOrders(),
+        localBalance(),
+      ]);
       setInfo(nextInfo);
       setOrders(nextOrders.orders);
+      setAccount({ email: bal.email, balance: bal.balance });
+      if (!bal.logged_in) {
+        setBalanceError("登录状态已失效，请退出后重新登录再充值");
+      } else {
+        setBalanceError("");
+      }
       if (!seeded.current) {
         seeded.current = true;
         const first = nextInfo.methods[0];
@@ -149,7 +155,6 @@ export function RechargePage({
 
   function accept(next: RechargeOrder) {
     if (currentId.current !== next.order_id) return;
-    // 查单接口不返回二维码/支付链接，用已有凭证补齐，避免轮询把支付入口抹掉
     setCurrent((prev) => {
       const same = prev?.order_id === next.order_id ? prev : null;
       return {
@@ -159,8 +164,8 @@ export function RechargePage({
         currency: next.currency || same?.currency || "",
       };
     });
-    if (next.settings) onSettings(next.settings);
-    // 只有订单明确结束才收起支付弹窗；空状态或轮询刷新不会把它关掉
+    const polled = next.settings?.account_balance;
+    if (typeof polled === "number") setAccount((prev) => ({ ...prev, balance: polled }));
     if (next.status && !OPEN.has(next.status)) {
       setPayOpen(false);
       setPayTarget(null);
@@ -169,6 +174,7 @@ export function RechargePage({
       told.current = next.order_id;
       message.success("已到账");
       listRechargeOrders().then((page) => setOrders(page.orders)).catch(() => undefined);
+      localBalance().then((bal) => setAccount({ email: bal.email, balance: bal.balance })).catch(() => undefined);
     }
   }
 
@@ -204,7 +210,6 @@ export function RechargePage({
       const next = await createRecharge(amount, method.payment_type);
       currentId.current = next.order_id;
       setCurrent(next);
-      // 支付凭证只在下单这一刻有，存成快照；后续查单轮询不会覆盖它
       if (next.qr_code || next.pay_url) {
         setPayTarget({
           orderId: next.order_id,
@@ -263,24 +268,31 @@ export function RechargePage({
     { title: "状态", dataIndex: "status", width: 110, render: (value: string) => statusTag(value) },
   ];
 
-  return (
-    <div className="recharge-page">
-      <header className="recharge-head">
-        <div className="recharge-head-text">
-          <h1>账户充值</h1>
-          <p>充值记到当前登录账号，画面识别按余额扣费，到账后右上角余额自动更新。</p>
-        </div>
-        <div className="balance-card">
-          <span className="balance-card__label"><WalletOutlined /> 当前余额</span>
-          <strong className="balance-card__value">{formatBalance(settings.account_balance)}</strong>
-          <span className="balance-card__foot">可用于视频识别</span>
-        </div>
-      </header>
-
-      {loading ? (
+  if (loading) {
+    return (
+      <div className="recharge-page">
+        <PageHead title="充值" description="充值记到当前登录账号，识别按余额扣费，到账后余额自动更新。" />
         <div className="recharge-state"><Spin /><span>正在加载充值信息…</span></div>
-      ) : error ? (
-        <Card className="recharge-card">
+      </div>
+    );
+  }
+
+  if (balanceError) {
+    return (
+      <div className="recharge-page">
+        <PageHead title="充值" description="充值记到当前登录账号，识别按余额扣费，到账后余额自动更新。" />
+        <Card>
+          <Alert type="error" showIcon message="登录状态已失效，请退出后重新登录再充值" />
+        </Card>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="recharge-page">
+        <PageHead title="充值" description="充值记到当前登录账号，识别按余额扣费，到账后余额自动更新。" />
+        <Card>
           <Alert
             type="error"
             showIcon
@@ -289,234 +301,251 @@ export function RechargePage({
             action={<Button size="small" onClick={() => load().catch(() => undefined)}>重试</Button>}
           />
         </Card>
-      ) : info ? (
-        <>
-          {info.balance_disabled || info.methods.length === 0 ? (
-            info.message
-              ? <Alert className="recharge-alert" type="warning" showIcon message={info.message} />
-              : null
-          ) : info.message || info.bonus_notice ? (
-            <div className="recharge-notice">
-              <InfoCircleOutlined />
-              <span>{[info.message, info.bonus_notice].filter(Boolean).join(" · ")}</span>
-            </div>
-          ) : null}
+      </div>
+    );
+  }
 
-          <div className="recharge-grid">
-            <div className="recharge-main">
-              {info.methods.length > 0 && !info.balance_disabled ? (
-                <Card className="recharge-card" title="充值金额">
-                  <div className="field">
-                    <div className="section-label">支付方式</div>
-                    <div className="choice-row">
-                      {info.methods.map((item) => (
-                        <button
-                          key={item.payment_type}
-                          type="button"
-                          className={`choice${item.payment_type === method?.payment_type ? " is-selected" : ""}`}
-                          onClick={() => {
-                            setPaymentType(item.payment_type);
-                            setAmount((currentAmount) => {
-                              const nextMin = lowerBound(info, item);
-                              const nextMax = upperBound(info, item);
-                              if (nextMin > 0 && currentAmount < nextMin) return nextMin;
-                              if (nextMax > 0 && currentAmount > nextMax) return nextMax;
-                              return currentAmount;
-                            });
-                          }}
-                        >
-                          <span className="choice-check"><CheckOutlined /></span>
-                          {item.display_name}
-                        </button>
-                      ))}
+  if (!info) {
+    return (
+      <div className="recharge-page">
+        <PageHead title="充值" description="充值记到当前登录账号，识别按余额扣费，到账后余额自动更新。" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="recharge-page">
+      <PageHead title="充值" description="充值记到当前登录账号，识别按余额扣费，到账后余额自动更新。" />
+
+      <Card style={{ marginBottom: 16 }}>
+        <Statistic title="当前余额" value={account.balance ?? 0} precision={2} prefix="¥" />
+        {account.email ? <Typography.Text type="secondary">充值账号 {account.email}</Typography.Text> : null}
+      </Card>
+
+      {info.balance_disabled || info.methods.length === 0 ? (
+        info.message
+          ? <Alert className="recharge-alert" type="warning" showIcon message={info.message} />
+          : null
+      ) : info.message || info.bonus_notice ? (
+        <div className="recharge-notice">
+          <InfoCircleOutlined />
+          <span>{[info.message, info.bonus_notice].filter(Boolean).join(" · ")}</span>
+        </div>
+      ) : null}
+
+      <div className="recharge-grid">
+        <div className="recharge-main">
+          {info.methods.length > 0 && !info.balance_disabled ? (
+            <Card className="recharge-card" title="充值金额">
+              <div className="field">
+                <div className="section-label">支付方式</div>
+                <div className="choice-row">
+                  {info.methods.map((item) => (
+                    <button
+                      key={item.payment_type}
+                      type="button"
+                      className={`choice${item.payment_type === method?.payment_type ? " is-selected" : ""}`}
+                      onClick={() => {
+                        setPaymentType(item.payment_type);
+                        setAmount((currentAmount) => {
+                          const nextMin = lowerBound(info, item);
+                          const nextMax = upperBound(info, item);
+                          if (nextMin > 0 && currentAmount < nextMin) return nextMin;
+                          if (nextMax > 0 && currentAmount > nextMax) return nextMax;
+                          return currentAmount;
+                        });
+                      }}
+                    >
+                      <span className="choice-check"><CheckOutlined /></span>
+                      {item.display_name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="field">
+                <div className="section-label">
+                  选择金额
+                  <span className="field-hint">单笔 {limitText}</span>
+                </div>
+                <div className="amount-grid">
+                  {PRESETS
+                    .filter((value) => (min <= 0 || value >= min) && (max <= 0 || value <= max))
+                    .map((value) => (
+                      <button
+                        key={value}
+                        type="button"
+                        className={`amount-option${amount === value ? " is-selected" : ""}`}
+                        onClick={() => setAmount(value)}
+                      >
+                        <span className="amount-option__value">
+                          <strong>{value}</strong>
+                          <span className="amount-option__unit">{unit}</span>
+                        </span>
+                      </button>
+                    ))}
+                </div>
+                <div className="custom-amount">
+                  <span>自定义金额</span>
+                  <InputNumber
+                    min={min > 0 ? min : 0.01}
+                    max={max > 0 ? max : 1_000_000}
+                    step={1}
+                    value={amount}
+                    addonAfter={unit}
+                    onChange={(value) => {
+                      if (typeof value === "number" && value > 0) setAmount(value);
+                    }}
+                  />
+                </div>
+              </div>
+
+              {estimate ? (
+                <div className="pay-summary">
+                  <div className="pay-summary__main">
+                    <span>预计支付</span>
+                    <div className="pay-summary__amount">
+                      {unit === "元" ? <small>¥</small> : null}
+                      {estimate.pay.toFixed(2)}
+                      {unit !== "元" ? <em>{unit}</em> : null}
                     </div>
                   </div>
-
-                  <div className="field">
-                    <div className="section-label">
-                      选择金额
-                      <span className="field-hint">单笔 {limitText}</span>
-                    </div>
-                    <div className="amount-grid">
-                      {PRESETS
-                        .filter((value) => (min <= 0 || value >= min) && (max <= 0 || value <= max))
-                        .map((value) => (
-                          <button
-                            key={value}
-                            type="button"
-                            className={`amount-option${amount === value ? " is-selected" : ""}`}
-                            onClick={() => setAmount(value)}
-                          >
-                            <span className="amount-option__value">
-                              <strong>{value}</strong>
-                              <span className="amount-option__unit">{unit}</span>
-                            </span>
-                          </button>
-                        ))}
-                    </div>
-                    <div className="custom-amount">
-                      <span>自定义金额</span>
-                      <InputNumber
-                        min={min > 0 ? min : 0.01}
-                        max={max > 0 ? max : 1_000_000}
-                        step={1}
-                        value={amount}
-                        addonAfter={unit}
-                        onChange={(value) => {
-                          if (typeof value === "number" && value > 0) setAmount(value);
-                        }}
-                      />
-                    </div>
-                  </div>
-
-                  {estimate ? (
-                    <div className="pay-summary">
-                      <div className="pay-summary__main">
-                        <span>预计支付</span>
-                        <div className="pay-summary__amount">
-                          {unit === "元" ? <small>¥</small> : null}
-                          {estimate.pay.toFixed(2)}
-                          {unit !== "元" ? <em>{unit}</em> : null}
-                        </div>
-                      </div>
-                      <div className="pay-summary__side">
-                        <div>
-                          <span>到账额度</span>
-                          <strong>{estimate.credit.toFixed(2)}</strong>
-                        </div>
-                        <div>
-                          <span>{info.bonus_mode === "discount" ? "已优惠" : "赠送"}</span>
-                          <strong>{estimate.bonus > 0 ? `+${estimate.bonus.toFixed(2)}` : "—"}</strong>
-                        </div>
-                      </div>
-                    </div>
-                  ) : null}
-                  <div className="pay-note">实际金额以下单结果为准</div>
-                  <Button
-                    className="pay-submit"
-                    type="primary"
-                    size="large"
-                    block
-                    loading={paying}
-                    disabled={!method || amount <= 0 || cancelling}
-                    onClick={() => submit().catch(() => undefined)}
-                  >
-                    去支付
-                  </Button>
-                </Card>
-              ) : null}
-
-              {current ? (
-                <Card
-                  className="recharge-card order-card"
-                  title={
-                    <div className="card-title-row">
-                      当前订单
-                      <span className="title-sub">#{current.order_id}</span>
-                      {statusTag(current.status)}
-                    </div>
-                  }
-                >
-                  <div className="order-figures">
-                    <div>
-                      <span>支付金额</span>
-                      <strong>{current.pay_amount.toFixed(2)} <small>{payUnit(current.currency)}</small></strong>
-                    </div>
+                  <div className="pay-summary__side">
                     <div>
                       <span>到账额度</span>
-                      <strong>{current.amount.toFixed(2)}</strong>
+                      <strong>{estimate.credit.toFixed(2)}</strong>
                     </div>
                     <div>
-                      <span>赠送</span>
-                      <strong>{current.bonus_amount > 0 ? `+${current.bonus_amount.toFixed(2)}` : "—"}</strong>
+                      <span>{info.bonus_mode === "discount" ? "已优惠" : "赠送"}</span>
+                      <strong>{estimate.bonus > 0 ? `+${estimate.bonus.toFixed(2)}` : "—"}</strong>
                     </div>
                   </div>
+                </div>
+              ) : null}
+              <div className="pay-note">实际金额以下单结果为准</div>
+              <Button
+                className="pay-submit"
+                type="primary"
+                size="large"
+                block
+                loading={paying}
+                disabled={!method || amount <= 0 || cancelling}
+                onClick={() => submit().catch(() => undefined)}
+              >
+                去支付
+              </Button>
+            </Card>
+          ) : null}
 
-                  {current.message ? <Alert type="warning" showIcon message={current.message} /> : null}
+          {current ? (
+            <Card
+              className="recharge-card order-card"
+              title={
+                <div className="card-title-row">
+                  当前订单
+                  <span className="title-sub">#{current.order_id}</span>
+                  {statusTag(current.status)}
+                </div>
+              }
+            >
+              <div className="order-figures">
+                <div>
+                  <span>支付金额</span>
+                  <strong>{current.pay_amount.toFixed(2)} <small>{payUnit(current.currency)}</small></strong>
+                </div>
+                <div>
+                  <span>到账额度</span>
+                  <strong>{current.amount.toFixed(2)}</strong>
+                </div>
+                <div>
+                  <span>赠送</span>
+                  <strong>{current.bonus_amount > 0 ? `+${current.bonus_amount.toFixed(2)}` : "—"}</strong>
+                </div>
+              </div>
 
-                  {payTarget && payTarget.orderId === current.order_id && OPEN.has(current.status) ? (
-                    <div className="order-pay-entry">
-                      <Button
-                        type="primary"
-                        icon={<QrcodeOutlined />}
-                        onClick={() => setPayOpen(true)}
-                      >
-                        查看支付二维码
-                      </Button>
-                      <span className="hint">扫码或打开支付页完成付款</span>
-                    </div>
-                  ) : null}
+              {current.message ? <Alert type="warning" showIcon message={current.message} /> : null}
 
-                  {OPEN.has(current.status) ? (
-                    <div className="order-foot">
-                      <span className="hint">支付完成后余额会自动更新，无需刷新页面。</span>
-                      {current.status === "PENDING" ? (
-                        <Button type="text" danger loading={cancelling} disabled={paying} onClick={() => cancel().catch(() => undefined)}>
-                          取消订单
-                        </Button>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </Card>
+              {payTarget && payTarget.orderId === current.order_id && OPEN.has(current.status) ? (
+                <div className="order-pay-entry">
+                  <Button
+                    type="primary"
+                    icon={<QrcodeOutlined />}
+                    onClick={() => setPayOpen(true)}
+                  >
+                    查看支付二维码
+                  </Button>
+                  <span className="hint">扫码或打开支付页完成付款</span>
+                </div>
               ) : null}
 
-            </div>
-
-            <aside className="recharge-side">
-              <Card className="recharge-card side-card" title="优惠活动">
-                {tiers.length > 0 ? (
-                  <>
-                    <p className="side-lead">{info.bonus_mode === "discount" ? "满额立减" : "充值赠送"}</p>
-                    <ul className="tier-list">
-                      {tiers.map((tier) => (
-                        <li key={tier.min_amount}>
-                          <span>满 {tier.min_amount} {unit}</span>
-                          <strong>{info.bonus_mode === "discount" ? "减" : "赠"} {tier.bonus_percent}%</strong>
-                        </li>
-                      ))}
-                    </ul>
-                  </>
-                ) : (
-                  <p className="side-empty">当前没有充值优惠</p>
-                )}
-              </Card>
-
-              <Card className="recharge-card side-card" title="支付说明">
-                <dl className="info-list">
-                  <div><dt>支付币种</dt><dd>{unit}</dd></div>
-                  <div><dt>单笔限额</dt><dd>{limitText}</dd></div>
-                  {method?.daily_limit && method.daily_limit > 0 ? (
-                    <div><dt>每日限额</dt><dd>{method.daily_limit} {unit}</dd></div>
+              {OPEN.has(current.status) ? (
+                <div className="order-foot">
+                  <span className="hint">支付完成后余额会自动更新，无需刷新页面。</span>
+                  {current.status === "PENDING" ? (
+                    <Button type="text" danger loading={cancelling} disabled={paying} onClick={() => cancel().catch(() => undefined)}>
+                      取消订单
+                    </Button>
                   ) : null}
-                </dl>
-                {info.help_text ? <div className="help-text">{info.help_text}</div> : null}
-                <div className="pay-steps">
-                  <span className="side-lead">支付流程</span>
-                  <ol>
-                    <li>选择金额，确认预计支付与到账额度</li>
-                    <li>扫码或打开支付页完成付款</li>
-                    <li>到账后余额自动更新，可在记录中查看状态</li>
-                  </ol>
                 </div>
-              </Card>
-            </aside>
-          </div>
+              ) : null}
+            </Card>
+          ) : null}
 
-          <Card
-            className="recharge-card records-card"
-            title={<div className="card-title-row">充值记录<span className="title-sub">{orders.length} 笔</span></div>}
-          >
-            <Table
-              size="small"
-              rowKey="order_id"
-              columns={columns}
-              dataSource={orders}
-              pagination={false}
-              locale={{ emptyText: "还没有充值记录" }}
-            />
+        </div>
+
+        <aside className="recharge-side">
+          <Card className="recharge-card side-card" title="优惠活动">
+            {tiers.length > 0 ? (
+              <>
+                <p className="side-lead">{info.bonus_mode === "discount" ? "满额立减" : "充值赠送"}</p>
+                <ul className="tier-list">
+                  {tiers.map((tier) => (
+                    <li key={tier.min_amount}>
+                      <span>满 {tier.min_amount} {unit}</span>
+                      <strong>{info.bonus_mode === "discount" ? "减" : "赠"} {tier.bonus_percent}%</strong>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : (
+              <p className="side-empty">当前没有充值优惠</p>
+            )}
           </Card>
-        </>
-      ) : null}
+
+          <Card className="recharge-card side-card" title="支付说明">
+            <dl className="info-list">
+              <div><dt>支付币种</dt><dd>{unit}</dd></div>
+              <div><dt>单笔限额</dt><dd>{limitText}</dd></div>
+              {method?.daily_limit && method.daily_limit > 0 ? (
+                <div><dt>每日限额</dt><dd>{method.daily_limit} {unit}</dd></div>
+              ) : null}
+            </dl>
+            {info.help_text ? <div className="help-text">{info.help_text}</div> : null}
+            <div className="pay-steps">
+              <span className="side-lead">支付流程</span>
+              <ol>
+                <li>选择金额，确认预计支付与到账额度</li>
+                <li>扫码或打开支付页完成付款</li>
+                <li>到账后余额自动更新，可在记录中查看状态</li>
+              </ol>
+            </div>
+          </Card>
+        </aside>
+      </div>
+
+      <Card
+        className="recharge-card records-card"
+        title={<div className="card-title-row">充值记录<span className="title-sub">{orders.length} 笔</span></div>}
+      >
+        <Table
+          size="small"
+          rowKey="order_id"
+          columns={columns}
+          dataSource={orders}
+          pagination={false}
+          locale={{ emptyText: "还没有充值记录" }}
+        />
+      </Card>
 
       <Modal
         className="pay-modal"

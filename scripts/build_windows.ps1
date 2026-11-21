@@ -25,6 +25,12 @@ npm install
 npm run build
 Pop-Location
 
+# 管理控制台页面随安装包分发，接口仍请求云端后台。
+Push-Location admin\web
+npm install
+npm run build
+Pop-Location
+
 & $Python -m PyInstaller --noconfirm --clean packaging\evc.spec
 if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller 失败，退出码 $LASTEXITCODE"

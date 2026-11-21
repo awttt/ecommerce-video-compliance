@@ -61,10 +61,12 @@ async def lifespan(app: FastAPI):
         await manager.shutdown()
 
 
-def create_app() -> FastAPI:
+def create_app(console_url: str | None = None) -> FastAPI:
     app = FastAPI(title="御镜视频素材审核系统", version=__version__, lifespan=lifespan)
     app.state.mcp_session = None
     app.state.mcp_ready = False
+    # 管理控制台的地址。为空表示这次没有启动控制台，界面不显示入口。
+    app.state.console_url = console_url or ""
     app.include_router(router)
     try:
         from app.mcp_server import attach_mcp, mcp_enabled

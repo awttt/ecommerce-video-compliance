@@ -583,6 +583,13 @@ class JobManager:
             await asyncio.gather(*tasks, return_exceptions=True)
         await self.db.close()
 
+    def relay_credentials(self) -> tuple[str, str]:
+        """工具端登录后的中转站令牌。只给同进程的控制台做单点登录，不经过 HTTP。"""
+        return (
+            str(self._settings.get("relay_access_token") or ""),
+            str(self._settings.get("relay_refresh_token") or ""),
+        )
+
     def public_settings(self) -> SettingPublic:
         key, source = self._effective_key()
         secret_id, secret_key, region, secret_source = self._effective_tencent()
@@ -2016,7 +2023,7 @@ class JobManager:
             created = {}
         order = _recharge_order(created)
         if order.order_id <= 0:
-            raise RelayError("中转站没有返回订单", 502)
+            raise RelayError("支付服务没有返回订单", 502)
         return order
 
     async def recharge_order(self, order_id: int) -> RechargeOrder:
@@ -2364,9 +2371,9 @@ def _pay_targets(data: dict) -> tuple[str, str, str]:
         return pay_url, qr_code, ""
     result_type = str(data.get("result_type") or "")
     if result_type in {"oauth_required", "jsapi_ready"}:
-        return "", "", "这个方式要在微信里打开中转站网页才能付款。请换一个支持扫码的方式。"
+        return "", "", "这个方式要在微信里打开网页才能付款。请换一个支持扫码的方式。"
     if result_type == "order_created" or "client_secret" in data or "pay_url" in data or "qr_code" in data:
-        return "", "", "中转站没有返回可打开的支付链接或二维码。请换一种方式，或稍后再试。"
+        return "", "", "支付服务没有返回可打开的支付链接或二维码。请换一种方式，或稍后再试。"
     return "", "", ""
 
 
@@ -2436,7 +2443,7 @@ def _recharge_info(data: dict) -> RechargeInfo:
     if disabled:
         message = "余额充值已关闭"
     elif not methods:
-        message = "中转站还没有打开支付方式。"
+        message = "暂时没有可用的支付方式。"
     else:
         message = ""
     return RechargeInfo(

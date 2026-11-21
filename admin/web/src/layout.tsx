@@ -3,11 +3,13 @@ import {
   AuditOutlined,
   BarChartOutlined,
   DashboardOutlined,
+  DesktopOutlined,
   EditOutlined,
   LogoutOutlined,
   SettingOutlined,
   TeamOutlined,
   BankOutlined,
+  WalletOutlined,
 } from "@ant-design/icons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AutoComplete, Avatar, Badge, Dropdown, Input, Layout, Menu, Spin, Tag, Typography } from "antd";
@@ -28,6 +30,7 @@ const NAV: { key: string; label: string; group: string; roles: Role[]; icon: Rea
   { key: "/quota", label: "额度分配", group: "业务管理", roles: ["platform_admin", "tenant_admin"], icon: <AccountBookOutlined /> },
   { key: "/keywords", label: "关键词审批", group: "业务管理", roles: ["platform_admin", "tenant_admin", "member"], icon: <EditOutlined /> },
   { key: "/usage", label: "用量看板", group: "业务管理", roles: ["platform_admin", "tenant_admin"], icon: <BarChartOutlined /> },
+  { key: "/recharge", label: "充值", group: "业务管理", roles: ["platform_admin", "tenant_admin", "member"], icon: <WalletOutlined /> },
   { key: "/audit", label: "审计日志", group: "业务管理", roles: ["platform_admin", "tenant_admin"], icon: <AuditOutlined /> },
   { key: "/settings", label: "接入设置", group: "系统", roles: ["platform_admin"], icon: <SettingOutlined /> },
 ];
@@ -66,11 +69,18 @@ export function AdminLayout() {
   if (!me.data) return <Navigate to="/login" replace />;
 
   const user = me.data;
-  const visible = NAV.filter((item) => item.roles.includes(user.role));
-  const current = visible.find((item) => item.key === location.pathname);
+  const toolsUrl = window.__EVC_TOOLS_URL__ ?? "";
+  const toolsItem = { key: "/tools", label: "视频审核工具", icon: <DesktopOutlined /> };
+  const visible = NAV.filter((item) => {
+    if (item.key === "/recharge" && !toolsUrl) return false;
+    return item.roles.includes(user.role);
+  });
+  const current =
+    visible.find((item) => item.key === location.pathname) ??
+    (toolsUrl && location.pathname === "/tools" ? toolsItem : undefined);
   if (!current && location.pathname !== "/") return <Navigate to="/" replace />;
 
-  const items: MenuProps["items"] = GROUPS.map((group) => {
+  const items: NonNullable<MenuProps["items"]> = GROUPS.map((group) => {
     const children = visible
       .filter((item) => item.group === group)
       .map((item) => ({
@@ -80,7 +90,16 @@ export function AdminLayout() {
       }));
     if (children.length === 0) return null;
     return { type: "group" as const, label: collapsed ? undefined : group, children };
-  }).filter(Boolean) as MenuProps["items"];
+  }).filter(Boolean) as NonNullable<MenuProps["items"]>;
+
+  // 从桌面工具整页跳过来时，用 iframe 把工具端嵌在这一页里；单独部署时没有这个入口。
+  if (toolsUrl) {
+    items.push({
+      type: "group" as const,
+      label: collapsed ? undefined : "切换",
+      children: [{ key: "/tools", icon: <DesktopOutlined />, label: "视频审核工具" }],
+    });
+  }
 
   const options = [
     ...(search.data?.members ?? []).map((item) => ({
@@ -165,10 +184,14 @@ export function AdminLayout() {
             <Avatar style={{ background: "#e6f4ff", color: "#1677ff", cursor: "pointer" }}>{user.name.slice(0, 1)}</Avatar>
           </Dropdown>
         </Header>
-        <Content style={{ padding: 24 }}>
-          <div className="page">
+        <Content style={{ padding: location.pathname === "/tools" ? 0 : 24 }}>
+          {location.pathname === "/tools" ? (
             <Outlet context={user} />
-          </div>
+          ) : (
+            <div className="page">
+              <Outlet context={user} />
+            </div>
+          )}
         </Content>
       </Layout>
     </Layout>

@@ -48,7 +48,7 @@ export function Tenants() {
     <>
       <PageHead
         title="租户管理"
-        description="一个租户是一家入驻公司。中转站不感知公司，只保存对应的用户和余额；余额合计来自最近一次在成员管理页的刷新。"
+        description="一个租户是一家入驻公司。账号和余额按成员保存，公司本身不单独开户；余额合计来自最近一次刷新。"
         extra={
           <Button type="primary" onClick={() => setOpen(true)}>
             新建公司
@@ -75,11 +75,11 @@ export function Tenants() {
             },
             { title: "状态", render: (_value, row) => <StatusTag status={row.status} label={row.status_label} /> },
             { title: "成员 / 席位", render: (_value, row) => `${row.seats_used} / ${row.seat_quota}` },
-            { title: "中转站分组", dataIndex: "relay_group_name", render: (value: string) => value || "—" },
+            { title: "计费分组", dataIndex: "relay_group_name", render: (value: string) => value || "—" },
             { title: "公司余额", dataIndex: "pool_remaining", render: (value: number) => money(value) },
             { title: "本月消耗", dataIndex: "month_cost", render: (value: number) => money(value) },
             {
-              title: "中转站余额",
+              title: "账户余额",
               dataIndex: "relay_balance",
               render: (value: number, row) =>
                 row.relay_checked_at ? money(value) : <Typography.Text type="secondary">未同步</Typography.Text>,
@@ -122,7 +122,7 @@ export function Tenants() {
         style={{ marginTop: 16 }}
         type="info"
         showIcon
-        message="新建公司只绑定专属分组「电商审核专属-bot创建」。中转站建号不再自动挂上其他分组。第二版再改成每家公司一个分组。"
+        message="新建公司只绑定专属分组「电商审核专属-bot创建」。开通账号不再自动挂上其他分组。第二版再改成每家公司一个分组。"
       />
       <Modal title="新建公司" open={open} onCancel={() => setOpen(false)} footer={null} destroyOnClose>
         <Form layout="vertical" onFinish={(values) => create.mutate(values)} initialValues={{ seats: 10, link_existing: false }}>
@@ -137,14 +137,14 @@ export function Tenants() {
           </Form.Item>
           <Form.Item name="link_existing" valuePropName="checked">
             <Checkbox onChange={(event) => setLinkExisting(event.target.checked)}>
-              该邮箱已经在中转站注册过，直接绑定已有账号
+              该邮箱已经注册过，直接绑定已有账号
             </Checkbox>
           </Form.Item>
           <Form.Item
             name="admin_password"
             label="初始密码"
             rules={linkExisting ? [] : [{ required: true, min: 8, message: "密码至少 8 位" }]}
-            extra={linkExisting ? "绑定已有账号时不改密码，沿用中转站的密码。" : undefined}
+            extra={linkExisting ? "绑定已有账号时不改密码，沿用原密码。" : undefined}
           >
             <Input.Password
               autoComplete="new-password"
@@ -168,9 +168,9 @@ export function Tenants() {
         okButtonProps={{ danger: true, loading: status.isPending }}
         onOk={() => stop && status.mutate({ id: stop.id, status: "disabled", disable_members: alsoDisable })}
       >
-        <Typography.Paragraph>停用后，这家公司的成员不能再登录管理后台，也不能绑定设备。已经在中转站里的账号仍可识别，除非同时禁用成员。</Typography.Paragraph>
+        <Typography.Paragraph>停用后，这家公司的成员不能再登录管理后台，也不能绑定设备。已经开通的账号仍可识别，除非同时禁用成员。</Typography.Paragraph>
         <Checkbox checked={alsoDisable} onChange={(event) => setAlsoDisable(event.target.checked)}>
-          同时禁用全部成员（停用中转站账号、吊销设备令牌、腾出席位）
+          同时禁用全部成员（停用账号、吊销设备令牌、腾出席位）
         </Checkbox>
       </Modal>
     </>

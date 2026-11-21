@@ -80,6 +80,14 @@ class LoginBody(BaseModel):
     password: str
 
 
+class SsoBody(BaseModel):
+    """桌面工具已经登录时带过来的中转站令牌，用来换后台会话。"""
+
+    access_token: str
+    refresh_token: str = ""
+    expires_in: int | None = None
+
+
 class TotpBody(BaseModel):
     challenge: str = ""
     totp_code: str = ""
@@ -272,7 +280,7 @@ def _ensure_can_enter(db: Session, member: Member) -> None:
 
 def _session_from_relay(db: Session, response: Response, email: str, data: dict) -> dict:
     if not str(data.get("access_token") or "").strip():
-        raise HTTPException(status_code=502, detail="中转站没有返回登录凭证")
+        raise HTTPException(status_code=502, detail="服务没有返回登录凭证")
     user = data.get("user") if isinstance(data.get("user"), dict) else {}
     relay_email = str(user.get("email") or "").strip().lower()
     if relay_email:
@@ -336,9 +344,35 @@ def login_2fa(body: TotpBody, response: Response, db: Session = Depends(get_db))
     return result
 
 
+@router.post("/auth/sso")
+def sso(body: SsoBody, response: Response, db: Session = Depends(get_db)) -> dict:
+    """用桌面工具拿到的中转站令牌换后台会话，不再让用户输第二遍密码。"""
+    token = body.access_token.strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="缺少登录凭证")
+    try:
+        profile = auth_relay.current_account(token)
+    except auth_relay.RelayLoginError as exc:
+        raise _login_error(exc) from exc
+    email = str(profile.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=502, detail="服务没有返回账号邮箱")
+    member = _prepare_member(db, email, profile)
+    _ensure_can_enter(db, member)
+    apply_credentials(
+        member,
+        {
+            "access_token": token,
+            "refresh_token": body.refresh_token,
+            "expires_in": body.expires_in,
+        },
+    )
+    db.commit()
+    return _issue(db, member, response)
+
+
 @router.post("/auth/refresh")
 def refresh(body: RefreshBody, response: Response, db: Session = Depends(get_db)) -> dict:
-    from fastapi import HTTPException
 
     stored = (
         db.query(SessionToken)
@@ -897,12 +931,11 @@ def usage_export(
     members = usage_rows(db, user, tenant_id)
     buffer = io.StringIO()
     writer = csv.writer(buffer)
-    writer.writerow(["成员", "中转站用户", "请求数", "输入 Token", "输出 Token", "消耗（元）"])
+    writer.writerow(["成员", "请求数", "输入 Token", "输出 Token", "消耗（元）"])
     for member in members:
         writer.writerow(
             [
                 member.name,
-                member.relay_user_id,
                 member.month_requests,
                 member.month_input_tokens,
                 member.month_output_tokens,
@@ -1014,7 +1047,7 @@ def test_settings(user: Member = Depends(require("settings.write")), db: Session
     del user
     env = get_settings()
     if not env.relay_admin_key:
-        return {"ok": False, "mode": "local", "message": "未配置管理密钥，当前是本地演示，不会请求中转站。"}
+        return {"ok": False, "mode": "local", "message": "未配置管理密钥，当前是本地演示，不会请求远端服务。"}
     import httpx
 
     row = db.get(AppSetting, 1)
@@ -1026,14 +1059,14 @@ def test_settings(user: Member = Depends(require("settings.write")), db: Session
             timeout=8,
         )
     except httpx.HTTPError:
-        return {"ok": False, "mode": "remote", "message": "连不上中转站"}
+        return {"ok": False, "mode": "remote", "message": "连不上服务"}
     if response.status_code in (401, 403):
         return {"ok": False, "mode": "remote", "message": "管理密钥无效"}
     if response.status_code == 404:
-        return {"ok": True, "mode": "remote", "message": "管理密钥有效，中转站连接正常"}
+        return {"ok": True, "mode": "remote", "message": "管理密钥有效，连接正常"}
     if response.status_code >= 400:
-        return {"ok": False, "mode": "remote", "message": f"中转站返回 HTTP {response.status_code}"}
-    return {"ok": True, "mode": "remote", "message": "已连上中转站"}
+        return {"ok": False, "mode": "remote", "message": f"服务返回 HTTP {response.status_code}"}
+    return {"ok": True, "mode": "remote", "message": "已连上服务"}
 
 
 @router.get("/search")

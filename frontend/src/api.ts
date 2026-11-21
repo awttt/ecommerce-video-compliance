@@ -4,9 +4,6 @@ import type {
   BatchResult,
   CutSpan,
   Job,
-  RechargeInfo,
-  RechargeOrder,
-  RechargeOrders,
   Settings,
 } from "./types";
 
@@ -38,6 +35,11 @@ export function getSettings(): Promise<Settings> {
 
 export function getHealth(): Promise<{ ok: boolean; mcp?: boolean }> {
   return request<{ ok: boolean; mcp?: boolean }>("/api/health");
+}
+
+/** 管理控制台在另一个本机端口，地址由后端给。 */
+export function getConsoleInfo(): Promise<{ enabled: boolean; url: string }> {
+  return request<{ enabled: boolean; url: string }>("/api/console");
 }
 
 export function saveSettings(body: Record<string, unknown>): Promise<Settings> {
@@ -82,30 +84,6 @@ export function accountLogout(): Promise<AccountAction> {
 
 export function accountRefresh(): Promise<AccountAction> {
   return accountPost("/api/account/refresh");
-}
-
-export function rechargeInfo(): Promise<RechargeInfo> {
-  return request<RechargeInfo>("/api/account/recharge");
-}
-
-export function listRechargeOrders(): Promise<RechargeOrders> {
-  return request<RechargeOrders>("/api/account/recharge/orders");
-}
-
-export function createRecharge(amount: number, paymentType: string): Promise<RechargeOrder> {
-  return request<RechargeOrder>("/api/account/recharge/orders", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ amount, payment_type: paymentType }),
-  });
-}
-
-export function getRechargeOrder(orderId: number): Promise<RechargeOrder> {
-  return request<RechargeOrder>(`/api/account/recharge/orders/${orderId}`);
-}
-
-export function cancelRechargeOrder(orderId: number): Promise<RechargeOrder> {
-  return request<RechargeOrder>(`/api/account/recharge/orders/${orderId}/cancel`, { method: "POST" });
 }
 
 export function createJob(form: FormData): Promise<Job> {

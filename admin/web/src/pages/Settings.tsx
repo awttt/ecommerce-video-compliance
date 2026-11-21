@@ -27,10 +27,10 @@ export function Settings() {
 
   return (
     <>
-      <PageHead title="接入设置" description="中转站地址和分组可以改。管理密钥只存在服务端环境变量，页面上看不到，也不会下发给客户端。" />
+      <PageHead title="接入设置" description="服务地址和分组可以改。管理密钥只存在服务端环境变量，页面上看不到，也不会下发给客户端。" />
       <Row gutter={[16, 16]}>
         <Col xs={24} lg={14}>
-          <Card title="中转站连接">
+          <Card title="服务连接">
             {data ? (
               <Form
                 layout="vertical"
@@ -51,7 +51,7 @@ export function Settings() {
                 <Form.Item name="group_name" label="专属分组名称" rules={[{ required: true, message: "请填写分组" }]}>
                   <Input />
                 </Form.Item>
-                <Form.Item name="group_id" label="审核专属分组 ID" extra="需要填写 token4u 中现有审核专属分组的数字 ID。">
+                <Form.Item name="group_id" label="审核专属分组 ID" extra="需要填写现有审核专属分组的数字 ID。">
                   <Input />
                 </Form.Item>
                 <Form.Item name="backend_mode_enabled" label="后台模式已开启" valuePropName="checked">
@@ -76,12 +76,12 @@ export function Settings() {
           </Card>
         </Col>
         <Col xs={24} lg={10}>
-          <Card title="中转站服务密钥">
+          <Card title="服务密钥">
             <Alert
               type={data?.admin_key_configured ? "success" : "warning"}
               showIcon
               message={data?.admin_key_configured ? "管理密钥已配置" : "未配置管理密钥"}
-              description="至少需要 users.create、users.status.write、users.balance.read、users.balance.write 和 usage.read。没有密钥时，开通和划拨只写本地演示账本，不会请求中转站。"
+              description="至少需要 users.create、users.status.write、users.balance.read、users.balance.write 和 usage.read。没有密钥时，开通和划拨只写本地演示账本，不会请求远端服务。"
             />
             <Table
               style={{ marginTop: 16 }}

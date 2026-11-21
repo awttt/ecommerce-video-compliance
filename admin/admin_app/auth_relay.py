@@ -31,10 +31,10 @@ _REASON = {
     "INVALID_EMAIL": (400, "邮箱格式不正确"),
     "USER_NOT_ACTIVE": (403, "这个账号已停用"),
     "USER_INACTIVE": (403, "这个账号已停用"),
-    "BACKEND_MODE_ADMIN_ONLY": (403, "中转站处于后台模式，普通用户不能登录"),
-    "TURNSTILE_VERIFICATION_FAILED": (400, "站点开启了人机验证，请先在中转站关闭验证码后再试"),
-    "TENCENT_CAPTCHA_VERIFICATION_FAILED": (400, "站点开启了人机验证，请先在中转站关闭验证码后再试"),
-    "ALIYUN_CAPTCHA_VERIFICATION_FAILED": (400, "站点开启了人机验证，请先在中转站关闭验证码后再试"),
+    "BACKEND_MODE_ADMIN_ONLY": (403, "暂不支持普通账号登录，请联系管理员"),
+    "TURNSTILE_VERIFICATION_FAILED": (400, "登录需要人机验证，请联系管理员处理"),
+    "TENCENT_CAPTCHA_VERIFICATION_FAILED": (400, "登录需要人机验证，请联系管理员处理"),
+    "ALIYUN_CAPTCHA_VERIFICATION_FAILED": (400, "登录需要人机验证，请联系管理员处理"),
     "TOKEN_EXPIRED": (401, "登录已过期，请重新登录"),
     "ACCESS_TOKEN_EXPIRED": (401, "登录已过期，请重新登录"),
     "INVALID_TOKEN": (401, "登录已过期，请重新登录"),
@@ -44,10 +44,10 @@ _REASON = {
 _TEXT = (
     ("invalid email or password", 400, "邮箱或密码不正确"),
     ("invalid or expired 2fa", 400, "两步验证已过期，请重新登录"),
-    ("backend mode", 403, "中转站处于后台模式，普通用户不能登录"),
-    ("user self-service is disabled", 403, "中转站处于后台模式，普通用户不能登录"),
-    ("turnstile", 400, "站点开启了人机验证，请先在中转站关闭验证码后再试"),
-    ("captcha", 400, "站点开启了人机验证，请先在中转站关闭验证码后再试"),
+    ("backend mode", 403, "暂不支持普通账号登录，请联系管理员"),
+    ("user self-service is disabled", 403, "暂不支持普通账号登录，请联系管理员"),
+    ("turnstile", 400, "登录需要人机验证，请联系管理员处理"),
+    ("captcha", 400, "登录需要人机验证，请联系管理员处理"),
     ("too many", 429, "操作太频繁，请稍后再试"),
 )
 
@@ -85,13 +85,13 @@ def explain_login_error(status: int, body: object) -> RelayLoginError:
         return RelayLoginError("操作太频繁，请稍后再试", 429)
     if status in {401, 403} and not _CJK.search(message):
         if status == 403:
-            return RelayLoginError("中转站拒绝了这次登录", 403)
+            return RelayLoginError("登录被拒绝，请联系管理员", 403)
         return RelayLoginError("邮箱或密码不正确", 401)
     if status >= 500 or status == 0:
-        return RelayLoginError("中转站暂时不可用，请稍后再试", 502 if status == 0 else status)
+        return RelayLoginError("服务暂时不可用，请稍后再试", 502 if status == 0 else status)
     if _CJK.search(message) and len(message) <= 180 and "sk-" not in message.lower():
         return RelayLoginError(message, status if status >= 400 else 400)
-    return RelayLoginError("中转站拒绝了这次请求", status if status >= 400 else 400)
+    return RelayLoginError("请求被拒绝，请稍后再试", status if status >= 400 else 400)
 
 
 def post_auth(path: str, payload: dict) -> dict:
@@ -133,6 +133,42 @@ def login_password(email: str, password: str) -> dict:
 
 def login_totp(temp_token: str, totp_code: str) -> dict:
     return post_auth("/auth/login/2fa", {"temp_token": temp_token, "totp_code": totp_code})
+
+
+def current_account(access_token: str) -> dict:
+    """用中转站的用户令牌读取当前账号，走单点登录时校验令牌是否还有效。"""
+    url = f"{get_settings().relay_base_url.rstrip('/')}/auth/me"
+    kwargs: dict = {
+        "timeout": httpx.Timeout(20.0, connect=10.0),
+        "trust_env": _transport is None,
+    }
+    if _transport is not None:
+        kwargs["transport"] = _transport
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+        "Accept-Language": "zh-CN",
+        "User-Agent": USER_AGENT,
+    }
+    try:
+        with httpx.Client(**kwargs) as client:
+            response = client.get(url, headers=headers)
+    except httpx.TimeoutException as exc:
+        raise RelayLoginError("连接大语言模型超时，请稍后再试", 504) from exc
+    except httpx.HTTPError as exc:
+        raise RelayLoginError("连不上大语言模型，请检查网络", 502) from exc
+    try:
+        body = response.json()
+    except ValueError:
+        body = {}
+    code = body.get("code") if isinstance(body, dict) else None
+    if response.status_code >= 400 or code not in (None, 0):
+        if response.status_code in {401, 403}:
+            # 这里校验的是令牌，不是密码，别把失败说成密码错误。
+            raise RelayLoginError("登录已失效，请重新登录", response.status_code)
+        raise explain_login_error(response.status_code, body)
+    data = body.get("data") if isinstance(body, dict) and "data" in body else body
+    return data if isinstance(data, dict) else {}
 
 
 def _purge_locked(now: float) -> None:

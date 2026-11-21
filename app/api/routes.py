@@ -150,6 +150,13 @@ async def health(request: Request) -> dict:
     return payload
 
 
+@router.get("/console")
+async def console_info(request: Request) -> dict:
+    """控制台在另一个本机端口，界面据此决定是否显示入口。"""
+    url = str(getattr(request.app.state, "console_url", "") or "")
+    return {"enabled": bool(url), "url": url}
+
+
 @router.get("/settings", response_model=SettingPublic)
 async def read_settings() -> SettingPublic:
     return get_manager().public_settings()

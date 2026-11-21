@@ -9,6 +9,7 @@ import { PageHead, StatusTag } from "../ui";
 
 export function Members() {
   const user = useOutletContext<User>();
+  const platform = user.role === "platform_admin";
   const { message } = AntApp.useApp();
   const client = useQueryClient();
   const [open, setOpen] = useState(false);
@@ -66,8 +67,8 @@ export function Members() {
       api<RelayReport>(scope ? `/v1/relay/sync?tenant_id=${scope}` : "/v1/relay/sync", { method: "POST" }),
     onSuccess: (data) => {
       const bad = data.members.filter((item) => !item.ok).length;
-      if (bad) message.warning(`已同步，${bad} 名成员的中转站余额或状态与本地不一致`);
-      else message.success("已从中转站同步，余额和状态一致");
+      if (bad) message.warning(`已刷新，${bad} 名成员的余额与记录不一致`);
+      else message.success("已刷新，余额一致");
       void client.invalidateQueries({ queryKey: ["members"] });
       void client.invalidateQueries({ queryKey: ["tenants"] });
       void client.invalidateQueries({ queryKey: ["quota-summary"] });
@@ -79,7 +80,7 @@ export function Members() {
   const revoke = useMutation({
     mutationFn: (id: number) => api(`/v1/devices/${id}/revoke`, { method: "POST" }),
     onSuccess: () => {
-      message.success("这台设备已下线，中转站账号仍然可用");
+      message.success("这台设备已下线，账号仍然可用");
       refresh();
     },
     onError: (error) => message.error(error instanceof ApiError ? error.message : "下线失败"),
@@ -89,7 +90,7 @@ export function Members() {
     <>
       <PageHead
         title="成员管理"
-        description="创建时立即开通中转站账号，并绑定审核专属分组。"
+        description="管理公司成员的账号、余额和设备。"
         extra={
           <Space>
             {user.role === "platform_admin" ? (
@@ -104,7 +105,7 @@ export function Members() {
             ) : null}
             {user.relay_live ? (
               <Button onClick={() => sync.mutate()} loading={sync.isPending}>
-                从中转站刷新
+                刷新余额
               </Button>
             ) : null}
             <Button type="primary" onClick={() => setOpen(true)} disabled={user.role === "platform_admin" && !scope}>
@@ -113,18 +114,20 @@ export function Members() {
           </Space>
         }
       />
-      <Alert
-        style={{ marginBottom: 16 }}
-        type="warning"
-        showIcon
-        message="开通前请确认：中转站的后台模式必须关闭，自助注册也必须关闭。后台模式开启时，非 admin 账号登录会直接 403，客户端无法使用。"
-      />
+      {platform ? (
+        <Alert
+          style={{ marginBottom: 16 }}
+          type="warning"
+          showIcon
+          message="开通前请确认：后台模式和自助注册都已关闭。后台模式开启时，非 admin 账号会直接 403，客户端无法使用。"
+        />
+      ) : null}
       <Card>
         <Table
           rowKey="id"
           dataSource={members.data ?? []}
           pagination={false}
-          scroll={{ x: 980 }}
+          scroll={{ x: platform ? 980 : 760 }}
           columns={[
             {
               title: "成员",
@@ -138,33 +141,37 @@ export function Members() {
               ),
             },
             { title: "角色", dataIndex: "role_label" },
-            { title: "中转站用户", dataIndex: "relay_user_id", render: (value: string) => value || "—" },
-            { title: "可用分组", dataIndex: "group_name", render: (value: string) => value || "—" },
+            ...(platform ? [{ title: "账号 ID", dataIndex: "relay_user_id", render: (value: string) => value || "—" }] : []),
+            ...(platform ? [{ title: "可用分组", dataIndex: "group_name", render: (value: string) => value || "—" }] : []),
             {
               title: "状态",
               render: (_value, row) => <StatusTag status={row.status} label={row.overdraft ? "透支" : row.status_label} />,
             },
             { title: "余额", render: (_value, row) => (row.overdraft ? "¥0.00" : money(row.balance)) },
-            {
-              title: "中转站余额",
-              render: (_value, row) => {
-                if (!row.relay_checked_at) return <Typography.Text type="secondary">未同步</Typography.Text>;
-                const diff = row.relay_diff ?? 0;
-                const statusBad = row.relay_status && row.relay_status !== row.status;
-                return (
-                  <Space size={4} wrap>
-                    <span>{money(row.relay_balance)}</span>
-                    {diff === 0 ? <Tag color="green">一致</Tag> : <Tag color="red">差额 {diff.toFixed(2)}</Tag>}
-                    {statusBad ? <Tag color="orange">状态 {row.relay_status}</Tag> : null}
-                  </Space>
-                );
-              },
-            },
-            {
-              title: "最近同步",
-              dataIndex: "relay_checked_at",
-              render: (value: string | null) => (value ? when(value) : "—"),
-            },
+            ...(platform
+              ? [
+                  {
+                    title: "账户余额",
+                    render: (_value: any, row: Member) => {
+                      if (!row.relay_checked_at) return <Typography.Text type="secondary">未同步</Typography.Text>;
+                      const diff = row.relay_diff ?? 0;
+                      const statusBad = row.relay_status && row.relay_status !== row.status;
+                      return (
+                        <Space size={4} wrap>
+                          <span>{money(row.relay_balance)}</span>
+                          {diff === 0 ? <Tag color="green">一致</Tag> : <Tag color="red">差额 {diff.toFixed(2)}</Tag>}
+                          {statusBad ? <Tag color="orange">状态 {row.relay_status}</Tag> : null}
+                        </Space>
+                      );
+                    },
+                  },
+                  {
+                    title: "最近同步",
+                    dataIndex: "relay_checked_at",
+                    render: (value: string | null) => (value ? when(value) : "—"),
+                  },
+                ]
+              : []),
             { title: "本月消耗", dataIndex: "month_cost", render: (value: number) => money(value) },
             {
               title: "设备",
@@ -180,7 +187,7 @@ export function Members() {
                 row.status === "active" ? (
                   <Popconfirm
                     title={`禁用 ${row.name}`}
-                    description="会停用中转站账号、吊销密钥对应的登录、解绑全部设备，并立刻腾出一个席位。"
+                    description="会停用这个账号、让已登录的设备全部下线，并立刻腾出一个席位。"
                     okText="禁用"
                     okButtonProps={{ danger: true }}
                     onConfirm={() => act.mutate({ id: row.id, action: "disable" })}
@@ -202,7 +209,7 @@ export function Members() {
         style={{ marginTop: 16 }}
         type="info"
         showIcon
-        message="账号会立即加入专属分组并创建审核 Key。额度需在额度分配页单独划拨。「从中转站刷新」只读余额和用量，不会改动本地账本。"
+        message="账号创建后，额度需要在额度分配页单独划拨。「刷新余额」只读取最新余额和用量，不会改动分配记录。"
       />
       <Modal title="新建成员" open={open} onCancel={() => setOpen(false)} footer={null} destroyOnClose>
         <Form layout="vertical" initialValues={{ role: "member", link_existing: false }} onFinish={(values) => create.mutate(values)}>
@@ -214,14 +221,14 @@ export function Members() {
           </Form.Item>
           <Form.Item name="link_existing" valuePropName="checked">
             <Checkbox onChange={(event) => setLinkExisting(event.target.checked)}>
-              该邮箱已经在中转站注册过，直接绑定已有账号
+              该邮箱已经注册过账号，直接绑定已有账号
             </Checkbox>
           </Form.Item>
           <Form.Item
             name="password"
             label="初始密码"
             rules={linkExisting ? [] : [{ required: true, min: 8, message: "密码至少 8 位" }]}
-            extra={linkExisting ? "绑定已有账号时不改密码，沿用中转站的密码。" : undefined}
+            extra={linkExisting ? "绑定已有账号时沿用原来的密码。" : undefined}
           >
             <Input.Password
               autoComplete="new-password"

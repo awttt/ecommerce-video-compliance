@@ -12,7 +12,7 @@ from admin_app.timeutil import utcnow
 
 # 余额流水里的备注前缀。对账时靠它把本地幂等键和中转站流水对上。
 NOTE_PREFIX = "evc-admin:"
-_NO_KEY = "未配置中转站管理密钥，当前是本地演示，不能从中转站读取数据"
+_NO_KEY = "当前是演示环境，不能同步余额"
 
 
 def apply_credentials(member: Member, credentials: dict) -> None:
@@ -39,7 +39,7 @@ def _cents(value: object) -> int:
     try:
         return int(round(float(value or 0) * 100))
     except (TypeError, ValueError) as exc:
-        raise DomainError(502, "中转站返回的金额格式不正确") from exc
+        raise DomainError(502, "服务返回的金额格式不正确") from exc
 
 
 class LocalRelay:
@@ -79,7 +79,7 @@ class LocalRelay:
             return
         account = self.db.get(RelayAccount, relay_user_id) if relay_user_id else None
         if account is None or account.status != "active":
-            raise DomainError(400, "中转站账号不存在或已停用")
+            raise DomainError(400, "账号不存在或已停用")
         self.db.add(
             RelayLedger(
                 idempotency_key=key,
@@ -103,7 +103,7 @@ class LocalRelay:
     def set_status(self, relay_user_id: str, status: str) -> None:
         account = self.db.get(RelayAccount, relay_user_id)
         if account is None:
-            raise DomainError(400, "中转站账号不存在")
+            raise DomainError(400, "账号不存在")
         account.status = status
         self.db.flush()
 
@@ -142,16 +142,16 @@ class HttpRelay:
 
     def _raise(self, response, action: str) -> None:
         if response.status_code in (401, 403):
-            raise DomainError(502, f"中转站{action}被拒绝，管理密钥无效或缺少对应权限（HTTP {response.status_code}）")
+            raise DomainError(502, f"{action}失败，服务配置不完整，请联系平台管理员")
         if response.status_code >= 400:
-            raise DomainError(502, f"中转站{action}失败（HTTP {response.status_code}）")
+            raise DomainError(502, f"{action}失败，请稍后再试")
 
     def _payload(self, response, action: str) -> object:
         self._raise(response, action)
         try:
             body = response.json()
         except ValueError as exc:
-            raise DomainError(502, f"中转站{action}返回的不是 JSON") from exc
+            raise DomainError(502, f"{action}失败，服务返回的数据格式不对") from exc
         if isinstance(body, dict) and "data" in body:
             return body["data"]
         return body
@@ -162,7 +162,7 @@ class HttpRelay:
         try:
             response = self.client.get(self._url(path), params=params)
         except httpx.HTTPError as exc:
-            raise DomainError(502, "连不上中转站，读取数据失败") from exc
+            raise DomainError(502, "连不上服务，读取数据失败") from exc
         if response.status_code == 404:
             return None
         return self._payload(response, "读取")
@@ -185,7 +185,7 @@ class HttpRelay:
         data = self._payload(response, "建号")
         user_id = data.get("id") if isinstance(data, dict) else None
         if not user_id:
-            raise DomainError(502, "中转站建号没有返回用户编号")
+            raise DomainError(502, "开通账号失败，服务没有返回用户编号")
         credentials = self._create_default_key(email, password)
         return str(user_id), credentials
 
@@ -221,7 +221,7 @@ class HttpRelay:
             data = data if isinstance(data, dict) else payload
             access_token = str(data.get("access_token") or "").strip()
             if not access_token:
-                raise DomainError(502, "中转站没有返回新账号登录凭证")
+                raise DomainError(502, "开通账号失败，服务没有返回登录凭证")
             group_id = self._configured_group_id()
             response = user_client.post(
                 self._url("/keys"),
@@ -247,9 +247,9 @@ class HttpRelay:
         try:
             group_id = int(self.group_id)
         except (TypeError, ValueError) as exc:
-            raise DomainError(400, "请先在接入设置填写专属分组数字 ID") from exc
+            raise DomainError(400, "服务配置不完整，请联系平台管理员") from exc
         if group_id <= 0:
-            raise DomainError(400, "专属分组 ID 需要是正整数")
+            raise DomainError(400, "服务配置不完整，请联系平台管理员")
         return group_id
 
     def add_balance(self, relay_user_id: str, cents: int, key: str) -> None:
@@ -290,7 +290,7 @@ class HttpRelay:
         if data is None:
             return None
         if not isinstance(data, dict) or "balance" not in data:
-            raise DomainError(502, "中转站没有返回余额，管理密钥可能缺少 users.read 或 users.balance.read 权限")
+            raise DomainError(502, "服务配置不完整，请联系平台管理员")
         return {
             "id": str(data.get("id") or relay_user_id),
             "email": str(data.get("email") or ""),
@@ -310,7 +310,7 @@ class HttpRelay:
             },
         )
         if not isinstance(data, dict):
-            raise DomainError(502, "中转站没有返回用量统计")
+            raise DomainError(502, "服务没有返回用量统计")
         cost = data.get("total_actual_cost")
         if cost is None:
             cost = data.get("total_cost")
@@ -350,13 +350,13 @@ def base_url_of(db: Session) -> str:
 
 def _relay_payload(response, action: str) -> object:
     if response.status_code in (401, 403):
-        raise DomainError(401, f"中转站{action}失败，登录已失效")
+        raise DomainError(401, f"{action}失败，登录已失效")
     if response.status_code >= 400:
-        raise DomainError(502, f"中转站{action}失败（HTTP {response.status_code}）")
+        raise DomainError(502, f"{action}失败，请稍后再试")
     try:
         body = response.json()
     except ValueError as exc:
-        raise DomainError(502, f"中转站{action}返回的不是 JSON") from exc
+        raise DomainError(502, f"{action}失败，服务返回的数据格式不对") from exc
     if isinstance(body, dict) and "data" in body:
         return body["data"]
     return body
@@ -368,9 +368,9 @@ def _create_or_find_key(base_url: str, access_token: str, group_id: str, email: 
     try:
         numeric = int(group_id)
     except (TypeError, ValueError) as exc:
-        raise DomainError(400, "请先在接入设置填写专属分组数字 ID") from exc
+        raise DomainError(400, "服务配置不完整，请联系平台管理员") from exc
     if numeric <= 0:
-        raise DomainError(400, "专属分组 ID 需要是正整数")
+        raise DomainError(400, "服务配置不完整，请联系平台管理员")
     base = base_url.rstrip("/")
     with httpx.Client(timeout=20.0) as client:
         response = client.post(
@@ -383,7 +383,7 @@ def _create_or_find_key(base_url: str, access_token: str, group_id: str, email: 
             json={"name": "电商视频合规", "group_id": numeric},
         )
         if response.status_code == 401:
-            raise DomainError(401, "中转站登录已失效，请重新登录后再试")
+            raise DomainError(401, "登录已失效，请重新登录后再试")
         if response.status_code < 400:
             data = _relay_payload(response, "创建识别密钥")
         else:
@@ -400,7 +400,7 @@ def _create_or_find_key(base_url: str, access_token: str, group_id: str, email: 
             params={"page": 1, "page_size": 100},
         )
         if listing.status_code == 401:
-            raise DomainError(401, "中转站登录已失效，请重新登录后再试")
+            raise DomainError(401, "登录已失效，请重新登录后再试")
         if listing.status_code < 400:
             body = _relay_payload(listing, "读取识别密钥")
             items = body.get("items") if isinstance(body, dict) else body
@@ -416,7 +416,7 @@ def _create_or_find_key(base_url: str, access_token: str, group_id: str, email: 
                     value = str(item.get(name) or "").strip()
                     if value:
                         return value
-    raise DomainError(502, "中转站没有返回识别密钥原文，请让这个成员重新登录一次后台")
+    raise DomainError(502, "没有拿到识别密钥，请让这个成员重新登录一次后台")
 
 
 def _refresh_member_token(db: Session, member: Member, base_url: str) -> str:

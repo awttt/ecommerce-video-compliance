@@ -1,23 +1,36 @@
 import { useQuery } from "@tanstack/react-query";
 import { Card, Table } from "antd";
+import { useOutletContext } from "react-router-dom";
 import { api } from "../api";
 import { when } from "../format";
-import type { AuditRow } from "../types";
+import type { AuditRow, User } from "../types";
 import { PageHead, StatusTag } from "../ui";
+
+const statusMap: Record<string, string> = {
+  active: "正常",
+  disabled: "已停用",
+  pending: "待审",
+  approved: "已通过",
+  rejected: "已驳回",
+};
 
 function changeText(row: AuditRow): string {
   const after = row.after ?? {};
   if (typeof after.amount === "number") return String(after.amount);
   if (typeof after.status === "string" && row.before && typeof row.before.status === "string") {
-    return `${row.before.status} → ${after.status}`;
+    const beforeStatus = statusMap[row.before.status] || row.before.status;
+    const afterStatus = statusMap[after.status] || after.status;
+    return `${beforeStatus} → ${afterStatus}`;
   }
   if (typeof after.seats === "number" && row.before && typeof row.before.seats === "number") {
     return `席位 ${row.before.seats} → ${after.seats}`;
   }
-  return row.summary;
+  return "—";
 }
 
 export function Audit() {
+  const user = useOutletContext<User>();
+  const platform = user.role === "platform_admin";
   const query = useQuery({ queryKey: ["audit"], queryFn: () => api<AuditRow[]>("/v1/audit-logs") });
   return (
     <>
@@ -33,7 +46,8 @@ export function Audit() {
             { title: "操作人", dataIndex: "actor_name" },
             { title: "角色", dataIndex: "role", render: (value: string, row) => <StatusTag status={value} label={row.role_label} /> },
             { title: "公司", dataIndex: "tenant_name" },
-            { title: "动作", dataIndex: "action" },
+            ...(platform ? [{ title: "动作代码", dataIndex: "action" }] : []),
+            { title: "动作", dataIndex: "summary" },
             { title: "对象", dataIndex: "object" },
             { title: "变更", render: (_value, row) => changeText(row) },
             { title: "IP", dataIndex: "ip" },

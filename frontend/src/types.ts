@@ -118,57 +118,6 @@ export interface AccountAction {
   message: string;
 }
 
-export interface RechargeMethod {
-  payment_type: string;
-  display_name: string;
-  currency: string;
-  fee_rate: number;
-  daily_limit: number;
-  single_min: number;
-  single_max: number;
-}
-
-export interface RechargeBonusTier {
-  min_amount: number;
-  bonus_percent: number;
-}
-
-export interface RechargeInfo {
-  balance_disabled: boolean;
-  global_min: number;
-  global_max: number;
-  recharge_fee_rate: number;
-  balance_recharge_multiplier: number;
-  bonus_mode: string;
-  bonus_notice: string;
-  bonus_tiers: RechargeBonusTier[];
-  help_text: string;
-  methods: RechargeMethod[];
-  message: string;
-}
-
-export interface RechargeOrder {
-  order_id: number;
-  amount: number;
-  pay_amount: number;
-  fee_rate: number;
-  bonus_amount: number;
-  status: string;
-  result_type: string;
-  payment_type: string;
-  pay_url: string;
-  qr_code: string;
-  currency: string;
-  expires_at: string;
-  created_at: string;
-  message: string;
-  settings?: Settings | null;
-}
-
-export interface RechargeOrders {
-  orders: RechargeOrder[];
-}
-
 export interface BatchResult {
   jobs: Job[];
   errors: { filename: string; detail: string }[];

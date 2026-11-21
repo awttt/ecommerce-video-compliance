@@ -13,6 +13,10 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 ROOT = Path(SPECPATH).resolve().parent
 
 datas = [(str(ROOT / "frontend" / "dist"), "frontend/dist")]
+# 管理控制台的页面一起进安装包，但它的接口和数据仍走云端后台。
+console_dist = ROOT / "admin" / "web" / "dist"
+if (console_dist / "index.html").is_file():
+    datas.append((str(console_dist), "console/dist"))
 datas += collect_data_files("webview")
 datas += collect_data_files("certifi")
 

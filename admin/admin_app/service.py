@@ -184,10 +184,10 @@ def _relay_account(
         return relay.create_user(email, password)
     found = relay.find_user_by_email(email)
     if found is None:
-        raise DomainError(400, "中转站里没有这个邮箱，请先让该账号在中转站注册，或关闭「绑定已有账号」")
+        raise DomainError(400, "没有找到这个邮箱的账号，请先注册，或关闭「绑定已有账号」")
     status = str(found.get("status") or "").strip().lower()
     if status and status != "active":
-        raise DomainError(400, "这个中转站账号已停用，请先在中转站启用")
+        raise DomainError(400, "这个账号已停用，请联系平台管理员启用")
     relay_user_id = str(found["id"])
     taken = (
         db.query(Member)
@@ -195,7 +195,7 @@ def _relay_account(
         .first()
     )
     if taken is not None:
-        raise DomainError(400, "这个中转站账号已经绑定了其他成员")
+        raise DomainError(400, "这个账号已经绑定了其他成员")
     # 已有账号的密码在中转站那边，后台不知道，也不该重置；密钥等成员自己登录后写入。
     return relay_user_id, {}
 
@@ -584,7 +584,7 @@ def _member_for_quota(db: Session, actor: Member, member_id: int) -> Member:
         raise DomainError(404, "成员不存在")
     resolve_tenant(actor, member.tenant_id)
     if not member.relay_user_id:
-        raise DomainError(400, "这个成员还没有中转站账号")
+        raise DomainError(400, "这个成员的账号还没有开通")
     return member
 
 
@@ -603,7 +603,7 @@ def allocate(
     _require(actor, "quota.allocate")
     key = (idempotency_key or "").strip()
     if not key or len(key) > 80:
-        raise DomainError(400, "缺少幂等键")
+        raise DomainError(400, "请求缺少编号，请刷新页面后重试")
     if direction not in ("add", "subtract"):
         raise DomainError(400, "方向不正确")
     cents = to_cents(amount)
@@ -614,7 +614,7 @@ def allocate(
     existing = db.query(QuotaAllocation).filter(QuotaAllocation.idempotency_key == key).one_or_none()
     if existing is not None:
         if existing.member_id != member_id or existing.amount_cents != cents or existing.direction != direction:
-            raise DomainError(409, "这个幂等键已经用于另一笔额度")
+            raise DomainError(409, "这笔请求已经提交过，请刷新页面后重试")
         if existing.status == "success":
             return existing
         existing.status = "processing"
@@ -666,7 +666,7 @@ def _finish_quota(db: Session, actor: Member, row: QuotaAllocation, ip: str) -> 
     if row.direction == "add" and owner.balance_cents < row.amount_cents:
         row.status = "failed"
         db.commit()
-        raise DomainError(400, "公司管理员在中转站的余额不足，请先在 token4u 充值")
+        raise DomainError(400, "公司管理员的余额不足，请先充值")
     if row.direction == "subtract" and row.amount_cents > max(member.balance_cents, 0):
         row.status = "failed"
         db.commit()
@@ -729,11 +729,11 @@ def _finish_quota(db: Session, actor: Member, row: QuotaAllocation, ip: str) -> 
             fresh.relay_applied = True
             fresh.status = "processing"
             db.commit()
-            raise DomainError(503, "中转站已处理这笔额度，本地记账未完成。请用同一个幂等键重试，不会再次动账。") from exc
+            raise DomainError(503, "这笔额度已经处理，记录还没写完。请重新提交一次，不会重复扣款。") from exc
         if fresh is not None and fresh.status != "success":
             fresh.status = "failed"
             db.commit()
-        raise DomainError(502, "中转站额度操作失败") from exc
+        raise DomainError(502, "额度操作失败，请稍后再试") from exc
 
 
 def _active_phrase_count(db: Session, tenant_id: int | None) -> int:
@@ -1223,7 +1223,7 @@ def sync_relay(db: Session, actor: Member, tenant_id: int | None, ip: str = "") 
     members = _relay_members(db, actor, tenant_id)
     relayer = get_relay(db)
     if relayer.mode == "local":
-        raise DomainError(400, "未配置中转站管理密钥，当前是本地演示，不能从中转站同步")
+        raise DomainError(400, "当前是演示环境，不能同步余额")
     today = shanghai_now().date()
     month_start = today.replace(day=1)
     lifetime_start = date(2000, 1, 1)
@@ -1258,9 +1258,9 @@ def sync_relay(db: Session, actor: Member, tenant_id: int | None, ip: str = "") 
     audit(
         db,
         actor,
-        "relay.sync",
-        "relay",
-        f"从中转站同步 {synced} 名成员" + (f"，{len(missing)} 个账号在中转站不存在" if missing else ""),
+        "usage.refresh",
+        "usage",
+        f"更新 {synced} 名成员的余额和用量" + (f"，{len(missing)} 个账号未找到" if missing else ""),
         tenant_id=resolve_tenant(actor, tenant_id),
         after={"synced": synced, "missing": missing},
         ip=ip,

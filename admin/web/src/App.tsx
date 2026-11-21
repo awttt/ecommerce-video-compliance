@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { accessToken } from "./api";
 import { AdminLayout } from "./layout";
+import { ToolsFrame } from "./ToolsFrame";
 import { AcceptInvite } from "./pages/Invite";
 import { Login } from "./pages/Login";
 import { Dashboard } from "./pages/Dashboard";
@@ -11,6 +12,7 @@ import { Keywords } from "./pages/Keywords";
 import { Usage } from "./pages/Usage";
 import { Audit } from "./pages/Audit";
 import { Settings } from "./pages/Settings";
+import { Recharge } from "./pages/Recharge";
 
 function RequireAuth() {
   if (!accessToken()) return <Navigate to="/login" replace />;
@@ -29,8 +31,10 @@ export function App() {
         <Route path="/quota" element={<Quota />} />
         <Route path="/keywords" element={<Keywords />} />
         <Route path="/usage" element={<Usage />} />
+        <Route path="/recharge" element={<Recharge />} />
         <Route path="/audit" element={<Audit />} />
         <Route path="/settings" element={<Settings />} />
+        <Route path="/tools" element={<ToolsFrame />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

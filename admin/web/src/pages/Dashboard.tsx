@@ -44,7 +44,7 @@ export function Dashboard() {
     <>
       <PageHead
         title="总览"
-        description={member ? "这里只看你自己的余额、消耗和提交。" : "对账使用累计消耗；本月消耗单独展示。数字来自已同步的中转站扣费。"}
+        description={member ? "这里只看你自己的余额、消耗和提交。" : "对账使用累计消耗；本月消耗单独展示。消耗数据按最近一次同步更新。"}
         extra={<Button onClick={() => void client.invalidateQueries({ queryKey: ["dashboard"] })}>刷新数据</Button>}
       />
       {report ? (
@@ -55,7 +55,7 @@ export function Dashboard() {
           message={member ? "你可以在后台直接审核视频" : report.ok ? "对账状态：正常" : report.overdraft ? "对账状态：不平，有成员透支" : "对账状态：不平"}
           description={
             member
-              ? "上传、抽帧、画面和口播识别、剪辑和导出都在后台完成。识别使用你的中转站额度。"
+              ? "上传、抽帧、画面和口播识别、剪辑和导出都在后台完成。识别会从你的账户余额扣费。"
               : `公司余额 ${money(report.balance)}，累计已消耗 ${money(report.cumulative_cost)}，公司总额 ${money(report.pool_total)}。${
                   report.overdraft_members.length ? `透支按 0 计入：${report.overdraft_members.join("、")}。` : ""
                 }`
@@ -72,13 +72,13 @@ export function Dashboard() {
         <Col xs={24} sm={12} lg={6}>
           <Card>
             <Statistic title={member ? "本月消耗" : "已分配累计"} value={member ? report?.month_cost ?? 0 : report?.allocated ?? 0} precision={2} prefix="¥" />
-            <Typography.Text type="secondary">{member ? "已含分组倍率" : `公司余额 ${money(report?.pool_remaining ?? 0)}`}</Typography.Text>
+            <Typography.Text type="secondary">{member ? "本月累计" : `公司余额 ${money(report?.pool_remaining ?? 0)}`}</Typography.Text>
           </Card>
         </Col>
         <Col xs={24} sm={12} lg={6}>
           <Card>
             <Statistic title={member ? "待审提交" : "本月消耗"} value={member ? data?.pending_keywords ?? 0 : report?.month_cost ?? 0} precision={member ? 0 : 2} prefix={member ? undefined : "¥"} />
-            <Typography.Text type={delta && !member ? "success" : "secondary"}>{member ? "等待管理员处理" : delta || "已含分组倍率，不再乘一次"}</Typography.Text>
+            <Typography.Text type={delta && !member ? "success" : "secondary"}>{member ? "等待管理员处理" : delta || "与上月对比"}</Typography.Text>
           </Card>
         </Col>
         <Col xs={24} sm={12} lg={6}>
@@ -90,7 +90,7 @@ export function Dashboard() {
       </Row>
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col xs={24} lg={14}>
-          <Card title="近 7 日消耗" extra={<Typography.Text type="secondary">单位：元 · 读自用量快照</Typography.Text>}>
+          <Card title="近 7 日消耗" extra={<Typography.Text type="secondary">单位：元</Typography.Text>}>
             <Trend rows={data?.trend ?? []} />
           </Card>
         </Col>

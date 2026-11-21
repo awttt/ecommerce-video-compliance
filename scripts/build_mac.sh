@@ -73,6 +73,18 @@ if [[ ! -f "$ROOT/frontend/dist/index.html" ]]; then
   exit 1
 fi
 
+# 管理控制台页面随安装包分发，接口仍请求云端后台。
+(
+  cd "$ROOT/admin/web"
+  npm install
+  npm run build
+)
+
+if [[ ! -f "$ROOT/admin/web/dist/index.html" ]]; then
+  echo "admin/web/dist 没有构建出来，已停止打包。" >&2
+  exit 1
+fi
+
 "$PY" -m PyInstaller --noconfirm --clean packaging/evc.spec
 
 APP="$ROOT/dist/VideoCompliance.app"

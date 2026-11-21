@@ -10,7 +10,6 @@ import {
   PauseOutlined,
   ScissorOutlined,
   SettingOutlined,
-  WalletOutlined,
 } from "@ant-design/icons";
 import {
   Alert,
@@ -32,7 +31,6 @@ import {
   Space,
   Steps,
   Switch,
-  Popover,
   Spin,
   Tooltip,
   Typography,
@@ -41,8 +39,6 @@ import {
 } from "antd";
 import { useEffect, useRef, useState } from "react";
 import {
-  accountLogout,
-  accountRefresh,
   cancelJob,
   clearQueue,
   createJobs,
@@ -65,7 +61,7 @@ import {
   saveCuts,
   saveSettings,
 } from "./api";
-import { formatBalance, LoginPage, RegisterPage } from "./AuthPages";
+import { LoginPage, RegisterPage } from "./AuthPages";
 import { mcpAgentPrompt, mcpEndpoint } from "./mcpPrompt";
 import { showTestMenu } from "./testMenu";
 import { CutTimeline } from "./CutTimeline";
@@ -79,7 +75,6 @@ import {
   videosFromEntries,
   type PickedVideo,
 } from "./dropVideos";
-import { RechargePage } from "./RechargePage";
 import { batchElapsed, jobElapsed } from "./elapsed";
 import { FindingsTable, type FindingsTableHandle } from "./FindingsTable";
 import { findingKey } from "./findingsView";
@@ -249,11 +244,8 @@ export function Shell() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [keyNotice, setKeyNotice] = useState("");
   const [authPage, setAuthPage] = useState<"login" | "register">("login");
-  const [refreshingAccount, setRefreshingAccount] = useState(false);
-  const [loggingOut, setLoggingOut] = useState(false);
   const [bootError, setBootError] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [workspace, setWorkspace] = useState<"detect" | "recharge">("detect");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [history, setHistory] = useState<Job[]>([]);
   const [job, setJob] = useState<Job | null>(null);
@@ -552,7 +544,7 @@ export function Shell() {
           : `/api/jobs/${job.id}/media`;
   const mediaMime =
     source === "output" || job?.preview_status === "ready" ? "video/mp4" : previewMime(job?.filename || "");
-  const uploadReady = Boolean(settings?.account_logged_in) && workspace === "detect";
+  const uploadReady = Boolean(settings?.account_logged_in);
 
   function commitPicked(next: PickedVideo[]) {
     pickedRef.current = next;
@@ -831,50 +823,6 @@ export function Shell() {
     }
   }
 
-  async function refreshAccount() {
-    if (refreshingAccount || loggingOut) return;
-    setRefreshingAccount(true);
-    try {
-      const result = await accountRefresh();
-      setSettings(result.settings);
-      if (result.settings.has_api_key) setKeyNotice("");
-      message.success(result.message || "已更新余额");
-    } catch (error) {
-      const text = error instanceof Error ? error.message : "刷新失败";
-      const blocked = accountKeyNotice(text);
-      if (blocked) {
-        setKeyNotice(blocked);
-        refreshSettings().catch(() => undefined);
-      }
-      message.error(blocked || text);
-      if (text.includes("请重新登录") || text.includes("请先登录") || text.includes("还没有登录")) {
-        refreshSettings().catch(() => undefined);
-      }
-    } finally {
-      setRefreshingAccount(false);
-    }
-  }
-
-  async function logout() {
-    if (refreshingAccount || loggingOut) return;
-    setLoggingOut(true);
-    try {
-      const result = await accountLogout();
-      setSettings(result.settings);
-      setJob(null);
-      setBatch([]);
-      commitPicked([]);
-      setHistory([]);
-      setWorkspace("detect");
-      setAuthPage("login");
-      message.success(result.message || "已退出登录");
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : "退出失败");
-    } finally {
-      setLoggingOut(false);
-    }
-  }
-
   if (!settings) {
     return (
       <div className="auth-page">
@@ -909,19 +857,8 @@ export function Shell() {
   return (
     <div className="app-shell">
       <header className="app-header">
-        <button className="brand" type="button" onClick={() => setWorkspace("detect")}>
-          <span className="brand-mark"><BrandMark /></span>
-          <span className="brand-text">
-            <strong>御镜视频素材审核系统</strong>
-          </span>
-        </button>
         <nav className="app-nav">
-          <Button
-            type="text"
-            icon={<HomeOutlined />}
-            className={workspace === "detect" ? "is-active" : ""}
-            onClick={() => setWorkspace("detect")}
-          >
+          <Button type="text" icon={<HomeOutlined />} className="is-active">
             首页
           </Button>
           <Button type="text" icon={<HistoryOutlined />} onClick={() => { setHistoryOpen(true); refreshHistory().catch(() => undefined); }}>
@@ -938,14 +875,6 @@ export function Shell() {
           </Button>
           <Button type="text" onClick={() => setMcpOpen(true)}>MCP</Button>
           <Button type="text" icon={<SettingOutlined />} onClick={() => setSettingsOpen(true)}>设置</Button>
-          <Button
-            type="text"
-            icon={<WalletOutlined />}
-            className={workspace === "recharge" ? "is-active" : ""}
-            onClick={() => setWorkspace("recharge")}
-          >
-            充值
-          </Button>
           {showTestMenu(settings.account_email) ? (
             <Button
               type="text"
@@ -957,31 +886,8 @@ export function Shell() {
             </Button>
           ) : null}
         </nav>
-        <div className="app-account">
-          <Popover
-            content={
-              <Space direction="vertical" size={4}>
-                <span>今日消耗 {formatBalance(settings.account_today_cost)}</span>
-                <span>累计消耗 {formatBalance(settings.account_total_cost)}</span>
-              </Space>
-            }
-          >
-            <span className="account-chip">
-              {settings.account_email} · 余额 {formatBalance(settings.account_balance)}
-            </span>
-          </Popover>
-          <Button type="text" size="small" loading={refreshingAccount} disabled={loggingOut} onClick={() => void refreshAccount()}>
-            刷新余额
-          </Button>
-          <Button type="text" size="small" loading={loggingOut} disabled={refreshingAccount} onClick={() => void logout()}>
-            退出登录
-          </Button>
-        </div>
       </header>
       <div className="page">
-        {workspace === "recharge" ? (
-          <RechargePage settings={settings} onSettings={setSettings} />
-        ) : (
         <Row gutter={[16, 16]}>
           <Col xs={24} lg={8}>
             <Card title="上传视频">
@@ -1499,7 +1405,6 @@ export function Shell() {
             </Card>
           </Col>
         </Row>
-        )}
       </div>
 
       <Drawer
@@ -1573,7 +1478,7 @@ export function Shell() {
           <Form.Item label="单帧超时（秒）" name="timeout_sec">
             <InputNumber min={15} max={180} style={{ width: "100%" }} />
           </Form.Item>
-          <Form.Item label="口播检测" name="asr_enabled" valuePropName="checked" extra="关闭后只检测画面，不再提取音频。登录后的口播凭证由中转站签发，不保存在本机。">
+          <Form.Item label="口播检测" name="asr_enabled" valuePropName="checked" extra="关闭后只检测画面，不再提取音频。口播凭证在登录后自动获取，不保存在本机。">
             <Switch checkedChildren="开" unCheckedChildren="关" />
           </Form.Item>
           <Form.Item label="录音识别引擎" name="asr_engine" rules={[{ required: true }]} extra="免费的 10 小时包只抵扣通用引擎。大模型 2.0 需要对应的资源包。">

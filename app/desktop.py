@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import socket
 import sys
 import threading
@@ -11,7 +12,9 @@ import time
 import webbrowser
 
 import uvicorn
+from fastapi import FastAPI
 
+from app.console import cloud_base_url, console_dist, console_enabled, console_port, create_console_app
 from app.core.relay import configure_tls
 from app.factory import create_app
 from app.logging_setup import ensure_stdio
@@ -37,11 +40,11 @@ def _wait_until_up(host: str, port: int, server: uvicorn.Server, thread: threadi
     raise RuntimeError("本地服务启动超时")
 
 
-def serve(host: str, port: int) -> tuple[uvicorn.Server, threading.Thread]:
+def _start(app: FastAPI, host: str, port: int, name: str) -> tuple[uvicorn.Server, threading.Thread]:
     ensure_stdio()
     interactive = sys.stdout is not None and sys.stdout.isatty()
     config = uvicorn.Config(
-        create_app(),
+        app,
         host=host,
         port=port,
         log_level="info",
@@ -49,10 +52,35 @@ def serve(host: str, port: int) -> tuple[uvicorn.Server, threading.Thread]:
         use_colors=interactive,
     )
     server = uvicorn.Server(config)
-    thread = threading.Thread(target=server.run, name="evc-api", daemon=True)
+    thread = threading.Thread(target=server.run, name=name, daemon=True)
     thread.start()
     _wait_until_up(host, port, server, thread)
     return server, thread
+
+
+def serve(host: str, port: int, console_url: str = "") -> tuple[uvicorn.Server, threading.Thread]:
+    return _start(create_app(console_url), host, port, "evc-api")
+
+
+def _port_free(host: str, port: int) -> bool:
+    with socket.socket() as sock:
+        sock.settimeout(0.2)
+        return sock.connect_ex((host, port)) != 0
+
+
+def start_console(host: str, tools_url: str) -> tuple[uvicorn.Server | None, threading.Thread | None, str]:
+    """在另一个端口起控制台壳。页面打不开时也不影响审核工具。"""
+    if not (console_dist() / "index.html").is_file():
+        logging.getLogger("app.console").warning("还没有构建 admin/web/dist，管理控制台入口关闭")
+        return None, None, ""
+    port = console_port()
+    if not _port_free(host, port):
+        logging.getLogger("app.console").warning("端口 %s 已被占用，管理控制台入口关闭", port)
+        return None, None, ""
+    server, thread = _start(create_console_app(tools_url=tools_url), host, port, "evc-console")
+    url = f"http://127.0.0.1:{port}/"
+    logging.getLogger("app.console").info("管理控制台 %s 转发到 %s", url, cloud_base_url())
+    return server, thread, url
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -61,6 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-window", action="store_true", help="只启动本地服务，不打开桌面窗口")
     parser.add_argument("--browser", action="store_true", help="用系统浏览器打开")
+    parser.add_argument("--no-console", action="store_true", help="不启动嵌入的管理控制台")
     return parser
 
 
@@ -72,12 +101,26 @@ def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     if args.host not in {"127.0.0.1", "localhost"}:
         raise SystemExit("只监听本机地址 127.0.0.1")
-    server, thread = serve(args.host, args.port)
+    console_server = None
+    console_thread = None
+    console_url = ""
+    if not args.no_console and console_enabled():
+        try:
+            console_server, console_thread, console_url = start_console(
+                args.host, f"http://127.0.0.1:{args.port}/"
+            )
+        except Exception:
+            logging.getLogger("app.console").exception("管理控制台没有启动，审核工具照常使用")
+    server, thread = serve(args.host, args.port, console_url)
     url = f"http://127.0.0.1:{args.port}"
+    # 启动直接进控制台；工具端通过控制台菜单嵌在页面里。带 sso=1 时用工具端登录换会话。
+    start_url = f"{console_url}?sso=1" if console_url else url
     print(f"服务已启动：{url}")
+    if console_url:
+        print(f"管理控制台：{console_url}")
     try:
         if args.browser:
-            webbrowser.open(url)
+            webbrowser.open(start_url)
         if args.no_window:
             thread.join()
             return
@@ -88,8 +131,8 @@ def main(argv: list[str] | None = None) -> None:
             thread.join()
             return
         webview.create_window(
-            "御镜视频素材审核系统",
-            url,
+            "御镜",
+            start_url,
             width=1360,
             height=860,
             min_size=(1100, 720),
@@ -99,6 +142,9 @@ def main(argv: list[str] | None = None) -> None:
     finally:
         server.should_exit = True
         thread.join(timeout=8)
+        if console_server is not None and console_thread is not None:
+            console_server.should_exit = True
+            console_thread.join(timeout=8)
 
 
 if __name__ == "__main__":

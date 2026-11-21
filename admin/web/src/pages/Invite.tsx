@@ -26,7 +26,7 @@ export function AcceptInvite() {
       <Card className="login-card">
         <Typography.Title level={4}>接受邀请</Typography.Title>
         <Typography.Paragraph type="secondary">
-          邮件里只有这张链接，没有初始密码。设好密码后才会创建中转站账号，并且只分配专属分组。
+          邮件里只有这张链接，没有初始密码。设好密码后账号就会开通。
         </Typography.Paragraph>
         {accept.isSuccess ? (
           <Result

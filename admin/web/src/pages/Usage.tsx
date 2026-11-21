@@ -9,6 +9,7 @@ import { PageHead } from "../ui";
 
 export function Usage() {
   const user = useOutletContext<User>();
+  const platform = user.role === "platform_admin";
   const { message } = AntApp.useApp();
   const [tenantId, setTenantId] = useState<number | undefined>(undefined);
   const tenants = useQuery({
@@ -31,7 +32,7 @@ export function Usage() {
     <>
       <PageHead
         title="用量看板"
-        description="读本地用量快照，不在打开页面时请求中转站。日期按 Asia/Shanghai 理解。cost 已含分组倍率，这里不再乘。"
+        description="按月统计识别用量和消耗，日期按北京时间。"
         extra={
           <Space>
             {user.role === "platform_admin" ? (
@@ -56,27 +57,29 @@ export function Usage() {
         }
       />
       <Row gutter={[16, 16]}>
-        <Col xs={24} sm={12} lg={6}>
+        <Col xs={24} sm={12} lg={platform ? 6 : 8}>
           <Card>
             <Statistic title="请求数" value={data?.requests ?? 0} />
             <span style={{ color: "rgba(0,0,0,.45)" }}>本月累计</span>
           </Card>
         </Col>
-        <Col xs={24} sm={12} lg={6}>
-          <Card>
-            <Statistic title="Token 消耗" value={tokenText(data?.tokens ?? 0)} />
-            <span style={{ color: "rgba(0,0,0,.45)" }}>
-              输入 {tokenText(data?.input_tokens ?? 0)} / 输出 {tokenText(data?.output_tokens ?? 0)}
-            </span>
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} lg={6}>
+        {platform ? (
+          <Col xs={24} sm={12} lg={6}>
+            <Card>
+              <Statistic title="Token 消耗" value={tokenText(data?.tokens ?? 0)} />
+              <span style={{ color: "rgba(0,0,0,.45)" }}>
+                输入 {tokenText(data?.input_tokens ?? 0)} / 输出 {tokenText(data?.output_tokens ?? 0)}
+              </span>
+            </Card>
+          </Col>
+        ) : null}
+        <Col xs={24} sm={12} lg={platform ? 6 : 8}>
           <Card>
             <Statistic title="实际扣费" value={data?.cost ?? 0} precision={2} prefix="¥" />
-            <span style={{ color: "rgba(0,0,0,.45)" }}>已含分组倍率 1.8×</span>
+            <span style={{ color: "rgba(0,0,0,.45)" }}>本月累计</span>
           </Card>
         </Col>
-        <Col xs={24} sm={12} lg={6}>
+        <Col xs={24} sm={12} lg={platform ? 6 : 8}>
           <Card>
             <Statistic title="人均消耗" value={data?.average ?? 0} precision={2} prefix="¥" />
             <span style={{ color: "rgba(0,0,0,.45)" }}>{data?.active_members ?? 0} 名有消耗的成员</span>
@@ -90,9 +93,9 @@ export function Usage() {
           dataSource={members.data ?? []}
           columns={[
             { title: "成员", dataIndex: "name" },
-            { title: "中转站用户", dataIndex: "relay_user_id" },
+            ...(platform ? [{ title: "账号 ID", dataIndex: "relay_user_id" }] : []),
             { title: "请求数", dataIndex: "requests" },
-            { title: "Token", dataIndex: "tokens", render: (value: number) => tokenText(value) },
+            ...(platform ? [{ title: "Token", dataIndex: "tokens", render: (value: number) => tokenText(value) }] : []),
             { title: "消耗（元）", dataIndex: "cost", render: (value: number) => money(value) },
             {
               title: "占比",
@@ -107,13 +110,15 @@ export function Usage() {
           ]}
         />
       </Card>
-      <Alert
-        style={{ marginTop: 16 }}
-        type="warning"
-        showIcon
-        message="口径提醒"
-        description="usage_logs.cost 已经是按分组倍率算完的实际扣费。evc-admin 不要再次乘倍率，否则对账对不上。定时从中转站拉快照还没挂到进程里，当前数字来自已经落下的快照。"
-      />
+      {platform ? (
+        <Alert
+          style={{ marginTop: 16 }}
+          type="warning"
+          showIcon
+          message="口径提醒"
+          description="usage_logs.cost 已经是按分组倍率算完的实际扣费，不能再乘一次倍率，否则对账对不上。定时刷新还没挂到进程里，当前数字来自已经落下的快照。"
+        />
+      ) : null}
     </>
   );
 }

@@ -9,6 +9,7 @@ import { PageHead, StatusTag } from "../ui";
 
 export function Quota() {
   const user = useOutletContext<User>();
+  const platform = user.role === "platform_admin";
   const { message } = AntApp.useApp();
   const client = useQueryClient();
   const keyRef = useRef(crypto.randomUUID());
@@ -35,14 +36,15 @@ export function Quota() {
   const relay = useQuery({
     queryKey: ["relay-status", scope ?? "all"],
     queryFn: () => api<RelayReport>(scope ? `/v1/relay/status?tenant_id=${scope}` : "/v1/relay/status"),
+    enabled: platform,
   });
   const sync = useMutation({
     mutationFn: () =>
       api<RelayReport>(scope ? `/v1/relay/sync?tenant_id=${scope}` : "/v1/relay/sync", { method: "POST" }),
     onSuccess: (data) => {
       const bad = data.members.filter((item) => !item.ok).length;
-      if (bad) message.warning(`已同步，${bad} 名成员有差额`);
-      else message.success("已从中转站同步");
+      if (bad) message.warning(`已刷新，${bad} 名成员有差额`);
+      else message.success("已刷新余额");
       void client.invalidateQueries({ queryKey: ["relay-status"] });
       void client.invalidateQueries({ queryKey: ["quota-summary"] });
       void client.invalidateQueries({ queryKey: ["members"] });
@@ -59,19 +61,19 @@ export function Quota() {
       }),
     onSuccess: () => {
       keyRef.current = crypto.randomUUID();
-      message.success("额度已记账。失败时用同一笔再次提交，不会重复动账。");
+      message.success("额度已记账。");
       void client.invalidateQueries({ queryKey: ["quota-summary"] });
       void client.invalidateQueries({ queryKey: ["quota-records"] });
       void client.invalidateQueries({ queryKey: ["members"] });
     },
-    onError: (error) => message.error(error instanceof ApiError ? `${error.message} 用同一个幂等键再提交一次，不会重复动账。` : "分配失败"),
+    onError: (error) => message.error(error instanceof ApiError ? error.message : "分配失败"),
   });
 
   return (
     <>
       <PageHead
         title="额度分配"
-        description="从公司池划到成员的中转站余额。先占住幂等键，再调中转站；退回只做减法，不加回已消耗。"
+        description="把公司余额分给成员，或从成员收回。重复提交不会重复扣款。"
         extra={
           user.role === "platform_admin" ? (
             <Select
@@ -102,62 +104,64 @@ export function Quota() {
               </Col>
             </Row>
           </Card>
-          <Card
-            title="中转站对账"
-            style={{ marginTop: 16 }}
-            extra={
-              user.relay_live ? (
-                <Button size="small" onClick={() => sync.mutate()} loading={sync.isPending}>
-                  从中转站刷新
-                </Button>
+          {platform ? (
+            <Card
+              title="余额核对"
+              style={{ marginTop: 16 }}
+              extra={
+                user.relay_live ? (
+                  <Button size="small" onClick={() => sync.mutate()} loading={sync.isPending}>
+                    刷新余额
+                  </Button>
+                ) : (
+                  <Tag>本地演示</Tag>
+                )
+              }
+            >
+              {relayData?.synced ? (
+                <>
+                  <Row gutter={16}>
+                    <Col span={12} md={6}>
+                      <Statistic title="账号服务余额合计" value={relayData.totals.relay_balance} precision={2} prefix="¥" />
+                    </Col>
+                    <Col span={12} md={6}>
+                      <Statistic
+                        title="与本地差额"
+                        value={relayData.totals.diff}
+                        precision={2}
+                        prefix="¥"
+                        valueStyle={{ color: relayData.totals.diff === 0 ? "#52c41a" : "#cf1322" }}
+                      />
+                    </Col>
+                    <Col span={12} md={6}>
+                      <Statistic title="本月消耗" value={relayData.totals.month_cost} precision={2} prefix="¥" />
+                    </Col>
+                    <Col span={12} md={6}>
+                      <Statistic title="累计消耗" value={relayData.totals.lifetime_cost} precision={2} prefix="¥" />
+                    </Col>
+                  </Row>
+                  <Alert
+                    style={{ marginTop: 12 }}
+                    type={relayData.ok ? "success" : "warning"}
+                    showIcon
+                    message={`最近同步 ${when(relayData.checked_at)}`}
+                    description={
+                      relayData.ok
+                        ? "账号服务余额和账号状态与本地一致。"
+                        : `${relayData.members.filter((item) => !item.ok).length} 名成员存在余额差额或状态不一致，请在成员管理页查看。`
+                    }
+                  />
+                </>
               ) : (
-                <Tag>本地演示</Tag>
-              )
-            }
-          >
-            {relayData?.synced ? (
-              <>
-                <Row gutter={16}>
-                  <Col span={12} md={6}>
-                    <Statistic title="中转站余额合计" value={relayData.totals.relay_balance} precision={2} prefix="¥" />
-                  </Col>
-                  <Col span={12} md={6}>
-                    <Statistic
-                      title="与本地差额"
-                      value={relayData.totals.diff}
-                      precision={2}
-                      prefix="¥"
-                      valueStyle={{ color: relayData.totals.diff === 0 ? "#52c41a" : "#cf1322" }}
-                    />
-                  </Col>
-                  <Col span={12} md={6}>
-                    <Statistic title="本月消耗" value={relayData.totals.month_cost} precision={2} prefix="¥" />
-                  </Col>
-                  <Col span={12} md={6}>
-                    <Statistic title="累计消耗" value={relayData.totals.lifetime_cost} precision={2} prefix="¥" />
-                  </Col>
-                </Row>
                 <Alert
-                  style={{ marginTop: 12 }}
-                  type={relayData.ok ? "success" : "warning"}
+                  type="info"
                   showIcon
-                  message={`最近同步 ${when(relayData.checked_at)}`}
-                  description={
-                    relayData.ok
-                      ? "中转站余额和账号状态与本地一致。"
-                      : `${relayData.members.filter((item) => !item.ok).length} 名成员存在余额差额或状态不一致，请在成员管理页查看。`
-                  }
+                  message="还没有从账号服务同步过"
+                  description="点右上角「刷新余额」，只读取余额和用量，不会改动本地账本，也不会重复加款。"
                 />
-              </>
-            ) : (
-              <Alert
-                type="info"
-                showIcon
-                message="还没有从中转站同步过"
-                description="点右上角「从中转站刷新」，只读取余额和用量，不会改动本地账本，也不会重复加款。"
-              />
-            )}
-          </Card>
+              )}
+            </Card>
+          ) : null}
         </Col>
         <Col xs={24} lg={10}>
           <Card title="划拨" extra="先校验公司池剩余">
@@ -174,7 +178,7 @@ export function Quota() {
                 <Select
                   options={(members.data ?? []).map((item) => ({
                     value: item.id,
-                    label: `${item.name}（${item.relay_user_id || "未开通"}）${item.status === "active" ? "" : " · 已停用"}`,
+                    label: `${item.name}（${item.email}）${item.status === "active" ? "" : " · 已停用"}`,
                   }))}
                 />
               </Form.Item>
@@ -204,7 +208,7 @@ export function Quota() {
             { title: "金额", dataIndex: "amount", render: (value: number) => money(value) },
             { title: "周期", dataIndex: "period" },
             { title: "操作人", dataIndex: "operator_name" },
-            { title: "幂等键", dataIndex: "idempotency_key" },
+            ...(platform ? [{ title: "幂等键", dataIndex: "idempotency_key" }] : []),
             { title: "状态", render: (_value, row) => <StatusTag status={row.status} label={row.status_label} /> },
           ]}
         />
@@ -216,7 +220,7 @@ export function Quota() {
 function TypographyHint({ remaining }: { remaining?: number }) {
   return (
     <div style={{ marginTop: 8 }}>
-      <span style={{ color: "rgba(0,0,0,.45)" }}>当前可分配 {money(remaining ?? 0)}。失败重试不会重复加钱。</span>
+      <span style={{ color: "rgba(0,0,0,.45)" }}>当前可分配 {money(remaining ?? 0)}。重复提交不会重复扣款。</span>
     </div>
   );
 }

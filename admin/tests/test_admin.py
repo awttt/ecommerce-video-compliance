@@ -665,7 +665,7 @@ def test_relay_sync_refuses_local_mode(tmp_path, monkeypatch):
         tenant = _login(client, "li@jiecheng.com")
         response = client.post("/v1/relay/sync", headers=tenant)
         assert response.status_code == 400
-        assert "管理密钥" in response.json()["detail"]
+        assert "演示环境" in response.json()["detail"]
         status = client.get("/v1/relay/status", headers=tenant).json()
         assert status["mode"] == "local"
         assert status["synced"] is False
@@ -780,7 +780,7 @@ def test_link_existing_relay_account(tmp_path, monkeypatch):
             },
         )
         assert missing.status_code == 400
-        assert "中转站里没有这个邮箱" in missing.json()["detail"]
+        assert "没有找到这个邮箱的账号" in missing.json()["detail"]
 
         # 同号不能重复绑定。
         again = client.post(
@@ -846,3 +846,31 @@ def test_link_existing_rejects_disabled_or_missing(tmp_path, monkeypatch):
         )
         assert response.status_code == 400
         assert "已停用" in response.json()["detail"]
+
+
+def test_sso_accepts_relay_token_without_password(tmp_path, monkeypatch):
+    import admin_app.auth_relay as auth_relay
+
+    def fake_account(token: str) -> dict:
+        if token == "relay-good":
+            return {"id": 77, "email": "li@jiecheng.com"}
+        if token == "relay-stranger":
+            return {"id": 99, "email": "nobody@example.com"}
+        raise RelayLoginError("登录已失效，请重新登录", 401)
+
+    monkeypatch.setattr(auth_relay, "current_account", fake_account)
+    with _client(tmp_path, monkeypatch, fake_login=False) as client:
+        bad = client.post("/v1/auth/sso", json={"access_token": "relay-bad"})
+        assert bad.status_code == 401
+
+        stranger = client.post("/v1/auth/sso", json={"access_token": "relay-stranger"})
+        assert stranger.status_code == 403
+
+        ok = client.post("/v1/auth/sso", json={"access_token": "relay-good", "refresh_token": "r1"})
+        assert ok.status_code == 200, ok.text
+        body = ok.json()
+        assert body["user"]["email"] == "li@jiecheng.com"
+        assert body["access_token"] and body["refresh_token"]
+
+        me = client.get("/v1/auth/me", headers={"Authorization": f"Bearer {body['access_token']}"})
+        assert me.status_code == 200
