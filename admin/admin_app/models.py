@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, Date, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Date, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from admin_app.timeutil import utcnow
@@ -180,6 +180,33 @@ class UsageSnapshot(Base):
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cost_cents: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class SharedRule(Base):
+    """全公司共用的违规词。通过后所有成员都能看到，并进入检测。"""
+
+    __tablename__ = "shared_rules"
+    __table_args__ = (
+        Index(
+            "uq_shared_rules_active_word",
+            "word",
+            unique=True,
+            sqlite_where=text("status IN ('pending', 'approved')"),
+            postgresql_where=text("status IN ('pending', 'approved')"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    word: Mapped[str] = mapped_column(String(40))
+    category: Mapped[str] = mapped_column(String(16))
+    description: Mapped[str] = mapped_column(String(200), default="")
+    member_id: Mapped[int] = mapped_column(ForeignKey("tenant_members.id"))
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    reviewer_id: Mapped[int | None] = mapped_column(ForeignKey("tenant_members.id"), nullable=True)
+    review_comment: Mapped[str] = mapped_column(String(200), default="")
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    reviewed_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
 
 class AuditLog(Base):

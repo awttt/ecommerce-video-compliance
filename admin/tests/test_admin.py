@@ -714,8 +714,9 @@ def test_split_database_routing(tmp_path, monkeypatch):
     cloud_tables = tables(cloud)
     assert {"keyword_entries", "keyword_submissions", "tenant_rules"} <= local_tables
     assert not {"tenants", "tenant_members", "quota_allocations"} & local_tables
-    assert {"tenants", "tenant_members", "quota_allocations", "usage_snapshots"} <= cloud_tables
+    assert {"tenants", "tenant_members", "quota_allocations", "usage_snapshots", "shared_rules"} <= cloud_tables
     assert "keyword_entries" not in cloud_tables
+    assert "shared_rules" not in local_tables
 
 
 
