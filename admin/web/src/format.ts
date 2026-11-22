@@ -28,9 +28,9 @@ export function tokenText(value: number): string {
   return String(value);
 }
 
-export function deltaText(current: number, previous: number): string | null {
+export function deltaText(current: number, previous: number, label = "较上月"): string | null {
   if (!previous) return null;
   const rate = ((current - previous) / previous) * 100;
   const sign = rate >= 0 ? "+" : "";
-  return `较上月 ${sign}${rate.toFixed(1)}%`;
+  return `${label} ${sign}${rate.toFixed(1)}%`;
 }

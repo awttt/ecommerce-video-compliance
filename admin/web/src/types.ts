@@ -83,6 +83,38 @@ export interface TrendPoint {
   cost: number;
 }
 
+export interface ConsumptionComparison {
+  label: string;
+  previous_start: string;
+  previous_end: string;
+  previous_total: number;
+}
+
+export interface ConsumptionCompany {
+  tenant_id: number;
+  name: string;
+  cost: number;
+}
+
+export interface ConsumptionMember {
+  member_id: number;
+  name: string;
+  tenant_id: number | null;
+  tenant_name: string;
+  cost: number;
+}
+
+export interface Consumption {
+  start: string;
+  end: string;
+  timezone: string;
+  total: number;
+  comparison: ConsumptionComparison | null;
+  by_day: TrendPoint[];
+  by_company: ConsumptionCompany[];
+  by_member: ConsumptionMember[];
+}
+
 export interface AuditRow {
   id: number;
   created_at: string;

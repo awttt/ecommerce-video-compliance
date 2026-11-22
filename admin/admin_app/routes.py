@@ -1,7 +1,7 @@
 import csv
 import io
 import re
-from datetime import timedelta
+from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
@@ -58,6 +58,7 @@ from admin_app.service import (
     audit,
     approve_keyword,
     bind_device,
+    consumption_report,
     create_tenant,
     create_member,
     delete_keyword,
@@ -483,6 +484,17 @@ def dashboard(
         "recent": [audit_dict(db, row) for row in recent],
         "pending": [submission_dict(db, row) for row in pending_rows],
     }
+
+
+@router.get("/overview/consumption")
+def overview_consumption(
+    start: date | None = None,
+    end: date | None = None,
+    tenant_id: int | None = None,
+    user: Member = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    return consumption_report(db, user, start, end, tenant_id)
 
 
 @router.get("/tenants")
