@@ -54,20 +54,10 @@ function payUnit(currency: string): string {
   return currency;
 }
 
-function quote(amount: number, info: RechargeInfo): { pay: number; credit: number; bonus: number } {
+function quote(amount: number, info: RechargeInfo): { pay: number; credit: number } {
   const multiplier = info.balance_recharge_multiplier > 0 ? info.balance_recharge_multiplier : 1;
-  const tier = [...info.bonus_tiers]
-    .filter((item) => amount + 1e-9 >= item.min_amount)
-    .sort((left, right) => right.min_amount - left.min_amount)[0];
-  const percent = tier?.bonus_percent ?? 0;
-  const base = round2(amount * multiplier);
-  if (info.bonus_mode === "discount" && percent > 0 && percent < 100) {
-    const pay = round2(amount * (1 - percent / 100));
-    return { pay, credit: round2(pay * multiplier), bonus: round2(base - pay * multiplier) };
-  }
-  const bonus = percent > 0 ? round2(base * percent / 100) : 0;
   const fee = info.recharge_fee_rate > 0 ? amount * info.recharge_fee_rate / 100 : 0;
-  return { pay: round2(amount + fee), credit: round2(base + bonus), bonus };
+  return { pay: round2(amount + fee), credit: round2(amount * multiplier) };
 }
 
 function statusTag(status: string) {
@@ -94,7 +84,6 @@ interface PayTarget {
   url: string;
   payAmount: number;
   amount: number;
-  bonus: number;
   currency: string;
   methodName: string;
 }
@@ -194,7 +183,6 @@ export function Recharge() {
   const max = info && method ? upperBound(info, method) : 0;
   const estimate = info ? quote(amount, info) : null;
   const unit = payUnit(method?.currency ?? "");
-  const tiers = info?.bonus_tiers ?? [];
   const limitText = min > 0 && max > 0
     ? `${min} – ${max} ${unit}`
     : min > 0
@@ -217,7 +205,6 @@ export function Recharge() {
           url: next.pay_url,
           payAmount: next.pay_amount,
           amount: next.amount,
-          bonus: next.bonus_amount,
           currency: next.currency || method.currency,
           methodName: method.display_name,
         });
@@ -258,7 +245,6 @@ export function Recharge() {
     { title: "时间", dataIndex: "created_at", width: 116, render: (value: string) => stamp(value) },
     { title: "支付", dataIndex: "pay_amount", width: 100, align: "right", className: "col-num", render: (value: number) => value.toFixed(2) },
     { title: "到账", dataIndex: "amount", width: 100, align: "right", className: "col-num", render: (value: number) => value.toFixed(2) },
-    { title: "赠送", dataIndex: "bonus_amount", width: 90, align: "right", className: "col-num", render: (value: number) => value.toFixed(2) },
     {
       title: "方式",
       dataIndex: "payment_type",
@@ -326,10 +312,10 @@ export function Recharge() {
         info.message
           ? <Alert className="recharge-alert" type="warning" showIcon message={info.message} />
           : null
-      ) : info.message || info.bonus_notice ? (
+      ) : info.message ? (
         <div className="recharge-notice">
           <InfoCircleOutlined />
-          <span>{[info.message, info.bonus_notice].filter(Boolean).join(" · ")}</span>
+          <span>{info.message}</span>
         </div>
       ) : null}
 
@@ -415,10 +401,6 @@ export function Recharge() {
                       <span>到账额度</span>
                       <strong>{estimate.credit.toFixed(2)}</strong>
                     </div>
-                    <div>
-                      <span>{info.bonus_mode === "discount" ? "已优惠" : "赠送"}</span>
-                      <strong>{estimate.bonus > 0 ? `+${estimate.bonus.toFixed(2)}` : "—"}</strong>
-                    </div>
                   </div>
                 </div>
               ) : null}
@@ -457,10 +439,6 @@ export function Recharge() {
                   <span>到账额度</span>
                   <strong>{current.amount.toFixed(2)}</strong>
                 </div>
-                <div>
-                  <span>赠送</span>
-                  <strong>{current.bonus_amount > 0 ? `+${current.bonus_amount.toFixed(2)}` : "—"}</strong>
-                </div>
               </div>
 
               {current.message ? <Alert type="warning" showIcon message={current.message} /> : null}
@@ -494,24 +472,6 @@ export function Recharge() {
         </div>
 
         <aside className="recharge-side">
-          <Card className="recharge-card side-card" title="优惠活动">
-            {tiers.length > 0 ? (
-              <>
-                <p className="side-lead">{info.bonus_mode === "discount" ? "满额立减" : "充值赠送"}</p>
-                <ul className="tier-list">
-                  {tiers.map((tier) => (
-                    <li key={tier.min_amount}>
-                      <span>满 {tier.min_amount} {unit}</span>
-                      <strong>{info.bonus_mode === "discount" ? "减" : "赠"} {tier.bonus_percent}%</strong>
-                    </li>
-                  ))}
-                </ul>
-              </>
-            ) : (
-              <p className="side-empty">当前没有充值优惠</p>
-            )}
-          </Card>
-
           <Card className="recharge-card side-card" title="支付说明">
             <dl className="info-list">
               <div><dt>支付币种</dt><dd>{unit}</dd></div>

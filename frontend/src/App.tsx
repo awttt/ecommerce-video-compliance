@@ -16,7 +16,6 @@ import {
   Button,
   Card,
   Checkbox,
-  Col,
   Drawer,
   Form,
   Input,
@@ -24,7 +23,6 @@ import {
   Modal,
   Popconfirm,
   Progress,
-  Row,
   Segmented,
   Select,
   Slider,
@@ -38,9 +36,11 @@ import {
   App as AntApp,
 } from "antd";
 import { useEffect, useRef, useState } from "react";
-import { SharedRulesPanel } from "./SharedRules";
+import { RuleSubmissionStatus } from "./SharedRules";
 import {
   cancelJob,
+  fetchCompanyRules,
+  submitCompanyRules,
   clearQueue,
   createJobs,
   deleteAllJobs,
@@ -80,6 +80,7 @@ import { batchElapsed, jobElapsed } from "./elapsed";
 import { FindingsTable, type FindingsTableHandle } from "./FindingsTable";
 import { findingKey } from "./findingsView";
 import { draftsFromPhrases, groupKey, phrasesFromDrafts, RULE_GROUPS } from "./ruleForm";
+import { diffCompanyRules } from "./ruleDiff";
 import { CATEGORY_COLOR, TERMINAL, type CutSpan, type Finding, type Job, type Settings } from "./types";
 import { VideoPane, type PlayerControls } from "./VideoPane";
 
@@ -105,7 +106,6 @@ const SHOW_JSON_EXPORT = false;
 const SHOW_CUT_BUTTON = false;
 
 const ASR_ENGINE_OPTIONS = [
-  { value: "16k_zh", label: "通用引擎 16k_zh（免费资源包）" },
   { value: "16k_zh_en_2.0", label: "大模型 2.0（16k_zh_en_2.0）" },
 ];
 
@@ -268,6 +268,8 @@ export function Shell() {
   uploadingRef.current = uploading;
   scanningRef.current = scanning;
   const [rulesOpen, setRulesOpen] = useState(false);
+  const [ruleBaselineReady, setRuleBaselineReady] = useState(false);
+  const ruleSubmitLock = useRef(false);
   const [mcpOpen, setMcpOpen] = useState(false);
   const [testOpen, setTestOpen] = useState(false);
   const [mcpSaving, setMcpSaving] = useState(false);
@@ -276,6 +278,9 @@ export function Shell() {
   const [phraseDrafts, setPhraseDrafts] = useState<Record<string, string>>({});
   const [ignoreText, setIgnoreText] = useState("");
   const [ruleNote, setRuleNote] = useState("");
+  const [ruleSyncing, setRuleSyncing] = useState(false);
+  const [ruleSubmitting, setRuleSubmitting] = useState(false);
+  const [ruleReload, setRuleReload] = useState(0);
   const [source, setSource] = useState<"media" | "output">("media");
   const [activeKey, setActiveKey] = useState("");
   const findingsRef = useRef<FindingsTableHandle>(null);
@@ -403,7 +408,7 @@ export function Shell() {
       timeout_sec: settings.timeout_sec,
       asr_enabled: settings.asr_enabled,
       model: settings.model,
-      asr_engine: settings.asr_engine,
+      asr_engine: settings.asr_engine === "16k_zh_en_2.0" ? settings.asr_engine : "16k_zh_en_2.0",
     });
   }, [form, settings]);
 
@@ -414,10 +419,144 @@ export function Shell() {
     setRuleNote(rules.note);
   }
 
+  function draftRules() {
+    const parsed = phrasesFromDrafts(phraseDrafts);
+    if (parsed.error) return { error: parsed.error, body: null };
+    const ignore = ignoreText
+      .split(/\n+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (ruleCategories.length === 0 && parsed.phrases.length === 0) {
+      return { error: "至少启用一个类别，或添加一条额外命中词", body: null };
+    }
+    return {
+      error: "",
+      body: {
+        categories: ruleCategories,
+        phrases: parsed.phrases.map((item) => ({
+          text: item.text,
+          category: item.category,
+          source: item.source === "画面" ? "画面" : "口播",
+        })),
+        ignore_phrases: ignore,
+        note: ruleNote.trim(),
+      },
+    };
+  }
+
+  async function syncApprovedRules(applyForm: boolean) {
+    const doc = await fetchCompanyRules();
+    const saved = await saveSettings({
+      rules: {
+        categories: doc.categories,
+        extra_phrases: doc.phrases.map((item) => ({
+          text: item.text,
+          category: item.category,
+          source: item.source === "画面" ? "画面" : "口播",
+        })),
+        ignore_phrases: doc.ignore_phrases.map((item) => (typeof item === "string" ? item : item.text)),
+        note: doc.note,
+      },
+    });
+    setSettings(saved);
+    if (applyForm && !ruleSubmitLock.current) applyRuleForm(saved.rules);
+    return doc;
+  }
+
+  async function refreshApprovedRules() {
+    setRuleSyncing(true);
+    try {
+      await syncApprovedRules(true);
+      setRuleBaselineReady(true);
+      message.success("已同步审核通过的规则，之后的识别会用这套");
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "同步失败");
+    } finally {
+      setRuleSyncing(false);
+    }
+  }
+
+  async function submitRulesForReview() {
+    const parsed = draftRules();
+    if (!parsed.body) {
+      message.error(parsed.error);
+      return;
+    }
+    const draft = parsed.body;
+    ruleSubmitLock.current = true;
+    setRuleSubmitting(true);
+    try {
+      const current = await syncApprovedRules(false);
+      const changes = diffCompanyRules(current, draft);
+      if (changes.length === 0) {
+        ruleSubmitLock.current = false;
+        message.info("没有改动");
+        return;
+      }
+      const preview = changes.slice(0, 20).map((item) => item.summary);
+      const rest = changes.length > 20 ? `\n还有 ${changes.length - 20} 条` : "";
+      Modal.confirm({
+        title: `提交 ${changes.length} 条改动`,
+        content: <div style={{ whiteSpace: "pre-wrap" }}>{`${preview.join("\n")}${rest}`}</div>,
+        okText: "提交",
+        cancelText: "取消",
+        afterClose: () => {
+          ruleSubmitLock.current = false;
+        },
+        onOk: async () => {
+          try {
+            const result = await submitCompanyRules(
+              changes.map((item) => ({
+                op: item.op,
+                target: item.target,
+                item_id: item.item_id,
+                before: item.before,
+                after: item.after,
+              })),
+            );
+            setRuleReload((value) => value + 1);
+            message.success(`已提交 ${result.submitted} 条。通过一条才生效一条。下次打开规则，或点刷新，会同步到本机`);
+          } catch (error) {
+            message.error(error instanceof Error ? error.message : "提交失败");
+            throw error;
+          }
+        },
+      });
+    } catch (error) {
+      ruleSubmitLock.current = false;
+      message.error(error instanceof Error ? error.message : "提交失败");
+    } finally {
+      setRuleSubmitting(false);
+    }
+  }
+
   useEffect(() => {
     if (!settings?.rules || rulesOpen) return;
     applyRuleForm(settings.rules);
   }, [settings, rulesOpen]);
+
+  useEffect(() => {
+    if (!rulesOpen) {
+      setRuleBaselineReady(false);
+      return;
+    }
+    let cancelled = false;
+    setRuleSyncing(true);
+    setRuleBaselineReady(false);
+    syncApprovedRules(true)
+      .then(() => {
+        if (!cancelled) setRuleBaselineReady(true);
+      })
+      .catch((error) => {
+        if (!cancelled) message.error(error instanceof Error ? error.message : "同步失败");
+      })
+      .finally(() => {
+        if (!cancelled) setRuleSyncing(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [rulesOpen]);
 
   useEffect(() => {
     if (!mcpOpen) return;
@@ -846,6 +985,7 @@ export function Shell() {
       />
     ) : (
       <LoginPage
+        rememberedEmail={settings.remembered_email || ""}
         onLoggedIn={(next, notice) => {
           setSettings(next);
           setKeyNotice(accountKeyNotice(notice || ""));
@@ -889,9 +1029,12 @@ export function Shell() {
         </nav>
       </header>
       <div className="page">
-        <Row gutter={[16, 16]}>
-          <Col xs={24} lg={8}>
-            <Card title="上传视频">
+        <Card className="workspace">
+          <div className="workspace-top">
+            <section className="workspace-upload">
+              <div className="workspace-heading">
+                <span className="workspace-title">上传视频</span>
+              </div>
               {settings.mock_mode ? (
                 <Alert type="warning" showIcon style={{ marginBottom: 12 }} message="模拟识别已打开，不会请求画面模型和大语言模型，也不会领取口播凭证。" />
               ) : null}
@@ -1061,13 +1204,13 @@ export function Shell() {
               <Paragraph className="hint">
                 多个视频排队识别，同一时间只处理一个。只报告画面里看得见的文字和口播里明确说出的内容，不根据外观推测。结束后会删除中间图片和临时音频。
               </Paragraph>
-            </Card>
-          </Col>
-          <Col xs={24} lg={16}>
-            <Card
-              title={job ? job.filename : "检测结果"}
-              extra={job ? statusTag(job.status) : null}
-            >
+            </section>
+            <section className="workspace-preview">
+              <div className="workspace-preview-inner">
+                <div className="workspace-heading">
+                  <span className="workspace-title">{job ? job.filename : "预览"}</span>
+                  {job ? statusTag(job.status) : null}
+                </div>
               {job ? (
                 <>
                   <Steps
@@ -1129,7 +1272,7 @@ export function Shell() {
                   ) : job.asr_error && job.status !== "failed" ? (
                     <Alert style={{ marginTop: 12 }} type="warning" showIcon message={job.asr_error} />
                   ) : null}
-                  <div style={{ marginTop: 12 }}>
+                  <div className="preview-main">
                     {job.output_ready ? (
                       <Segmented
                         style={{ marginBottom: 8 }}
@@ -1141,6 +1284,7 @@ export function Shell() {
                         ]}
                       />
                     ) : null}
+                    <div className="preview-stage">
                     <VideoPane
                       mediaUrl={mediaUrl}
                       mimeType={mediaMime}
@@ -1154,6 +1298,7 @@ export function Shell() {
                         player.seek(sec, { play: false });
                       }}
                     />
+                    </div>
                     {job.preview_hint && !previewBlocked ? <div className="hint">{job.preview_hint}</div> : null}
                     {editorOn && coversDuration(cuts, job.duration_sec) ? (
                       <Alert
@@ -1227,14 +1372,6 @@ export function Shell() {
                         ) : null}
                       </div>
                     ) : null}
-                    <FindingsTable
-                      ref={findingsRef}
-                      jobId={job.id}
-                      findings={job.findings}
-                      running={running}
-                      activeKey={activeKey}
-                      onOpen={seekTo}
-                    />
                     <div className="toolbar">
                       {SHOW_JSON_EXPORT ? (
                         <Button
@@ -1399,13 +1536,31 @@ export function Shell() {
                   <div className="empty-state">
                     <span className="empty-mark"><BrandMark /></span>
                     <span className="empty-title">还没有检测结果</span>
-                    <span className="empty-sub">上传视频后，这里会显示进度、时间轴和命中列表</span>
+                    <span className="empty-sub">上传视频后，这里会显示进度和时间轴</span>
                   </div>
                 </div>
               )}
-            </Card>
-          </Col>
-        </Row>
+              </div>
+            </section>
+          </div>
+          <section className="workspace-results">
+            <div className="workspace-heading">
+              <span className="workspace-title">识别结果</span>
+            </div>
+            {job ? (
+              <FindingsTable
+                ref={findingsRef}
+                jobId={job.id}
+                findings={job.findings}
+                running={running}
+                activeKey={activeKey}
+                onOpen={seekTo}
+              />
+            ) : (
+              <div className="findings-empty">还没有识别结果。开始识别后，命中会列在这里。</div>
+            )}
+          </section>
+        </Card>
       </div>
 
       <Drawer
@@ -1482,7 +1637,7 @@ export function Shell() {
           <Form.Item label="口播检测" name="asr_enabled" valuePropName="checked" extra="关闭后只检测画面，不再提取音频。口播凭证在登录后自动获取，不保存在本机。">
             <Switch checkedChildren="开" unCheckedChildren="关" />
           </Form.Item>
-          <Form.Item label="录音识别引擎" name="asr_engine" rules={[{ required: true }]} extra="免费的 10 小时包只抵扣通用引擎。大模型 2.0 需要对应的资源包。">
+          <Form.Item label="录音识别引擎" name="asr_engine" rules={[{ required: true }]} extra="口播使用腾讯云录音文件识别大模型 2.0。">
             <Select options={ASR_ENGINE_OPTIONS} />
           </Form.Item>
         </Form>
@@ -1495,44 +1650,23 @@ export function Shell() {
         onClose={() => setRulesOpen(false)}
         width={560}
         footer={
-          <Button
-            type="primary"
-            onClick={async () => {
-              const parsed = phrasesFromDrafts(phraseDrafts);
-              if (parsed.error) {
-                message.error(parsed.error);
-                return;
-              }
-              if (ruleCategories.length === 0 && parsed.phrases.length === 0) {
-                message.error("至少启用一个类别，或添加一条额外命中词");
-                return;
-              }
-              try {
-                const saved = await saveSettings({
-                  rules: {
-                    categories: ruleCategories,
-                    extra_phrases: parsed.phrases,
-                    ignore_phrases: ignoreText
-                      .split(/\n+/)
-                      .map((item) => item.trim())
-                      .filter(Boolean),
-                    note: ruleNote.trim(),
-                  },
-                });
-                setSettings(saved);
-                applyRuleForm(saved.rules);
-                message.success("审核规则已保存，之后的识别会使用这套规则");
-              } catch (error) {
-                message.error(error instanceof Error ? error.message : "保存失败");
-              }
-            }}
-          >
-            保存规则
-          </Button>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <Button onClick={() => void refreshApprovedRules()} loading={ruleSyncing}>
+              刷新
+            </Button>
+            <Button
+              type="primary"
+              onClick={() => void submitRulesForReview()}
+              loading={ruleSubmitting}
+              disabled={!ruleBaselineReady || ruleSyncing}
+            >
+              提交
+            </Button>
+          </div>
         }
       >
         <Paragraph type="secondary">
-          规则只保存在本机。口播词按原话匹配，X 表示数字。画面词只写进画面提示，必须在这一帧里看得见。短词只要原话里连续出现就会命中。忽略词和原文完全一致，或原文只是忽略词里的一段时不报告。补充说明不能放宽「禁止推测」。夸大宣传只看口播转写，原话里出现绝对化用语或疗效承诺才标，不判断真假。
+          打开时会先同步公司已经通过的规则。提交前也会再同步一次，再把新增、修改、删除拆成一条一条送审。通过一条才改一条。通过之前，本机识别仍用上次同步下来的规则。口播词按原话匹配，X 表示数字。画面词只写进画面提示，必须在这一帧里看得见。短词只要原话里连续出现就会命中。忽略词和原文完全一致，或原文只是忽略词里的一段时不报告。补充说明不能放宽「禁止推测」。夸大宣传只看口播转写，原话里出现绝对化用语或疗效承诺才标，不判断真假。
         </Paragraph>
         <div style={{ marginBottom: 12 }}>
           <Text>启用类别</Text>
@@ -1580,7 +1714,7 @@ export function Shell() {
             onChange={(event) => setRuleNote(event.target.value)}
           />
         </div>
-        <SharedRulesPanel />
+        <RuleSubmissionStatus open={rulesOpen} reloadToken={ruleReload} />
       </Drawer>
 
       <Drawer title="测试" open={testOpen} onClose={() => setTestOpen(false)} width={460}>

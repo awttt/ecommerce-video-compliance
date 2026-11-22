@@ -4,12 +4,9 @@ from admin_app.models import (
     AuditLog,
     Device,
     Invite,
-    KeywordEntry,
-    KeywordSubmission,
     Member,
     QuotaAllocation,
     Tenant,
-    TenantRules,
 )
 from admin_app.money import yuan
 from admin_app.permissions import PERMISSIONS, ROLE_LABEL
@@ -22,7 +19,6 @@ ROLE_STATUS = {
     "invited": "待接受",
 }
 TENANT_STATUS = {"active": "在营", "disabled": "已停用"}
-KEYWORD_STATUS = {"pending": "待审", "approved": "已通过", "rejected": "已驳回"}
 
 
 def member_brief(db: Session, member: Member | None) -> dict | None:
@@ -159,54 +155,6 @@ def quota_dict(db: Session, row: QuotaAllocation) -> dict:
         "status_label": labels.get(row.status, row.status),
         "summary": row.summary,
         "created_at": iso(row.created_at),
-    }
-
-
-def submission_dict(db: Session, row: KeywordSubmission) -> dict:
-    author = db.get(Member, row.member_id)
-    tenant = db.get(Tenant, row.tenant_id) if row.tenant_id else None
-    return {
-        "id": row.id,
-        "text": row.text,
-        "category": row.category,
-        "source": row.source,
-        "scope": row.scope,
-        "scope_label": "全局" if row.scope == "global" else "公司",
-        "status": row.status,
-        "status_label": KEYWORD_STATUS.get(row.status, row.status),
-        "member_id": row.member_id,
-        "member_name": author.name if author else "",
-        "tenant_id": row.tenant_id,
-        "tenant_name": tenant.name if tenant else "全局",
-        "remark": row.remark,
-        "entry_id": row.entry_id,
-        "created_at": iso(row.created_at),
-        "reviewed_at": iso(row.reviewed_at),
-    }
-
-
-def entry_dict(db: Session, row: KeywordEntry) -> dict:
-    tenant = db.get(Tenant, row.tenant_id) if row.tenant_id else None
-    return {
-        "id": row.id,
-        "text": row.text,
-        "category": row.category,
-        "source": row.source,
-        "scope": "global" if row.tenant_id is None else "tenant",
-        "scope_label": "全局" if row.tenant_id is None else "公司",
-        "tenant_name": tenant.name if tenant else "全局",
-        "version": row.version,
-        "deleted": row.deleted_at is not None,
-    }
-
-
-def rules_dict(row: TenantRules | None) -> dict:
-    return {
-        "categories": list(row.categories) if row else ["价格", "规格", "品牌", "夸大宣传"],
-        "ignore_phrases": list(row.ignore_phrases) if row else [],
-        "note": row.note if row else "",
-        "version": row.version if row else 0,
-        "updated_at": iso(row.updated_at) if row else None,
     }
 
 

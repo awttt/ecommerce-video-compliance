@@ -77,6 +77,18 @@ class SharedRuleSubmit(BaseModel):
     description: str = ""
 
 
+class RuleChangeBody(BaseModel):
+    op: str = ""
+    target: str = ""
+    item_id: str = ""
+    before: dict | None = None
+    after: dict | None = None
+
+
+class CompanyRuleSubmit(BaseModel):
+    changes: list[RuleChangeBody] = Field(default_factory=list)
+
+
 _MEDIA_TYPES = {
     ".mp4": "video/mp4",
     ".m4v": "video/mp4",
@@ -188,6 +200,29 @@ async def shared_rules_submit(body: SharedRuleSubmit) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+@router.get("/company-rules")
+async def company_rules_effective() -> dict:
+    """已通过、正在生效的公司规则。刷新时写入本机设置。"""
+    data = _shared_proxy("GET", "/v1/company-rules")
+    return data if isinstance(data, dict) else {}
+
+
+@router.get("/company-rules/submissions")
+async def company_rules_mine() -> list:
+    data = _shared_proxy("GET", "/v1/company-rules/submissions/mine")
+    return data if isinstance(data, list) else []
+
+
+@router.post("/company-rules/submissions")
+async def company_rules_submit(body: CompanyRuleSubmit) -> dict:
+    data = _shared_proxy(
+        "POST",
+        "/v1/company-rules/submissions",
+        {"changes": [item.model_dump() for item in body.changes]},
+    )
+    return data if isinstance(data, dict) else {}
+
+
 @router.get("/console")
 async def console_info(request: Request) -> dict:
     """控制台在另一个本机端口，界面据此决定是否显示入口。"""
@@ -197,7 +232,7 @@ async def console_info(request: Request) -> dict:
 
 @router.get("/settings", response_model=SettingPublic)
 async def read_settings() -> SettingPublic:
-    return get_manager().public_settings()
+    return await get_manager().prepare_settings()
 
 
 @router.put("/settings", response_model=SettingPublic)

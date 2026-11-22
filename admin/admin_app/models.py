@@ -105,51 +105,6 @@ class SessionToken(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
 
-class KeywordEntry(Base):
-    """审核词库属于审核工具，随本机库保存。tenant_id 只做业务关联，不再建外键。"""
-
-    __tablename__ = "keyword_entries"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    tenant_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    text: Mapped[str] = mapped_column(String(40))
-    category: Mapped[str] = mapped_column(String(16))
-    source: Mapped[str] = mapped_column(String(8))
-    version: Mapped[int] = mapped_column(Integer, default=1)
-    deleted_at: Mapped[datetime | None] = mapped_column(nullable=True)
-    created_at: Mapped[datetime] = mapped_column(default=utcnow)
-
-
-class KeywordSubmission(Base):
-    __tablename__ = "keyword_submissions"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    # 公司、成员在云端库，这里只存编号，不能跨库建外键。
-    tenant_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    member_id: Mapped[int] = mapped_column(Integer)
-    text: Mapped[str] = mapped_column(String(40))
-    category: Mapped[str] = mapped_column(String(16))
-    source: Mapped[str] = mapped_column(String(8))
-    scope: Mapped[str] = mapped_column(String(16))
-    status: Mapped[str] = mapped_column(String(16), default="pending")
-    reviewer_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    reviewed_at: Mapped[datetime | None] = mapped_column(nullable=True)
-    remark: Mapped[str] = mapped_column(String(200), default="")
-    entry_id: Mapped[int | None] = mapped_column(ForeignKey("keyword_entries.id"), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(default=utcnow)
-
-
-class TenantRules(Base):
-    __tablename__ = "tenant_rules"
-
-    tenant_id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    categories: Mapped[list] = mapped_column(JSON, default=list)
-    ignore_phrases: Mapped[list] = mapped_column(JSON, default=list)
-    note: Mapped[str] = mapped_column(Text, default="")
-    version: Mapped[int] = mapped_column(Integer, default=1)
-    updated_at: Mapped[datetime] = mapped_column(default=utcnow)
-
-
 class QuotaAllocation(Base):
     __tablename__ = "quota_allocations"
 
@@ -180,6 +135,43 @@ class UsageSnapshot(Base):
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cost_cents: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class CompanyRule(Base):
+    """一家公司当前生效的审核规则。一行一家公司，默认词也写在这里。"""
+
+    __tablename__ = "company_rules"
+
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), primary_key=True)
+    categories: Mapped[list] = mapped_column(JSON, default=list)
+    phrases: Mapped[list] = mapped_column(JSON, default=list)
+    ignore_phrases: Mapped[list] = mapped_column(JSON, default=list)
+    note: Mapped[str] = mapped_column(Text, default="")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    updated_by: Mapped[int | None] = mapped_column(ForeignKey("tenant_members.id"), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class CompanyRuleSubmission(Base):
+    """员工提交的一条规则改动。通过后才改 company_rules 里对应的那一条。"""
+
+    __tablename__ = "company_rule_submissions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"))
+    member_id: Mapped[int] = mapped_column(ForeignKey("tenant_members.id"))
+    op: Mapped[str] = mapped_column(String(16))
+    target: Mapped[str] = mapped_column(String(16))
+    item_id: Mapped[str] = mapped_column(String(16), default="")
+    before: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    after: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    summary: Mapped[str] = mapped_column(String(200), default="")
+    base_version: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    reviewer_id: Mapped[int | None] = mapped_column(ForeignKey("tenant_members.id"), nullable=True)
+    review_comment: Mapped[str] = mapped_column(String(200), default="")
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    reviewed_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
 
 class SharedRule(Base):

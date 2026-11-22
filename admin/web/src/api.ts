@@ -9,19 +9,71 @@ export class ApiError extends Error {
 
 const ACCESS = "evc-admin-access";
 const REFRESH = "evc-admin-refresh";
+const EMAIL = "evc-admin-email";
+const LOGIN_AT = "evc-admin-login-at";
+const SESSION_EXPIRED = "evc-admin-session-expired";
+const SESSION_MS = 7 * 24 * 60 * 60 * 1000;
 
-export function accessToken(): string {
-  return sessionStorage.getItem(ACCESS) ?? "";
+export function rememberedEmail(): string {
+  return (localStorage.getItem(EMAIL) ?? "").trim();
 }
 
-export function saveSession(access: string, refresh: string) {
-  sessionStorage.setItem(ACCESS, access);
+export function rememberEmail(email: string) {
+  const cleaned = email.trim();
+  if (cleaned) localStorage.setItem(EMAIL, cleaned);
+}
+
+export function sessionClockExists(): boolean {
+  const at = Number(localStorage.getItem(LOGIN_AT) || "");
+  return Number.isFinite(at) && at > 0;
+}
+
+export function sessionFresh(): boolean {
+  if (!sessionClockExists()) return false;
+  return Date.now() - Number(localStorage.getItem(LOGIN_AT)) < SESSION_MS;
+}
+
+export function accessToken(): string {
+  if (!sessionFresh()) return "";
+  return localStorage.getItem(ACCESS) ?? "";
+}
+
+export function saveSession(access: string, refresh: string, email = "", fresh = false) {
+  localStorage.setItem(ACCESS, access);
   localStorage.setItem(REFRESH, refresh);
+  sessionStorage.removeItem(ACCESS);
+  rememberEmail(email);
+  if (fresh || !sessionClockExists()) localStorage.setItem(LOGIN_AT, String(Date.now()));
 }
 
 export function clearSession() {
   sessionStorage.removeItem(ACCESS);
+  localStorage.removeItem(ACCESS);
   localStorage.removeItem(REFRESH);
+  localStorage.removeItem(LOGIN_AT);
+}
+
+export function expireSession() {
+  sessionStorage.setItem(SESSION_EXPIRED, "1");
+  clearSession();
+}
+
+export function takeExpiredMark(): boolean {
+  const expired = sessionStorage.getItem(SESSION_EXPIRED) === "1";
+  sessionStorage.removeItem(SESSION_EXPIRED);
+  return expired;
+}
+
+export async function restoreSession(): Promise<void> {
+  const refresh = localStorage.getItem(REFRESH);
+  if (refresh && !sessionClockExists()) localStorage.setItem(LOGIN_AT, String(Date.now()));
+  if (sessionClockExists() && !sessionFresh()) {
+    expireSession();
+    return;
+  }
+  if (!sessionFresh()) return;
+  if (localStorage.getItem(ACCESS)) return;
+  await refreshOnce();
 }
 
 function detailOf(data: unknown): string {
@@ -57,6 +109,7 @@ function headersOf(init: RequestInit): Headers {
 let refreshing: Promise<boolean> | null = null;
 
 async function refreshOnce(): Promise<boolean> {
+  if (!sessionFresh()) return false;
   const refresh = localStorage.getItem(REFRESH);
   if (!refresh) return false;
   if (!refreshing) {

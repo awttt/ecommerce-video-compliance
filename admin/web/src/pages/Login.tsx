@@ -3,7 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { App as AntApp, Button, Card, Form, Input, Typography } from "antd";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ApiError, api, saveSession } from "../api";
+import { ApiError, api, rememberedEmail, saveSession } from "../api";
 import type { User } from "../types";
 
 type LoginResult = {
@@ -28,7 +28,7 @@ export function Login() {
       message.error("登录没有返回凭证");
       return;
     }
-    saveSession(data.access_token, data.refresh_token);
+    saveSession(data.access_token, data.refresh_token, data.user.email, true);
     client.clear();
     client.setQueryData(["me"], data.user);
     navigate("/");
@@ -71,9 +71,8 @@ export function Login() {
           </div>
           <div>
             <Typography.Title level={4} style={{ margin: 0 }}>
-              御镜管理后台
+              御镜视频审核系统
             </Typography.Title>
-            <Typography.Text type="secondary">使用客户端同一套账号登录</Typography.Text>
           </div>
         </div>
         {challenge ? (
@@ -108,7 +107,12 @@ export function Login() {
             </Button>
           </Form>
         ) : (
-          <Form layout="vertical" requiredMark={false} onFinish={(values) => login.mutate(values)}>
+          <Form
+            layout="vertical"
+            requiredMark={false}
+            initialValues={{ email: rememberedEmail() }}
+            onFinish={(values) => login.mutate(values)}
+          >
             <Form.Item name="email" label="邮箱" rules={[{ required: true, type: "email", message: "请填写邮箱" }]}>
               <Input prefix={<MailOutlined />} placeholder="name@company.com" autoComplete="username" />
             </Form.Item>

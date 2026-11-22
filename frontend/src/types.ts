@@ -97,6 +97,7 @@ export interface Settings {
   rules: DetectionRules;
   account_logged_in: boolean;
   account_email: string;
+  remembered_email: string;
   account_balance: number | null;
   account_frozen_balance: number | null;
   account_today_cost: number | null;

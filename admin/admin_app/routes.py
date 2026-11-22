@@ -1,7 +1,7 @@
 import csv
 import io
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
@@ -17,31 +17,40 @@ from admin_app.models import (
     AuditLog,
     Device,
     Invite,
-    KeywordSubmission,
     Member,
     QuotaAllocation,
     SessionToken,
     Tenant,
-    TenantRules,
 )
 from admin_app.present import (
     audit_dict,
     device_dict,
-    entry_dict,
     invite_dict,
     member_brief,
     member_dict,
     quota_dict,
-    rules_dict,
-    submission_dict,
     tenant_dict,
 )
 from admin_app.relay import apply_credentials, relay_mode
 from admin_app.security import (
     decode_token,
+    hash_password,
     new_access_token,
     new_refresh_value,
     sha256_text,
+    verify_password,
+)
+from admin_app.company_rules import (
+    approve_company_rule,
+    document_dict,
+    list_own_submissions,
+    list_pending_submissions,
+    pending_company_rules,
+    read_company_rule,
+    reject_company_rule,
+    submission_dict as company_submission_dict,
+    submit_company_rule,
+    update_company_rule,
 )
 from admin_app.shared_rules import (
     approve_shared_rule,
@@ -56,25 +65,18 @@ from admin_app.service import (
     accept_invite,
     allocate,
     audit,
-    approve_keyword,
     bind_device,
     consumption_report,
     create_tenant,
     create_member,
-    delete_keyword,
     disable_member,
     enable_member,
     invite_member,
-    pending_count,
     reconcile,
-    reject_keyword,
     relay_report,
     resolve_tenant,
     revoke_device,
-    rules_payload,
-    save_rule_settings,
     set_tenant_status,
-    submit_keyword,
     sync_relay,
     trend,
     usage_rows,
@@ -106,6 +108,15 @@ class TotpBody(BaseModel):
 
 class RefreshBody(BaseModel):
     refresh_token: str
+
+
+class ProfileBody(BaseModel):
+    name: str = ""
+
+
+class PasswordBody(BaseModel):
+    old_password: str = ""
+    new_password: str = ""
 
 
 class TenantBody(BaseModel):
@@ -157,24 +168,35 @@ class SharedRuleBody(BaseModel):
     description: str = ""
 
 
-class KeywordBody(BaseModel):
-    text: str
-    category: str
+class PhraseBody(BaseModel):
+    text: str = ""
+    category: str = ""
     source: str = "口播"
-    scope: str = "tenant"
+
+
+class CompanyRuleBody(BaseModel):
     tenant_id: int | None = None
+    categories: list[str] = Field(default_factory=list)
+    phrases: list[PhraseBody] = Field(default_factory=list)
+    ignore_phrases: list[str] = Field(default_factory=list)
+    note: str = ""
+
+
+class RuleChangeBody(BaseModel):
+    op: str = ""
+    target: str = ""
+    item_id: str = ""
+    before: dict | None = None
+    after: dict | None = None
+
+
+class RuleChangesBody(BaseModel):
+    changes: list[RuleChangeBody] = Field(default_factory=list)
 
 
 class ReviewBody(BaseModel):
     remark: str = ""
     force: bool = False
-
-
-class RulesBody(BaseModel):
-    tenant_id: int | None = None
-    categories: list[str] = Field(default_factory=list)
-    ignore_phrases: list[str] = Field(default_factory=list)
-    note: str = ""
 
 
 class SettingsBody(BaseModel):
@@ -194,14 +216,14 @@ class BindBody(BaseModel):
     client_version: str = ""
 
 
-def _issue(db: Session, member: Member, response: Response) -> dict:
+def _issue(db: Session, member: Member, response: Response, session_expires_at: datetime | None = None) -> dict:
     access = new_access_token(member_id=member.id, role=member.role, tenant_id=member.tenant_id)
     refresh = new_refresh_value()
     db.add(
         SessionToken(
             member_id=member.id,
             token_hash=sha256_text(refresh),
-            expires_at=utcnow() + timedelta(days=14),
+            expires_at=session_expires_at or (utcnow() + timedelta(days=7)),
         )
     )
     db.commit()
@@ -214,7 +236,7 @@ def _issue(db: Session, member: Member, response: Response) -> dict:
         max_age=12 * 3600,
     )
     user = member_brief(db, member) or {}
-    user["pending_keywords"] = pending_count(db, member)
+    user["pending_rules"] = pending_company_rules(db, member)
     return {"access_token": access, "refresh_token": refresh, "token_type": "bearer", "user": user}
 
 
@@ -397,9 +419,10 @@ def refresh(body: RefreshBody, response: Response, db: Session = Depends(get_db)
     member = db.get(Member, stored.member_id)
     if member is None or member.status != "active":
         raise HTTPException(status_code=401, detail="请先登录")
+    deadline = stored.expires_at
     stored.revoked_at = utcnow()
     db.commit()
-    return _issue(db, member, response)
+    return _issue(db, member, response, deadline)
 
 
 @router.post("/auth/logout")
@@ -416,12 +439,123 @@ def logout(body: RefreshBody, response: Response, db: Session = Depends(get_db))
     return {"ok": True}
 
 
-@router.get("/auth/me")
-def me(user: Member = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+def _me_body(db: Session, user: Member) -> dict:
     body = member_brief(db, user) or {}
-    body["pending_keywords"] = pending_count(db, user)
+    body["pending_rules"] = pending_company_rules(db, user)
     body["relay_live"] = relay_mode() == "remote"
     return body
+
+
+@router.get("/auth/me")
+def me(user: Member = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    return _me_body(db, user)
+
+
+@router.put("/auth/profile")
+def update_profile(
+    body: ProfileBody,
+    request: Request,
+    user: Member = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """只改当前登录用户自己的姓名。姓名存在本机，不写到中转站的用户名。"""
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="请填写姓名")
+    if len(name) > 40:
+        raise HTTPException(status_code=400, detail="姓名最多 40 个字")
+    previous = user.name
+    if name != previous:
+        user.name = name
+        audit(
+            db,
+            user,
+            "profile.name",
+            user.email,
+            f"把姓名从「{previous}」改成「{name}」",
+            before={"name": previous},
+            after={"name": name},
+            ip=client_ip(request),
+        )
+        db.commit()
+    return _me_body(db, user)
+
+
+def _relay_password(db: Session, user: Member, old: str, new: str) -> bool:
+    """用当前密码核对中转站，改掉登录密码，再用新密码换令牌。返回是否换到了新令牌。"""
+    try:
+        data = auth_relay.login_password(user.email, old)
+    except auth_relay.RelayLoginError as exc:
+        if exc.message == "邮箱或密码不正确":
+            raise HTTPException(status_code=400, detail="当前密码不正确") from exc
+        raise _login_error(exc) from exc
+    token = ""
+    if not data.get("requires_2fa"):
+        token = str(data.get("access_token") or "").strip()
+    if not token:
+        token = str(user.relay_access_token or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="请重新登录后再修改密码")
+    try:
+        auth_relay.change_password(token, old, new)
+    except auth_relay.RelayLoginError as exc:
+        if exc.message in {"邮箱或密码不正确", "当前密码不正确"}:
+            raise HTTPException(status_code=400, detail="当前密码不正确") from exc
+        if exc.status in {401, 403}:
+            raise HTTPException(status_code=400, detail="请重新登录后再修改密码") from exc
+        raise _login_error(exc) from exc
+    try:
+        fresh = auth_relay.login_password(user.email, new)
+    except auth_relay.RelayLoginError:
+        fresh = {}
+    if fresh.get("access_token") and not fresh.get("requires_2fa"):
+        apply_credentials(
+            user,
+            {
+                "access_token": fresh.get("access_token"),
+                "refresh_token": fresh.get("refresh_token"),
+                "expires_in": fresh.get("expires_in"),
+            },
+        )
+        return True
+    return False
+
+
+@router.put("/auth/password")
+def update_password(
+    body: PasswordBody,
+    request: Request,
+    user: Member = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """改当前账号的登录密码。已接中转站时改的是登录密码，本机演示则改本地口令。"""
+    old = body.old_password
+    new = body.new_password
+    if not old:
+        raise HTTPException(status_code=400, detail="请填写当前密码")
+    if len(new) < 8 or len(new) > 72:
+        raise HTTPException(status_code=400, detail="密码需要 8 到 72 位")
+    if old == new:
+        raise HTTPException(status_code=400, detail="新密码不能和当前密码相同")
+    if relay_mode() == "remote":
+        refreshed = _relay_password(db, user, old, new)
+    elif user.password_hash and verify_password(old, user.password_hash):
+        refreshed = True
+    elif user.password_hash:
+        raise HTTPException(status_code=400, detail="当前密码不正确")
+    else:
+        raise HTTPException(status_code=400, detail="当前环境不能修改登录密码")
+    user.password_hash = hash_password(new)
+    audit(
+        db,
+        user,
+        "profile.password",
+        user.email,
+        "修改了登录密码",
+        ip=client_ip(request),
+    )
+    db.commit()
+    return {"ok": True, "relay_refreshed": refreshed}
 
 
 @router.get("/dashboard")
@@ -455,21 +589,6 @@ def dashboard(
             "overdraft_members": [own.name] if own and (own.balance_cents < 0 or own.overdraft) else [],
             "tenants": [],
         }
-    pending_query = db.query(KeywordSubmission).filter(KeywordSubmission.status == "pending")
-    if user.role == "tenant_admin":
-        pending_query = pending_query.filter(KeywordSubmission.tenant_id == user.tenant_id)
-    elif user.role == "member":
-        pending_query = pending_query.filter(KeywordSubmission.member_id == user.id)
-    pending_rows = pending_query.order_by(KeywordSubmission.created_at.desc()).limit(8).all()
-    custom_query = db.query(KeywordSubmission).filter(
-        KeywordSubmission.status == "pending",
-        KeywordSubmission.scope == "tenant",
-    )
-    if user.role == "tenant_admin":
-        custom_query = custom_query.filter(KeywordSubmission.tenant_id == user.tenant_id)
-    elif user.role == "member":
-        custom_query = custom_query.filter(KeywordSubmission.member_id == user.id)
-    custom_pending = custom_query.count()
     audits = db.query(AuditLog)
     if user.role == "tenant_admin":
         audits = audits.filter(AuditLog.tenant_id == user.tenant_id)
@@ -478,11 +597,8 @@ def dashboard(
     recent = audits.order_by(AuditLog.created_at.desc()).limit(6).all()
     return {
         "reconcile": report,
-        "pending_keywords": pending_count(db, user),
-        "custom_pending": custom_pending,
         "trend": trend(db, member_ids),
         "recent": [audit_dict(db, row) for row in recent],
-        "pending": [submission_dict(db, row) for row in pending_rows],
     }
 
 
@@ -759,133 +875,6 @@ def relay_sync(
     return sync_relay(db, user, tenant_id, ip=client_ip(request))
 
 
-@router.get("/rules")
-def get_rules(
-    response: Response,
-    since: int = 0,
-    tenant_id: int | None = None,
-    user: Member = Depends(current_user),
-    db: Session = Depends(get_db),
-) -> dict:
-    payload = rules_payload(db, user, since, tenant_id)
-    response.headers["ETag"] = f'"{payload["version"]}"'
-    return payload
-
-
-@router.get("/rules/settings")
-def get_rule_settings(
-    tenant_id: int | None = None,
-    user: Member = Depends(current_user),
-    db: Session = Depends(get_db),
-) -> dict:
-    target = user.tenant_id if user.role != "platform_admin" else tenant_id
-    if user.role != "platform_admin":
-        resolve_tenant(user, tenant_id)
-    if target is None:
-        from fastapi import HTTPException
-
-        raise HTTPException(status_code=400, detail="请选择公司")
-    return rules_dict(db.get(TenantRules, target))
-
-
-@router.put("/rules/settings")
-def put_rule_settings(
-    body: RulesBody,
-    request: Request,
-    user: Member = Depends(current_user),
-    db: Session = Depends(get_db),
-) -> dict:
-    row = save_rule_settings(
-        db,
-        user,
-        tenant_id=body.tenant_id,
-        categories=body.categories,
-        ignore_phrases=body.ignore_phrases,
-        note=body.note,
-        ip=client_ip(request),
-    )
-    return rules_dict(row)
-
-
-@router.get("/rules/submissions")
-def list_submissions(
-    status: str = "",
-    user: Member = Depends(current_user),
-    db: Session = Depends(get_db),
-) -> list:
-    query = db.query(KeywordSubmission)
-    if status:
-        query = query.filter(KeywordSubmission.status == status)
-    if user.role == "member":
-        query = query.filter(KeywordSubmission.member_id == user.id)
-    elif user.role == "tenant_admin":
-        query = query.filter(KeywordSubmission.tenant_id == user.tenant_id, KeywordSubmission.scope == "tenant")
-    rows = query.order_by(KeywordSubmission.id.desc()).limit(300).all()
-    return [submission_dict(db, row) for row in rows]
-
-
-@router.post("/rules/submissions")
-def post_submission(
-    body: KeywordBody,
-    request: Request,
-    user: Member = Depends(current_user),
-    db: Session = Depends(get_db),
-) -> dict:
-    row = submit_keyword(
-        db,
-        user,
-        text=body.text,
-        category=body.category,
-        source=body.source,
-        scope=body.scope,
-        tenant_id=body.tenant_id,
-        ip=client_ip(request),
-    )
-    return submission_dict(db, row)
-
-
-@router.post("/rules/submissions/{submission_id}/approve")
-def post_approve(
-    submission_id: int,
-    body: ReviewBody,
-    request: Request,
-    user: Member = Depends(current_user),
-    db: Session = Depends(get_db),
-) -> dict:
-    row = approve_keyword(
-        db,
-        user,
-        submission_id,
-        remark=body.remark,
-        force=body.force,
-        ip=client_ip(request),
-    )
-    return submission_dict(db, row)
-
-
-@router.post("/rules/submissions/{submission_id}/reject")
-def post_reject(
-    submission_id: int,
-    body: ReviewBody,
-    request: Request,
-    user: Member = Depends(current_user),
-    db: Session = Depends(get_db),
-) -> dict:
-    row = reject_keyword(db, user, submission_id, body.remark, ip=client_ip(request))
-    return submission_dict(db, row)
-
-
-@router.delete("/rules/entries/{entry_id}")
-def remove_entry(
-    entry_id: int,
-    request: Request,
-    user: Member = Depends(current_user),
-    db: Session = Depends(get_db),
-) -> dict:
-    row = delete_keyword(db, user, entry_id, ip=client_ip(request))
-    return entry_dict(db, row)
-
-
 def _shared_actor(request: Request, db: Session) -> Member:
     """管理后台令牌或工具端的中转站令牌都可以。令牌本身不写进错误信息。"""
     header = request.headers.get("authorization", "")
@@ -981,6 +970,93 @@ def post_shared_reject(
     actor = _shared_actor(request, db)
     row = reject_shared_rule(db, actor, rule_id, comment=body.remark, ip=client_ip(request))
     return shared_rule_dict(db, row)
+
+
+def _phrase_payload(body: CompanyRuleBody) -> list[dict]:
+    return [item.model_dump() for item in body.phrases]
+
+
+@router.get("/company-rules")
+def get_company_rules(
+    request: Request,
+    tenant_id: int | None = None,
+    db: Session = Depends(get_db),
+) -> dict:
+    actor = _shared_actor(request, db)
+    row = read_company_rule(db, actor, tenant_id)
+    return document_dict(row)
+
+
+@router.put("/company-rules")
+def put_company_rules(
+    body: CompanyRuleBody,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    actor = _shared_actor(request, db)
+    row = update_company_rule(
+        db,
+        actor,
+        tenant_id=body.tenant_id,
+        categories=body.categories,
+        phrases=_phrase_payload(body),
+        ignore_phrases=body.ignore_phrases,
+        note=body.note,
+        ip=client_ip(request),
+    )
+    return document_dict(row)
+
+
+@router.post("/company-rules/submissions")
+def post_company_rule_submission(
+    body: RuleChangesBody,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    actor = _shared_actor(request, db)
+    rows = submit_company_rule(
+        db,
+        actor,
+        [item.model_dump() for item in body.changes],
+        ip=client_ip(request),
+    )
+    return {"submitted": len(rows), "items": [company_submission_dict(db, row) for row in rows]}
+
+
+@router.get("/company-rules/submissions/mine")
+def get_own_company_rule_submissions(request: Request, db: Session = Depends(get_db)) -> list:
+    actor = _shared_actor(request, db)
+    return [company_submission_dict(db, row) for row in list_own_submissions(db, actor)]
+
+
+@router.get("/company-rules/submissions/pending")
+def get_pending_company_rule_submissions(request: Request, db: Session = Depends(get_db)) -> list:
+    actor = _shared_actor(request, db)
+    return [company_submission_dict(db, row) for row in list_pending_submissions(db, actor)]
+
+
+@router.post("/company-rules/submissions/{submission_id}/approve")
+def post_company_rule_approve(
+    submission_id: int,
+    body: ReviewBody,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    actor = _shared_actor(request, db)
+    row = approve_company_rule(db, actor, submission_id, comment=body.remark, ip=client_ip(request))
+    return company_submission_dict(db, row)
+
+
+@router.post("/company-rules/submissions/{submission_id}/reject")
+def post_company_rule_reject(
+    submission_id: int,
+    body: ReviewBody,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    actor = _shared_actor(request, db)
+    row = reject_company_rule(db, actor, submission_id, comment=body.remark, ip=client_ip(request))
+    return company_submission_dict(db, row)
 
 
 @router.get("/usage/summary")
@@ -1198,16 +1274,10 @@ def test_settings(user: Member = Depends(require("settings.write")), db: Session
 def search(q: str = "", user: Member = Depends(current_user), db: Session = Depends(get_db)) -> dict:
     text = q.strip()
     if not text:
-        return {"members": [], "keywords": []}
+        return {"members": []}
     member_query = db.query(Member).filter((Member.name.contains(text)) | (Member.email.contains(text)))
-    keyword_query = db.query(KeywordSubmission).filter(KeywordSubmission.text.contains(text))
     if user.role == "member":
         member_query = member_query.filter(Member.id == user.id)
-        keyword_query = keyword_query.filter(KeywordSubmission.member_id == user.id)
     elif user.role == "tenant_admin":
         member_query = member_query.filter(Member.tenant_id == user.tenant_id)
-        keyword_query = keyword_query.filter(KeywordSubmission.tenant_id == user.tenant_id)
-    return {
-        "members": [member_dict(db, row) for row in member_query.limit(8).all()],
-        "keywords": [submission_dict(db, row) for row in keyword_query.limit(8).all()],
-    }
+    return {"members": [member_dict(db, row) for row in member_query.limit(8).all()]}

@@ -7,17 +7,13 @@ from sqlalchemy.orm import Session
 
 from admin_app.config import get_settings
 from admin_app.models import (
-    AppMeta,
     AppSetting,
     AuditLog,
     Device,
-    KeywordEntry,
-    KeywordSubmission,
     Member,
     QuotaAllocation,
     RelayAccount,
     Tenant,
-    TenantRules,
     UsageSnapshot,
 )
 from admin_app.security import hash_password
@@ -48,7 +44,6 @@ def seed(db: Session) -> None:
             email_verify_ok=True,
         )
     )
-    db.add(AppMeta(key="rules_version", value="1"))
     jie = Tenant(
         name="锦程商贸",
         status="active",
@@ -136,76 +131,6 @@ def seed(db: Session) -> None:
     )
     db.add_all(
         [
-            TenantRules(tenant_id=jie.id, categories=["价格", "规格", "品牌", "夸大宣传"], ignore_phrases=[], note="", version=1),
-            TenantRules(tenant_id=you.id, categories=["价格", "规格", "品牌", "夸大宣传"], ignore_phrases=[], note="", version=1),
-            TenantRules(tenant_id=test.id, categories=["价格", "规格", "品牌", "夸大宣传"], ignore_phrases=[], note="", version=1),
-        ]
-    )
-    entry = KeywordEntry(tenant_id=jie.id, text="家居好物", category="品牌", source="画面", version=1)
-    db.add(entry)
-    db.flush()
-    db.add_all(
-        [
-            KeywordSubmission(
-                tenant_id=jie.id,
-                member_id=zhang.id,
-                text="厨房清洁神器",
-                category="价格",
-                source="口播",
-                scope="tenant",
-                status="pending",
-                created_at=now - timedelta(hours=3),
-            ),
-            KeywordSubmission(
-                tenant_id=jie.id,
-                member_id=li.id,
-                text="冬季保暖",
-                category="品牌",
-                source="画面",
-                scope="tenant",
-                status="pending",
-                created_at=now - timedelta(hours=4),
-            ),
-            KeywordSubmission(
-                tenant_id=None,
-                member_id=platform.id,
-                text="品质生活",
-                category="规格",
-                source="口播",
-                scope="global",
-                status="pending",
-                created_at=now - timedelta(days=1),
-            ),
-            KeywordSubmission(
-                tenant_id=jie.id,
-                member_id=wang.id,
-                text="家居好物",
-                category="品牌",
-                source="画面",
-                scope="tenant",
-                status="approved",
-                reviewer_id=li.id,
-                reviewed_at=now - timedelta(hours=6),
-                entry_id=entry.id,
-                created_at=now - timedelta(days=1, hours=2),
-            ),
-            KeywordSubmission(
-                tenant_id=jie.id,
-                member_id=zhang.id,
-                text="违规词示例",
-                category="夸大宣传",
-                source="口播",
-                scope="tenant",
-                status="rejected",
-                reviewer_id=li.id,
-                reviewed_at=now - timedelta(days=3),
-                remark="不符合品类规范",
-                created_at=now - timedelta(days=4),
-            ),
-        ]
-    )
-    db.add_all(
-        [
             QuotaAllocation(
                 tenant_id=jie.id,
                 member_id=zhang.id,
@@ -271,18 +196,6 @@ def seed(db: Session) -> None:
                 after={"amount": 500},
                 ip="192.168.1.22",
                 created_at=now - timedelta(minutes=2),
-            ),
-            AuditLog(
-                tenant_id=jie.id,
-                actor_id=li.id,
-                role="tenant_admin",
-                action="keyword.approve",
-                object="家居好物",
-                summary="通过关键词「家居好物」",
-                before={"status": "pending"},
-                after={"status": "approved"},
-                ip="192.168.1.22",
-                created_at=now - timedelta(minutes=18),
             ),
             AuditLog(
                 tenant_id=jie.id,

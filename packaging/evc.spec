@@ -130,8 +130,8 @@ if sys.platform == "darwin":
         icon=None,
         bundle_identifier="local.ecommerce.videocompliance",
         info_plist={
-            "CFBundleName": "御镜视频素材审核系统",
-            "CFBundleDisplayName": "御镜视频素材审核系统",
+            "CFBundleName": "御镜视频审核系统",
+            "CFBundleDisplayName": "御镜视频审核系统",
             "CFBundleShortVersionString": "0.1.0",
             "NSPrincipalClass": "NSApplication",
             "NSHighResolutionCapable": True,

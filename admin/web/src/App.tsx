@@ -8,11 +8,11 @@ import { Dashboard } from "./pages/Dashboard";
 import { Tenants } from "./pages/Tenants";
 import { Members } from "./pages/Members";
 import { Quota } from "./pages/Quota";
-import { Keywords } from "./pages/Keywords";
 import { SharedRules } from "./pages/SharedRules";
 import { Usage } from "./pages/Usage";
 import { Audit } from "./pages/Audit";
 import { Settings } from "./pages/Settings";
+import { Account } from "./pages/Account";
 import { Recharge } from "./pages/Recharge";
 
 function RequireAuth() {
@@ -30,12 +30,12 @@ export function App() {
         <Route path="/tenants" element={<Tenants />} />
         <Route path="/members" element={<Members />} />
         <Route path="/quota" element={<Quota />} />
-        <Route path="/keywords" element={<Keywords />} />
         <Route path="/shared-rules" element={<SharedRules />} />
         <Route path="/usage" element={<Usage />} />
         <Route path="/recharge" element={<Recharge />} />
         <Route path="/audit" element={<Audit />} />
         <Route path="/settings" element={<Settings />} />
+        <Route path="/account" element={<Account />} />
         <Route path="/tools" element={<ToolsFrame />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

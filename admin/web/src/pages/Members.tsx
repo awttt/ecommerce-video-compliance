@@ -255,7 +255,6 @@ export function Members() {
           dataSource={devices.data ?? []}
           locale={{ emptyText: "没有设备" }}
           columns={[
-            { title: "设备", dataIndex: "name" },
             { title: "版本", dataIndex: "client_version", render: (value: string) => value || "—" },
             { title: "状态", render: (_value, row) => <StatusTag status={row.active ? "active" : "disabled"} label={row.active ? "在线" : "已下线"} /> },
             {

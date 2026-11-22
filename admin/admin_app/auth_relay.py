@@ -28,6 +28,7 @@ _lock = threading.Lock()
 
 _REASON = {
     "INVALID_CREDENTIALS": (400, "邮箱或密码不正确"),
+    "PASSWORD_INCORRECT": (400, "当前密码不正确"),
     "INVALID_EMAIL": (400, "邮箱格式不正确"),
     "USER_NOT_ACTIVE": (403, "这个账号已停用"),
     "USER_INACTIVE": (403, "这个账号已停用"),
@@ -43,6 +44,8 @@ _REASON = {
 
 _TEXT = (
     ("invalid email or password", 400, "邮箱或密码不正确"),
+    ("current password is incorrect", 400, "当前密码不正确"),
+    ("password is incorrect", 400, "当前密码不正确"),
     ("invalid or expired 2fa", 400, "两步验证已过期，请重新登录"),
     ("backend mode", 403, "暂不支持普通账号登录，请联系管理员"),
     ("user self-service is disabled", 403, "暂不支持普通账号登录，请联系管理员"),
@@ -135,28 +138,32 @@ def login_totp(temp_token: str, totp_code: str) -> dict:
     return post_auth("/auth/login/2fa", {"temp_token": temp_token, "totp_code": totp_code})
 
 
-def current_account(access_token: str) -> dict:
-    """用中转站的用户令牌读取当前账号，走单点登录时校验令牌是否还有效。"""
-    url = f"{get_settings().relay_base_url.rstrip('/')}/auth/me"
+def _authed(method: str, path: str, access_token: str, payload: dict | None = None) -> dict:
+    """带用户令牌访问中转站账号接口。payload 可能含密码，异常里不要带上请求体。"""
+    token = access_token.strip()
+    if not token:
+        raise RelayLoginError("登录已失效，请重新登录", 401)
+    url = f"{get_settings().relay_base_url.rstrip('/')}{path}"
     kwargs: dict = {
         "timeout": httpx.Timeout(20.0, connect=10.0),
         "trust_env": _transport is None,
+        "headers": {"User-Agent": USER_AGENT},
     }
     if _transport is not None:
         kwargs["transport"] = _transport
     headers = {
-        "Authorization": f"Bearer {access_token}",
+        "Authorization": f"Bearer {token}",
         "Accept": "application/json",
         "Accept-Language": "zh-CN",
         "User-Agent": USER_AGENT,
     }
     try:
         with httpx.Client(**kwargs) as client:
-            response = client.get(url, headers=headers)
-    except httpx.TimeoutException as exc:
-        raise RelayLoginError("连接大语言模型超时，请稍后再试", 504) from exc
-    except httpx.HTTPError as exc:
-        raise RelayLoginError("连不上大语言模型，请检查网络", 502) from exc
+            response = client.request(method, url, headers=headers, json=payload)
+    except httpx.TimeoutException:
+        raise RelayLoginError("连接大语言模型超时，请稍后再试", 504)
+    except httpx.HTTPError:
+        raise RelayLoginError("连不上大语言模型，请检查网络", 502)
     try:
         body = response.json()
     except ValueError:
@@ -169,6 +176,21 @@ def current_account(access_token: str) -> dict:
         raise explain_login_error(response.status_code, body)
     data = body.get("data") if isinstance(body, dict) and "data" in body else body
     return data if isinstance(data, dict) else {}
+
+
+def current_account(access_token: str) -> dict:
+    """用中转站的用户令牌读取当前账号，走单点登录时校验令牌是否还有效。"""
+    return _authed("GET", "/auth/me", access_token)
+
+
+def change_password(access_token: str, old_password: str, new_password: str) -> dict:
+    """改中转站登录密码。调用方负责在成功后用新密码重新登录，旧令牌会失效。"""
+    return _authed(
+        "PUT",
+        "/user/password",
+        access_token,
+        {"old_password": old_password, "new_password": new_password},
+    )
 
 
 def _purge_locked(now: float) -> None:

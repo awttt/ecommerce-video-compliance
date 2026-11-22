@@ -1,58 +1,166 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, App as AntApp, Button, Card, Form, Input, Modal, Select, Table, Tabs } from "antd";
+import { Alert, App as AntApp, Button, Card, Checkbox, Form, Input, Modal, Select, Space, Table, Tabs, Typography } from "antd";
 import { useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import { ApiError, api } from "../api";
 import { when } from "../format";
-import type { SharedRule, User } from "../types";
-import { CategoryTag, PageHead, StatusTag } from "../ui";
+import type { Tenant, User } from "../types";
+import { PageHead } from "../ui";
 
 const CATEGORIES = ["价格", "规格", "品牌", "夸大宣传"];
+const GROUPS: { source: string; category: string; title: string }[] = [
+  { source: "口播", category: "价格", title: "口播 · 价格" },
+  { source: "口播", category: "规格", title: "口播 · 规格" },
+  { source: "口播", category: "品牌", title: "口播 · 品牌" },
+  { source: "画面", category: "价格", title: "画面 · 价格" },
+  { source: "画面", category: "规格", title: "画面 · 规格" },
+  { source: "画面", category: "品牌", title: "画面 · 品牌" },
+];
+
+interface Phrase {
+  text: string;
+  category: string;
+  source: string;
+}
+
+interface RuleDocument {
+  tenant_id: number;
+  categories: string[];
+  phrases: Phrase[];
+  ignore_phrases: Array<string | { text: string }>;
+  note: string;
+  version: number;
+  updated_at: string | null;
+}
+
+interface RuleSubmission {
+  id: number;
+  member_id: number;
+  member_name: string;
+  tenant_name: string;
+  op_label: string;
+  target: string;
+  summary: string;
+  before: Record<string, string> | null;
+  after: Record<string, string> | null;
+  status: string;
+  status_label: string;
+  review_comment: string;
+  created_at: string;
+}
+
+function groupKey(source: string, category: string) {
+  return `${source}:${category}`;
+}
+
+function draftsFrom(phrases: Phrase[]) {
+  const buckets = new Map<string, string[]>();
+  for (const group of GROUPS) buckets.set(groupKey(group.source, group.category), []);
+  for (const item of phrases) {
+    const lines = buckets.get(groupKey(item.source === "画面" ? "画面" : "口播", item.category));
+    if (lines && item.text) lines.push(item.text);
+  }
+  return Object.fromEntries([...buckets].map(([key, lines]) => [key, lines.join("\n")]));
+}
+
+function phrasesFrom(drafts: Record<string, string>): { phrases: Phrase[]; error: string } {
+  const phrases: Phrase[] = [];
+  const seen = new Set<string>();
+  for (const group of GROUPS) {
+    for (const line of (drafts[groupKey(group.source, group.category)] ?? "").split(/\n+/)) {
+      const text = line.replace(/\s+/g, "");
+      if (!text) continue;
+      if ([...text].length > 40) return { phrases: [], error: `「${line.trim()}」超过 40 个字` };
+      const key = `${group.source}:${group.category}:${text}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      phrases.push({ text, category: group.category, source: group.source });
+    }
+  }
+  if (phrases.length > 300) return { phrases: [], error: "额外命中词最多 300 条" };
+  return { phrases, error: "" };
+}
+
+function ignoreLines(items: RuleDocument["ignore_phrases"]): string {
+  return items.map((item) => (typeof item === "string" ? item : item.text)).filter(Boolean).join("\n");
+}
+
+function sideText(target: string, value: Record<string, string> | null): string {
+  if (!value) return "无";
+  if (target === "phrase") return `${value.source || ""} · ${value.category || ""} · ${value.text || ""}`;
+  if (target === "category") return value.name || "无";
+  return value.text || "空";
+}
+
+function ChangePreview({ row }: { row: RuleSubmission }) {
+  return (
+    <div>
+      <Typography.Paragraph>{row.summary}</Typography.Paragraph>
+      <Typography.Paragraph>提交人：{row.member_name || "—"}</Typography.Paragraph>
+      {row.before ? <Typography.Paragraph>原来：{sideText(row.target, row.before)}</Typography.Paragraph> : null}
+      {row.after ? <Typography.Paragraph>改成：{sideText(row.target, row.after)}</Typography.Paragraph> : null}
+    </div>
+  );
+}
 
 export function SharedRules() {
   const user = useOutletContext<User>();
   const { message } = AntApp.useApp();
   const client = useQueryClient();
-  const canSubmit = user.permissions.includes("shared_rule.submit");
   const reviewer = user.permissions.includes("shared_rule.review");
-  const [tab, setTab] = useState(reviewer ? "pending" : "mine");
-  const [open, setOpen] = useState(false);
+  const [tenantId, setTenantId] = useState<number | undefined>(user.tenant_id ?? undefined);
+  const [tab, setTab] = useState(reviewer ? "pending" : "current");
   const [rejectId, setRejectId] = useState<number | null>(null);
-
-  const mine = useQuery({
-    queryKey: ["shared-rules", "mine"],
-    queryFn: () => api<SharedRule[]>("/v1/shared-rules/mine"),
+  const [viewing, setViewing] = useState<RuleSubmission | null>(null);
+  const tenants = useQuery({
+    queryKey: ["tenants"],
+    queryFn: () => api<Tenant[]>("/v1/tenants"),
+    enabled: user.role === "platform_admin",
   });
-  const approved = useQuery({
-    queryKey: ["shared-rules", "approved"],
-    queryFn: () => api<SharedRule[]>("/v1/shared-rules/approved"),
+  const scope = user.role === "platform_admin" ? tenantId : user.tenant_id;
+  const document = useQuery({
+    queryKey: ["company-rules", scope ?? "none"],
+    queryFn: () => api<RuleDocument>(scope ? `/v1/company-rules?tenant_id=${scope}` : "/v1/company-rules"),
+    enabled: scope != null,
   });
   const pending = useQuery({
-    queryKey: ["shared-rules", "pending"],
-    queryFn: () => api<SharedRule[]>("/v1/shared-rules/pending"),
+    queryKey: ["company-rules", "pending"],
+    queryFn: () => api<RuleSubmission[]>("/v1/company-rules/submissions/pending"),
     enabled: reviewer,
   });
 
   const refresh = () => {
-    void client.invalidateQueries({ queryKey: ["shared-rules"] });
+    void client.invalidateQueries({ queryKey: ["company-rules"] });
+    void client.invalidateQueries({ queryKey: ["me"] });
   };
 
-  const submit = useMutation({
-    mutationFn: (values: { word: string; category: string; description: string }) =>
-      api<SharedRule>("/v1/shared-rules", { method: "POST", body: JSON.stringify(values) }),
+  const save = useMutation({
+    mutationFn: (values: { categories: string[]; drafts: Record<string, string>; ignore_text: string; note: string }) => {
+      const parsed = phrasesFrom(values.drafts);
+      if (parsed.error) return Promise.reject(new Error(parsed.error));
+      return api<RuleDocument>("/v1/company-rules", {
+        method: "PUT",
+        body: JSON.stringify({
+          tenant_id: scope ?? null,
+          categories: values.categories,
+          phrases: parsed.phrases,
+          ignore_phrases: values.ignore_text.split(/\n+/).map((item) => item.trim()).filter(Boolean),
+          note: values.note,
+        }),
+      });
+    },
     onSuccess: () => {
-      setOpen(false);
-      message.success("已提交，等待本公司管理员审批");
+      message.success("已写入规则表，审核工具点刷新后才会同步到本机");
       refresh();
     },
-    onError: (error) => message.error(error instanceof ApiError ? error.message : "提交失败"),
+    onError: (error) => message.error(error instanceof ApiError ? error.message : error instanceof Error ? error.message : "保存失败"),
   });
 
   const review = useMutation({
     mutationFn: (payload: { id: number; action: "approve" | "reject"; remark?: string }) =>
-      api(`/v1/shared-rules/${payload.id}/${payload.action}`, {
+      api(`/v1/company-rules/submissions/${payload.id}/${payload.action}`, {
         method: "POST",
-        body: JSON.stringify({ remark: payload.remark ?? "", force: false }),
+        body: JSON.stringify({ remark: payload.remark ?? "" }),
       }),
     onSuccess: () => {
       setRejectId(null);
@@ -62,26 +170,23 @@ export function SharedRules() {
     onError: (error) => message.error(error instanceof ApiError ? error.message : "审批失败"),
   });
 
-  const own = mine.data ?? [];
-  const passed = approved.data ?? [];
   const waiting = pending.data ?? [];
+  const current = document.data;
 
   return (
     <>
       <PageHead
-        title="共享违规词"
-        description={
-          reviewer
-            ? "审批本公司成员提交的违规词。自己提交的要由另一位公司管理员审。通过后所有公司都能看到，检测时也会用上。"
-            : canSubmit
-              ? "提交后由本公司管理员审批。通过的词所有公司和成员都能看到，检测时也会用上。"
-              : "已通过的违规词所有公司共用，检测时也会用上。审批由各公司的公司管理员负责。"
-        }
+        title="规则审核"
+        description="这张表是公司当前生效的审核规则，默认词已经在里面。管理员可以直接改。员工提交的是单条改动：新增、修改或删除。通过一条才改一条。审核工具要点刷新，本机才会用上新规则。"
         extra={
-          canSubmit ? (
-            <Button type="primary" onClick={() => setOpen(true)}>
-              提交违规词
-            </Button>
+          user.role === "platform_admin" ? (
+            <Select
+              placeholder="选择公司"
+              style={{ width: 180 }}
+              value={tenantId}
+              onChange={setTenantId}
+              options={(tenants.data ?? []).map((item) => ({ value: item.id, label: item.name }))}
+            />
           ) : null
         }
       />
@@ -100,28 +205,29 @@ export function SharedRules() {
                         rowKey="id"
                         pagination={false}
                         dataSource={waiting}
-                        locale={{ emptyText: "没有待审违规词" }}
+                        locale={{ emptyText: "没有待审规则" }}
                         columns={[
-                          { title: "违规词", dataIndex: "word", render: (value: string) => <b>{value}</b> },
-                          { title: "类别", dataIndex: "category", render: (value: string) => <CategoryTag value={value} /> },
-                          { title: "说明", dataIndex: "description", render: (value: string) => value || "—" },
                           { title: "提交人", dataIndex: "member_name" },
-                          { title: "公司", dataIndex: "tenant_name", render: (value: string) => value || "—" },
-                          { title: "时间", dataIndex: "created_at", render: (value: string) => when(value) },
+                          { title: "操作", dataIndex: "op_label", width: 72 },
+                          { title: "内容", dataIndex: "summary" },
+                          { title: "时间", dataIndex: "created_at", width: 160, render: (value: string) => when(value) },
                           {
                             title: "操作",
                             render: (_value, row) =>
                               row.member_id === user.id ? (
                                 "请由另一位公司管理员审批"
                               ) : (
-                                <>
+                                <Space>
+                                  <Button type="link" size="small" onClick={() => setViewing(row)}>
+                                    查看
+                                  </Button>
                                   <Button type="link" size="small" onClick={() => review.mutate({ id: row.id, action: "approve" })}>
                                     通过
                                   </Button>
                                   <Button type="link" size="small" danger onClick={() => setRejectId(row.id)}>
                                     驳回
                                   </Button>
-                                </>
+                                </Space>
                               ),
                           },
                         ]}
@@ -129,62 +235,56 @@ export function SharedRules() {
                     ),
                   },
                 ]
-              : [
-                  {
-                    key: "mine",
-                    label: `我的提交 ${own.length}`,
-                    children: <OwnTable rows={own} />,
-                  },
-                ]),
+              : []),
             {
-              key: "approved",
-              label: `已通过 ${passed.length}`,
-              children: (
-                <Table
-                  rowKey="id"
-                  pagination={false}
-                  dataSource={passed}
-                  locale={{ emptyText: "还没有已通过的共享违规词" }}
-                  columns={[
-                    { title: "违规词", dataIndex: "word", render: (value: string) => <b>{value}</b> },
-                    { title: "类别", dataIndex: "category", render: (value: string) => <CategoryTag value={value} /> },
-                    { title: "说明", dataIndex: "description", render: (value: string) => value || "—" },
-                    { title: "提交人", dataIndex: "member_name" },
-                    { title: "公司", dataIndex: "tenant_name", render: (value: string) => value || "—" },
-                    { title: "通过时间", dataIndex: "reviewed_at", render: (value: string) => (value ? when(value) : "—") },
-                  ]}
-                />
+              key: "current",
+              label: "当前规则",
+              children: !scope ? (
+                <Alert type="info" showIcon message="先选择公司" />
+              ) : current ? (
+                <Form
+                  key={`${scope}-${current.version}`}
+                  layout="vertical"
+                  initialValues={{
+                    categories: current.categories,
+                    drafts: draftsFrom(current.phrases),
+                    ignore_text: ignoreLines(current.ignore_phrases),
+                    note: current.note,
+                  }}
+                  onFinish={(values) => save.mutate(values)}
+                >
+                  <Typography.Paragraph type="secondary">版本 {current.version}。直接保存会立刻更新这张表，不经过审批。</Typography.Paragraph>
+                  <Form.Item name="categories" label="启用类别">
+                    <Checkbox.Group options={CATEGORIES} />
+                  </Form.Item>
+                  {GROUPS.map((group) => (
+                    <Form.Item key={groupKey(group.source, group.category)} label={group.title}>
+                      <Form.Item name={["drafts", groupKey(group.source, group.category)]} noStyle>
+                        <Input.TextArea rows={4} placeholder="一行一个" />
+                      </Form.Item>
+                    </Form.Item>
+                  ))}
+                  <Form.Item name="ignore_text" label="忽略词" extra="一行一个，最多 30 条。">
+                    <Input.TextArea rows={3} placeholder="包邮" />
+                  </Form.Item>
+                  <Form.Item name="note" label="补充说明" extra="最多 400 字。不能放宽「禁止推测」。">
+                    <Input.TextArea rows={3} maxLength={400} showCount />
+                  </Form.Item>
+                  {user.role === "member" ? null : (
+                    <Button type="primary" htmlType="submit" loading={save.isPending}>
+                      保存
+                    </Button>
+                  )}
+                </Form>
+              ) : (
+                <Alert type="warning" showIcon message="规则还没有读出来" />
               ),
             },
           ]}
         />
       </Card>
-      {reviewer ? (
-        <Card style={{ marginTop: 16 }} title="我的提交">
-          <OwnTable rows={own} />
-        </Card>
-      ) : null}
-      <Alert
-        style={{ marginTop: 16 }}
-        type="info"
-        showIcon
-        message="已通过的词在所有公司之间共用。待审只出现在提交人所在公司的管理员列表里。平台管理员不参与审批。"
-      />
-      <Modal title="提交违规词" open={open} onCancel={() => setOpen(false)} footer={null} destroyOnClose>
-        <Form layout="vertical" initialValues={{ category: "价格" }} onFinish={(values) => submit.mutate(values)}>
-          <Form.Item name="word" label="违规词" rules={[{ required: true, message: "请填写违规词" }]} extra="1 到 40 字。空格会去掉。已在审核或已通过的词不能再交一次。">
-            <Input placeholder="例如：全网最低" />
-          </Form.Item>
-          <Form.Item name="category" label="类别">
-            <Select options={CATEGORIES.map((item) => ({ value: item, label: item }))} />
-          </Form.Item>
-          <Form.Item name="description" label="说明">
-            <Input.TextArea rows={3} maxLength={200} placeholder="可选，告诉审批人为什么要加这条" />
-          </Form.Item>
-          <Button type="primary" htmlType="submit" loading={submit.isPending}>
-            提交
-          </Button>
-        </Form>
+      <Modal title="提交内容" open={viewing !== null} onCancel={() => setViewing(null)} footer={null} width={640}>
+        {viewing ? <ChangePreview row={viewing} /> : null}
       </Modal>
       <Modal title="驳回" open={rejectId !== null} onCancel={() => setRejectId(null)} footer={null} destroyOnClose>
         <Form
@@ -200,30 +300,5 @@ export function SharedRules() {
         </Form>
       </Modal>
     </>
-  );
-}
-
-function OwnTable({ rows }: { rows: SharedRule[] }) {
-  return (
-    <Table
-      rowKey="id"
-      pagination={false}
-      dataSource={rows}
-      locale={{ emptyText: "还没有提交" }}
-      columns={[
-        { title: "违规词", dataIndex: "word", render: (value: string) => <b>{value}</b> },
-        { title: "类别", dataIndex: "category", render: (value: string) => <CategoryTag value={value} /> },
-        {
-          title: "状态",
-          render: (_value, row) => <StatusTag status={row.status} label={row.status_label} />,
-        },
-        {
-          title: "原因",
-          dataIndex: "review_comment",
-          render: (value: string, row) => (row.status === "rejected" ? value || "—" : "—"),
-        },
-        { title: "时间", dataIndex: "created_at", render: (value: string) => when(value) },
-      ]}
-    />
   );
 }

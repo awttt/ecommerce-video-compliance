@@ -2,12 +2,12 @@ import { theme, Alert, Button, Card, Col, DatePicker, Radio, Row, Space, Statist
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import dayjs from "dayjs";
 import { useState } from "react";
-import { useNavigate, useOutletContext } from "react-router-dom";
+import { useOutletContext } from "react-router-dom";
 import { ApiError, api } from "../api";
 import { consumptionTitle, rangeFor, type RangePreset } from "../dates";
 import { deltaText, fromNow, money } from "../format";
 import type { Consumption, Dashboard as DashboardData, User } from "../types";
-import { CategoryTag, PageHead, SourceTag, StatusTag } from "../ui";
+import { PageHead } from "../ui";
 
 const PRESETS: { label: string; value: RangePreset }[] = [
   { label: "今天", value: "today" },
@@ -46,7 +46,6 @@ function Trend({ rows }: { rows: DashboardData["trend"] }) {
 
 export function Dashboard() {
   const user = useOutletContext<User>();
-  const navigate = useNavigate();
   const client = useQueryClient();
   const query = useQuery({ queryKey: ["dashboard", user.id], queryFn: () => api<DashboardData>("/v1/dashboard") });
   const [preset, setPreset] = useState<RangePreset | "custom">("month");
@@ -74,7 +73,7 @@ export function Dashboard() {
     <>
       <PageHead
         title="总览"
-        description={member ? "这里只看你自己的余额、消耗和提交。日期按北京时间。" : "对账使用累计消耗。消耗可以按区间查询，日期按北京时间。"}
+        description={member ? "这里只看你自己的余额和消耗。日期按北京时间。" : "对账使用累计消耗。消耗可以按区间查询，日期按北京时间。"}
         extra={
           <Button
             onClick={() => {
@@ -137,30 +136,26 @@ export function Dashboard() {
         />
       ) : null}
       <Row gutter={[16, 16]}>
-        <Col xs={24} sm={12} lg={6}>
+        <Col xs={24} sm={12} lg={member ? 12 : 8}>
           <Card>
             <Statistic title={member ? "我的余额" : "成员余额合计"} value={report?.balance ?? 0} precision={2} prefix="¥" />
             <Typography.Text type="secondary">当前还能用的额度</Typography.Text>
           </Card>
         </Col>
-        <Col xs={24} sm={12} lg={6}>
+        <Col xs={24} sm={12} lg={member ? 12 : 8}>
           <Card>
             <Statistic title={member ? spentTitle : "已分配累计"} value={member ? spentValue : report?.allocated ?? 0} precision={2} prefix="¥" />
             <Typography.Text type="secondary">{member ? spentHint : `公司余额 ${money(report?.pool_remaining ?? 0)}`}</Typography.Text>
           </Card>
         </Col>
-        <Col xs={24} sm={12} lg={6}>
-          <Card>
-            <Statistic title={member ? "待审提交" : spentTitle} value={member ? data?.pending_keywords ?? 0 : spentValue} precision={member ? 0 : 2} prefix={member ? undefined : "¥"} />
-            <Typography.Text type={!member && compared ? "success" : "secondary"}>{member ? "等待管理员处理" : spentHint}</Typography.Text>
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} lg={6}>
-          <Card>
-            <Statistic title="待审关键词" value={data?.pending_keywords ?? 0} />
-            <Typography.Text type="secondary">其中 {data?.custom_pending ?? 0} 条公司自定义词</Typography.Text>
-          </Card>
-        </Col>
+        {member ? null : (
+          <Col xs={24} sm={12} lg={8}>
+            <Card>
+              <Statistic title={spentTitle} value={spentValue} precision={2} prefix="¥" />
+              <Typography.Text type={compared ? "success" : "secondary"}>{spentHint}</Typography.Text>
+            </Card>
+          </Col>
+        )}
       </Row>
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col xs={24} lg={14}>
@@ -228,37 +223,6 @@ export function Dashboard() {
           </Col>
         </Row>
       )}
-      <Card title="待处理" style={{ marginTop: 16 }}>
-        <Table
-          rowKey="id"
-          pagination={false}
-          dataSource={data?.pending ?? []}
-          locale={{ emptyText: "没有待审命中词" }}
-          columns={[
-            { title: "状态", dataIndex: "status", width: 90, render: (_value, row) => <StatusTag status={row.status} label={row.status_label} /> },
-            {
-              title: "命中词",
-              render: (_value, row) => (
-                <span>
-                  <SourceTag value={row.source} /> <CategoryTag value={row.category} /> {row.text}
-                </span>
-              ),
-            },
-            { title: "公司", dataIndex: "tenant_name" },
-            { title: "时间", dataIndex: "created_at", render: (value: string) => fromNow(value) },
-            {
-              title: "",
-              align: "right",
-              render: () =>
-                user.role === "member" ? null : (
-                  <Button size="small" type="primary" onClick={() => navigate("/keywords")}>
-                    去审批
-                  </Button>
-                ),
-            },
-          ]}
-        />
-      </Card>
     </>
   );
 }

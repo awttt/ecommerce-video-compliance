@@ -53,7 +53,7 @@ function AuthFrame({
       <Card className="auth-card">
         <div className="auth-brand">
           <span className="auth-logo"><AuthLogo /></span>
-          <strong>御镜视频素材审核系统</strong>
+          <strong>御镜视频审核系统</strong>
           <span>识别画面与口播中的价格、规格、品牌，以及口播里的夸大宣传</span>
         </div>
         <div className="auth-title">{title}</div>
@@ -87,9 +87,11 @@ function SiteNotices({ options, optionsError }: { options: AccountOptions | null
 }
 
 export function LoginPage({
+  rememberedEmail,
   onLoggedIn,
   onGoRegister,
 }: {
+  rememberedEmail?: string;
   onLoggedIn: (settings: Settings, message?: string) => void;
   onGoRegister: () => void;
 }) {
@@ -155,6 +157,7 @@ export function LoginPage({
         <Form
           layout="vertical"
           requiredMark={false}
+          initialValues={{ email: rememberedEmail || "" }}
           onFinish={async (values: { email: string; password: string }) => {
             setLoginBusy(true);
             try {

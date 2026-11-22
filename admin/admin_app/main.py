@@ -26,7 +26,7 @@ async def lifespan(_app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="御镜管理后台", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="御镜视频审核系统", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://127.0.0.1:5174", "http://localhost:5174"],

@@ -818,7 +818,8 @@ def test_recharge_uses_the_relay_balance_checkout_and_hides_payment_secrets():
         body = info.json()
         assert body["balance_disabled"] is False
         assert body["bonus_mode"] == "bonus"
-        assert body["bonus_tiers"] == [{"min_amount": 50.0, "bonus_percent": 5.0}, {"min_amount": 100.0, "bonus_percent": 10.0}]
+        assert body["bonus_notice"] == ""
+        assert body["bonus_tiers"] == []
         assert {item["payment_type"] for item in body["methods"]} == {"alipay", "wxpay"}
         wxpay = next(item for item in body["methods"] if item["payment_type"] == "wxpay")
         assert wxpay["display_name"] == "微信支付"
@@ -880,3 +881,39 @@ def test_recharge_uses_the_relay_balance_checkout_and_hides_payment_secrets():
         assert cancelled.status_code == 200, cancelled.text
         assert cancelled.json()["status"] == "CANCELLED"
         assert cancelled.json()["message"] == ""
+
+
+def test_login_lasts_seven_days_and_remembers_the_email():
+    import time
+
+    from app.services.manager import SESSION_KEEP_SECONDS
+
+    upstream = Upstream()
+    with TestClient(create_app()) as client:
+        attach(upstream)
+        logged_in = login(client)
+        assert logged_in["settings"]["remembered_email"] == EMAIL
+        manager = get_manager()
+        assert manager.relay_credentials()[0]
+        started = manager._settings["relay_login_at"]
+        assert time.time() - started < 5
+
+        logged_out = client.post("/api/account/logout")
+        assert logged_out.status_code == 200
+        body = logged_out.json()["settings"]
+        assert body["account_logged_in"] is False
+        assert body["account_email"] == ""
+        assert body["remembered_email"] == EMAIL
+        assert manager.relay_credentials() == ("", "")
+
+        login(client)
+        manager._settings["relay_login_at"] = time.time() - SESSION_KEEP_SECONDS - 10
+        assert manager.public_settings().account_logged_in is False
+        assert manager.public_settings().remembered_email == EMAIL
+        assert manager.relay_credentials() == ("", "")
+        expired = client.get("/api/settings")
+        assert expired.status_code == 200
+        assert expired.json()["account_logged_in"] is False
+        assert expired.json()["remembered_email"] == EMAIL
+        assert manager._settings.get("relay_access_token") in (None, "")
+        assert manager._settings.get("last_login_email") == EMAIL

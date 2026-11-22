@@ -42,6 +42,52 @@ export function getConsoleInfo(): Promise<{ enabled: boolean; url: string }> {
   return request<{ enabled: boolean; url: string }>("/api/console");
 }
 
+export interface CompanyRuleDocument {
+  tenant_id: number | null;
+  categories: string[];
+  phrases: { id?: string; text: string; category: string; source: string }[];
+  ignore_phrases: Array<string | { id?: string; text: string }>;
+  note: string;
+  version: number;
+  updated_at: string | null;
+}
+
+export interface CompanyRuleSubmission {
+  id: number;
+  op: string;
+  op_label: string;
+  target: string;
+  summary: string;
+  status: string;
+  status_label: string;
+  review_comment: string;
+  created_at: string;
+}
+
+export interface CompanyRuleChange {
+  op: string;
+  target: string;
+  item_id: string;
+  before: Record<string, string> | null;
+  after: Record<string, string> | null;
+}
+
+export function fetchCompanyRules(): Promise<CompanyRuleDocument> {
+  return request<CompanyRuleDocument>("/api/company-rules");
+}
+
+export function submitCompanyRules(changes: CompanyRuleChange[]): Promise<{ submitted: number; items: CompanyRuleSubmission[] }> {
+  return request<{ submitted: number; items: CompanyRuleSubmission[] }>("/api/company-rules/submissions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ changes }),
+  });
+}
+
+export function fetchMyRuleSubmissions(): Promise<CompanyRuleSubmission[]> {
+  return request<CompanyRuleSubmission[]>("/api/company-rules/submissions");
+}
+
 export function saveSettings(body: Record<string, unknown>): Promise<Settings> {
   return request<Settings>("/api/settings", {
     method: "PUT",

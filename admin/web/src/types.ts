@@ -27,7 +27,7 @@ export interface User {
   tenant_id: number | null;
   tenant_name: string;
   permissions: string[];
-  pending_keywords: number;
+  pending_rules?: number;
   relay_live: boolean;
 }
 
@@ -130,31 +130,10 @@ export interface AuditRow {
   ip: string;
 }
 
-export interface Submission {
-  id: number;
-  text: string;
-  category: string;
-  source: string;
-  scope: "global" | "tenant";
-  scope_label: string;
-  status: string;
-  status_label: string;
-  member_id: number;
-  member_name: string;
-  tenant_id: number | null;
-  tenant_name: string;
-  remark: string;
-  entry_id: number | null;
-  created_at: string;
-}
-
 export interface Dashboard {
   reconcile: Reconcile;
-  pending_keywords: number;
-  custom_pending: number;
   trend: TrendPoint[];
   recent: AuditRow[];
-  pending: Submission[];
 }
 
 export interface Tenant {
@@ -247,25 +226,6 @@ export interface Finding {
   end_sec: number;
   sentence_start?: number | null;
   sentence_end?: number | null;
-}
-
-export interface Phrase {
-  id: number;
-  text: string;
-  category: string;
-  source: string;
-  scope: "global" | "tenant";
-  scope_label: string;
-  version: number;
-}
-
-export interface RulesPayload {
-  version: number;
-  categories: string[];
-  ignore_phrases: string[];
-  note: string;
-  phrases: Phrase[];
-  speculation_policy: string;
 }
 
 export interface UsageSummary {

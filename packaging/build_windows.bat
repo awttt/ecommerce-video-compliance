@@ -5,7 +5,7 @@ REM 确保 OpenCV 和 NumPy 被正确内置到安装包
 setlocal enabledelayedexpansion
 
 echo ========================================
-echo 御镜视频素材审核系统 - Windows 打包
+echo 御镜视频审核系统 - Windows 打包
 echo ========================================
 echo.
 

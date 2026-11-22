@@ -18,17 +18,16 @@ from admin_app.models import (
     Base,
     Device,
     Invite,
-    KeywordEntry,
-    KeywordSubmission,
     Member,
     MemberToken,
     QuotaAllocation,
+    CompanyRule,
+    CompanyRuleSubmission,
     RelayAccount,
     RelayLedger,
     SessionToken,
     SharedRule,
     Tenant,
-    TenantRules,
     UsageSnapshot,
 )
 
@@ -48,9 +47,11 @@ CLOUD_MODELS = (
     RelayAccount,
     RelayLedger,
     SharedRule,
+    CompanyRule,
+    CompanyRuleSubmission,
 )
-# 本机库：审核任务、命中结果和词库规则。视频文件在 data/engine/videos。
-LOCAL_MODELS = (KeywordEntry, KeywordSubmission, TenantRules)
+# 词库审批已去掉。公司规则在云端库，本机库不再单独建表。
+LOCAL_MODELS: tuple[type, ...] = ()
 
 _local_engine: Engine | None = None
 _cloud_engine: Engine | None = None
@@ -173,14 +174,28 @@ def ensure_shared_rules(engine: Engine) -> None:
         index.create(engine, checkfirst=True)
 
 
+def _drop_legacy_rule_submissions(engine: Engine) -> None:
+    """旧表一行是整套规则。改成一条改动一行后，没有 op 列的空壳删掉再建。"""
+    inspector = inspect(engine)
+    if "company_rule_submissions" not in set(inspector.get_table_names()):
+        return
+    columns = {column["name"] for column in inspector.get_columns("company_rule_submissions")}
+    if "op" in columns:
+        return
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE company_rule_submissions"))
+
+
 def init_db() -> None:
     local = get_engine()
     cloud = get_cloud_engine()
     if cloud is None:
+        _drop_legacy_rule_submissions(local)
         Base.metadata.create_all(local)
         _add_missing_columns(local)
         ensure_shared_rules(local)
         return
+    _drop_legacy_rule_submissions(cloud)
     Base.metadata.create_all(local, tables=[model.__table__ for model in LOCAL_MODELS])
     Base.metadata.create_all(cloud, tables=[model.__table__ for model in CLOUD_MODELS])
     _add_missing_columns(local)

@@ -194,7 +194,7 @@ class RunConfig(BaseModel):
     tencent_secret_id: str = ""
     tencent_secret_key: str = ""
     tencent_region: str = "ap-shanghai"
-    asr_engine: str = "16k_zh"
+    asr_engine: str = "16k_zh_en_2.0"
     rules: DetectionRules = Field(default_factory=lambda: DetectionRules())
 
 
@@ -360,6 +360,7 @@ class SettingPublic(BaseModel):
     rules: DetectionRules
     account_logged_in: bool = False
     account_email: str = ""
+    remembered_email: str = ""
     account_balance: float | None = None
     account_frozen_balance: float | None = None
     account_today_cost: float | None = None
@@ -484,7 +485,7 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "tencent_secret_id": "",
     "tencent_secret_key": "",
     "tencent_region": FIXED_TENCENT_REGION,
-    "asr_engine": "16k_zh",
+    "asr_engine": "16k_zh_en_2.0",
     "rules": {
         "categories": ["价格", "规格", "品牌", "夸大宣传"],
         "extra_phrases": default_extra_phrases(),

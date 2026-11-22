@@ -553,15 +553,15 @@ async def test_credential_failure_skips_speech_without_calling_tencent(monkeypat
         await manager.shutdown()
 
 
-def test_asr_engine_choice_is_kept():
+def test_asr_engine_uses_large_model():
     from app.core.asr_engine import configured_engine
     from app.schemas import SettingUpdate
 
     assert configured_engine("16k_zh_en_2.0") == "16k_zh_en_2.0"
-    assert configured_engine("") == "16k_zh"
-    assert configured_engine("16k_zh") == "16k_zh"
+    assert configured_engine("") == "16k_zh_en_2.0"
+    assert configured_engine("16k_zh") == "16k_zh_en_2.0"
     assert SettingUpdate(asr_engine="16k_zh_en_2.0").asr_engine == "16k_zh_en_2.0"
-    assert SettingUpdate(asr_engine="16k_zh").asr_engine == "16k_zh"
+    assert SettingUpdate(asr_engine="16k_zh").asr_engine == "16k_zh_en_2.0"
 
 
 def test_run_config_accepts_asr_fields():

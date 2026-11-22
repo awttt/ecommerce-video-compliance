@@ -1,6 +1,5 @@
-"""租户、成员、额度、命中词和用量。租户范围以登录账号为准，不读请求体里的租户来放权。"""
+"""租户、成员、额度和用量。租户范围以登录账号为准，不读请求体里的租户来放权。"""
 
-import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -9,19 +8,15 @@ from sqlalchemy.orm import Session
 
 from admin_app.errors import DomainError
 from admin_app.models import (
-    AppMeta,
     AppSetting,
     AuditLog,
     Device,
     Invite,
-    KeywordEntry,
-    KeywordSubmission,
     Member,
     MemberToken,
     QuotaAllocation,
     SessionToken,
     Tenant,
-    TenantRules,
     UsageSnapshot,
 )
 from admin_app.money import to_cents, yuan
@@ -32,11 +27,6 @@ from admin_app.timeutil import business_today, business_timezone_name, iso, shan
 
 # 一次查询最长跨度。含首尾，正好覆盖一个闰年。
 MAX_CONSUMPTION_DAYS = 366
-
-CATEGORIES = ("价格", "规格", "品牌", "夸大宣传")
-SOURCES = ("口播", "画面")
-DEFAULT_CATEGORIES = ["价格", "规格", "品牌", "夸大宣传"]
-_NOTE_BLOCK = ("允许推测", "可以推测", "允许猜测", "可以猜测")
 
 
 def audit(
@@ -100,35 +90,6 @@ def seats_used(db: Session, tenant_id: int) -> int:
         )
         .count()
     )
-
-
-def _clean_phrase(text: str) -> str:
-    cleaned = re.sub(r"\s+", "", (text or "").strip())
-    if not cleaned or len(cleaned) > 40:
-        raise DomainError(400, "规则文字需要在 1 到 40 个字之间")
-    return cleaned
-
-
-def _check_phrase(text: str, category: str, source: str) -> str:
-    cleaned = _clean_phrase(text)
-    if category not in CATEGORIES:
-        raise DomainError(400, "类别只能是价格、规格、品牌、夸大宣传")
-    if source not in SOURCES:
-        raise DomainError(400, "来源只能是口播或画面")
-    if category == "夸大宣传" and source != "口播":
-        raise DomainError(400, "夸大宣传只看口播，画面不报这一类")
-    return cleaned
-
-
-def _next_version(db: Session) -> int:
-    row = db.get(AppMeta, "rules_version")
-    if row is None:
-        row = AppMeta(key="rules_version", value="0")
-        db.add(row)
-        db.flush()
-    current = int(row.value or "0") + 1
-    row.value = str(current)
-    return current
 
 
 def _period() -> str:
@@ -314,15 +275,6 @@ def create_tenant(
     apply_credentials(admin_member, credentials)
     _sync_member_balance(relay, admin_member)
     db.add(admin_member)
-    db.add(
-        TenantRules(
-            tenant_id=tenant.id,
-            categories=list(DEFAULT_CATEGORIES),
-            ignore_phrases=[],
-            note="",
-            version=1,
-        )
-    )
     audit(db, actor, "tenant.create", cleaned, f"新建公司 {cleaned}", tenant_id=tenant.id, ip=ip)
     audit(
         db,
@@ -809,311 +761,6 @@ def _finish_quota(db: Session, actor: Member, row: QuotaAllocation, ip: str) -> 
         raise DomainError(502, "额度操作失败，请稍后再试") from exc
 
 
-def _active_phrase_count(db: Session, tenant_id: int | None) -> int:
-    global_count = (
-        db.query(KeywordEntry)
-        .filter(KeywordEntry.tenant_id.is_(None), KeywordEntry.deleted_at.is_(None))
-        .count()
-    )
-    if tenant_id is None:
-        return global_count
-    local = (
-        db.query(KeywordEntry)
-        .filter(KeywordEntry.tenant_id == tenant_id, KeywordEntry.deleted_at.is_(None))
-        .count()
-    )
-    return global_count + local
-
-
-def submit_keyword(
-    db: Session,
-    actor: Member,
-    *,
-    text: str,
-    category: str,
-    source: str,
-    scope: str,
-    tenant_id: int | None,
-    ip: str = "",
-) -> KeywordSubmission:
-    _require(actor, "keyword.submit")
-    cleaned = _check_phrase(text, category, source)
-    if scope not in ("global", "tenant"):
-        raise DomainError(400, "作用域只能是全局或本公司")
-    if scope == "global":
-        if actor.role != "platform_admin":
-            raise DomainError(403, "只有平台管理员可以提交全局命中词")
-        target = None
-    else:
-        target = resolve_tenant(actor, tenant_id)
-        if target is None:
-            raise DomainError(400, "请选择公司")
-    _ensure_unique_phrase(db, cleaned, category, source, target)
-    row = KeywordSubmission(
-        tenant_id=target,
-        member_id=actor.id,
-        text=cleaned,
-        category=category,
-        source=source,
-        scope=scope,
-        status="pending",
-    )
-    db.add(row)
-    audit(db, actor, "keyword.submit", cleaned, f"提交命中词「{cleaned}」", tenant_id=target, ip=ip)
-    db.commit()
-    db.refresh(row)
-    return row
-
-
-def _ensure_unique_phrase(db: Session, text: str, category: str, source: str, tenant_id: int | None) -> None:
-    entry = (
-        db.query(KeywordEntry)
-        .filter(
-            KeywordEntry.text == text,
-            KeywordEntry.category == category,
-            KeywordEntry.source == source,
-            KeywordEntry.deleted_at.is_(None),
-            KeywordEntry.tenant_id.is_(None) if tenant_id is None else KeywordEntry.tenant_id == tenant_id,
-        )
-        .first()
-    )
-    pending = (
-        db.query(KeywordSubmission)
-        .filter(
-            KeywordSubmission.text == text,
-            KeywordSubmission.category == category,
-            KeywordSubmission.source == source,
-            KeywordSubmission.status == "pending",
-            KeywordSubmission.tenant_id.is_(None) if tenant_id is None else KeywordSubmission.tenant_id == tenant_id,
-        )
-        .first()
-    )
-    if entry or pending:
-        raise DomainError(400, "已经有一条相同的命中词")
-
-
-def _load_submission(db: Session, actor: Member, submission_id: int) -> KeywordSubmission:
-    row = db.get(KeywordSubmission, submission_id)
-    if row is None:
-        raise DomainError(404, "提交不存在")
-    if actor.role == "member" and row.member_id != actor.id:
-        raise DomainError(403, "只能查看自己的提交")
-    if actor.role == "tenant_admin":
-        resolve_tenant(actor, row.tenant_id if row.scope == "tenant" else actor.tenant_id)
-        if row.scope == "global":
-            raise DomainError(403, "公司管理员不能审批全局词")
-    return row
-
-
-def approve_keyword(
-    db: Session,
-    actor: Member,
-    submission_id: int,
-    *,
-    remark: str = "",
-    force: bool = False,
-    ip: str = "",
-) -> KeywordSubmission:
-    _require(actor, "keyword.review")
-    row = _load_submission(db, actor, submission_id)
-    if row.status != "pending":
-        raise DomainError(400, "这条已经审过了")
-    if row.scope == "global" and not has_perm(actor.role, "keyword.review.global"):
-        raise DomainError(403, "公司管理员不能审批全局词")
-    note = (remark or "").strip()[:200]
-    if row.member_id == actor.id:
-        if not (force and actor.role == "platform_admin"):
-            raise DomainError(403, "不能审批自己提交的词")
-        if not note:
-            raise DomainError(400, "强制通过需要填写备注")
-    if _active_phrase_count(db, row.tenant_id) >= 300:
-        raise DomainError(400, "通过的命中词全局加公司不能超过 300 条")
-    version = _next_version(db)
-    entry = KeywordEntry(
-        tenant_id=row.tenant_id,
-        text=row.text,
-        category=row.category,
-        source=row.source,
-        version=version,
-    )
-    db.add(entry)
-    db.flush()
-    row.status = "approved"
-    row.reviewer_id = actor.id
-    row.reviewed_at = utcnow()
-    row.remark = note
-    row.entry_id = entry.id
-    rules = db.get(TenantRules, row.tenant_id) if row.tenant_id else None
-    if rules is not None:
-        rules.version = version
-        rules.updated_at = utcnow()
-    audit(
-        db,
-        actor,
-        "keyword.approve",
-        row.text,
-        f"通过命中词「{row.text}」",
-        tenant_id=row.tenant_id,
-        before={"status": "pending"},
-        after={"status": "approved", "version": version, "force": force},
-        ip=ip,
-    )
-    db.commit()
-    db.refresh(row)
-    return row
-
-
-def reject_keyword(db: Session, actor: Member, submission_id: int, remark: str, ip: str = "") -> KeywordSubmission:
-    _require(actor, "keyword.review")
-    row = _load_submission(db, actor, submission_id)
-    if row.status != "pending":
-        raise DomainError(400, "这条已经审过了")
-    if row.member_id == actor.id and actor.role != "platform_admin":
-        raise DomainError(403, "不能审批自己提交的词")
-    note = (remark or "").strip()
-    if not note:
-        raise DomainError(400, "驳回需要填写备注")
-    row.status = "rejected"
-    row.reviewer_id = actor.id
-    row.reviewed_at = utcnow()
-    row.remark = note[:200]
-    audit(
-        db,
-        actor,
-        "keyword.reject",
-        row.text,
-        f"驳回命中词「{row.text}」",
-        tenant_id=row.tenant_id,
-        before={"status": "pending"},
-        after={"status": "rejected"},
-        ip=ip,
-    )
-    db.commit()
-    db.refresh(row)
-    return row
-
-
-def delete_keyword(db: Session, actor: Member, entry_id: int, ip: str = "") -> KeywordEntry:
-    _require(actor, "keyword.review")
-    entry = db.get(KeywordEntry, entry_id)
-    if entry is None or entry.deleted_at is not None:
-        raise DomainError(404, "命中词不存在")
-    if entry.tenant_id is None and not has_perm(actor.role, "keyword.review.global"):
-        raise DomainError(403, "公司管理员不能删除全局词")
-    if entry.tenant_id is not None:
-        resolve_tenant(actor, entry.tenant_id)
-    version = _next_version(db)
-    entry.deleted_at = utcnow()
-    entry.version = version
-    audit(
-        db,
-        actor,
-        "keyword.delete",
-        entry.text,
-        f"删除命中词「{entry.text}」",
-        tenant_id=entry.tenant_id,
-        after={"version": version},
-        ip=ip,
-    )
-    db.commit()
-    db.refresh(entry)
-    return entry
-
-
-def save_rule_settings(
-    db: Session,
-    actor: Member,
-    *,
-    tenant_id: int | None,
-    categories: list[str],
-    ignore_phrases: list[str],
-    note: str,
-    ip: str = "",
-) -> TenantRules:
-    if actor.role not in ("platform_admin", "tenant_admin"):
-        raise DomainError(403, "没有权限")
-    target = resolve_tenant(actor, tenant_id)
-    if target is None:
-        raise DomainError(400, "请选择公司")
-    unique: list[str] = []
-    for item in categories:
-        if item not in CATEGORIES:
-            raise DomainError(400, "类别只能是价格、规格、品牌、夸大宣传")
-        if item not in unique:
-            unique.append(item)
-    cleaned_ignore: list[str] = []
-    for item in ignore_phrases:
-        text = re.sub(r"\s+", "", str(item).strip())
-        if not text:
-            continue
-        if len(text) > 40:
-            raise DomainError(400, "忽略词需要在 1 到 40 个字之间")
-        if text not in cleaned_ignore:
-            cleaned_ignore.append(text)
-    if len(cleaned_ignore) > 30:
-        raise DomainError(400, "忽略词最多 30 条")
-    body = (note or "").strip()
-    if len(body) > 400:
-        raise DomainError(400, "补充说明不能超过 400 字")
-    if any(token in body for token in _NOTE_BLOCK):
-        raise DomainError(400, "补充说明不能放宽禁止推测")
-    if not unique and _active_phrase_count(db, target) == 0:
-        raise DomainError(400, "至少保留一个类别，或一条已通过的命中词")
-    rules = db.get(TenantRules, target)
-    if rules is None:
-        rules = TenantRules(tenant_id=target, categories=[], ignore_phrases=[], note="")
-        db.add(rules)
-    rules.categories = unique
-    rules.ignore_phrases = cleaned_ignore
-    rules.note = body
-    rules.version = _next_version(db)
-    rules.updated_at = utcnow()
-    audit(db, actor, "rules.update", str(target), "更新公司审核规则", tenant_id=target, ip=ip)
-    db.commit()
-    db.refresh(rules)
-    return rules
-
-
-def rules_payload(db: Session, actor: Member, since: int, tenant_id: int | None) -> dict:
-    if actor.role == "member":
-        target = actor.tenant_id
-    else:
-        target = resolve_tenant(actor, tenant_id)
-    meta = db.get(AppMeta, "rules_version")
-    current = int(meta.value) if meta and meta.value else 0
-    query = db.query(KeywordEntry).filter(KeywordEntry.version > since)
-    if target is None and actor.role == "platform_admin":
-        scoped = query
-    else:
-        scoped = query.filter((KeywordEntry.tenant_id.is_(None)) | (KeywordEntry.tenant_id == target))
-    phrases = []
-    removed = []
-    for entry in scoped.order_by(KeywordEntry.version, KeywordEntry.id).all():
-        item = {
-            "id": entry.id,
-            "text": entry.text,
-            "category": entry.category,
-            "source": entry.source,
-            "scope": "global" if entry.tenant_id is None else "tenant",
-            "scope_label": "全局" if entry.tenant_id is None else "公司",
-            "version": entry.version,
-        }
-        if entry.deleted_at is None:
-            phrases.append(item)
-        else:
-            removed.append(entry.id)
-    rules = db.get(TenantRules, target) if target else None
-    return {
-        "version": current,
-        "categories": list(rules.categories) if rules else list(DEFAULT_CATEGORIES),
-        "ignore_phrases": list(rules.ignore_phrases) if rules else [],
-        "note": rules.note if rules else "",
-        "phrases": phrases,
-        "removed_ids": removed,
-        "speculation_policy": "只报告画面里看得见的文字，或口播里连续说出来的原话。禁止推测优先于补充说明。",
-    }
-
-
 def visible_member_ids(db: Session, actor: Member, tenant_id: int | None) -> list[int] | None:
     """None 表示平台看全部。"""
     if actor.role == "platform_admin":
@@ -1588,18 +1235,6 @@ def record_usage_snapshot(
         member.month_output_tokens = sum(item.output_tokens for item in month_rows)
     db.flush()
     return row
-
-
-def pending_count(db: Session, actor: Member) -> int:
-    query = db.query(KeywordSubmission).filter(KeywordSubmission.status == "pending")
-    if actor.role == "platform_admin":
-        return query.count()
-    if actor.role == "tenant_admin":
-        return query.filter(
-            KeywordSubmission.tenant_id == actor.tenant_id,
-            KeywordSubmission.scope == "tenant",
-        ).count()
-    return query.filter(KeywordSubmission.member_id == actor.id).count()
 
 
 def bind_device(

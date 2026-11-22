@@ -1,8 +1,8 @@
-﻿; 御镜视频素材审核系统 - Windows 安装包（Inno Setup）
+﻿; 御镜视频审核系统 - Windows 安装包（Inno Setup）
 ; 由 scripts\build_installer.ps1 调用，一般不用手动编译。
 ; 升级安装会覆盖旧版本：AppId 固定，安装目录记在上一次的 {app} 里，数据目录不在这里。
 
-#define MyAppName "御镜视频素材审核系统"
+#define MyAppName "御镜视频审核系统"
 #define MyAppExeName "VideoCompliance.exe"
 #ifndef MyAppVersion
   #define MyAppVersion "0.1.0"

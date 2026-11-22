@@ -596,7 +596,7 @@ def attach_mcp(app: FastAPI) -> None:
 
     globals()["Context"] = Context
     server = MCPServer(
-        name="御镜视频素材审核系统",
+        name="御镜视频审核系统",
         instructions=(
             "本机视频合规检测。桌面程序需要已经登录。"
             "提交一个视频用 submit_video，再用 get_job 看进度，完成后用 get_findings。"

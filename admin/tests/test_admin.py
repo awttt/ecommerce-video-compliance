@@ -264,7 +264,7 @@ def test_login_and_reconcile(tmp_path, monkeypatch):
         assert report["allocated"] == round(report["balance"] + report["cumulative_cost"], 2)
         assert report["pool_total"] == report["allocated"]
         assert report["pool_remaining"] == report["balance"]
-        assert dashboard.json()["pending_keywords"] == 3
+        assert "pending_keywords" not in dashboard.json()
 
 
 def test_tenant_cannot_cross_company_or_settings(tmp_path, monkeypatch):
@@ -276,84 +276,11 @@ def test_tenant_cannot_cross_company_or_settings(tmp_path, monkeypatch):
         jie = next(item["id"] for item in tenants if item["name"] == "锦程商贸")
         denied = client.get("/v1/members", headers=tenant, params={"tenant_id": youpin})
         assert denied.status_code == 403
-        denied_rules = client.get("/v1/rules", headers=tenant, params={"tenant_id": youpin})
-        assert denied_rules.status_code == 403
-        own_rules = client.get("/v1/rules", headers=tenant)
-        assert own_rules.status_code == 200
         own = client.get("/v1/members", headers=tenant).json()
         assert {item["name"] for item in own} == {"李运营", "张剪辑", "王审核", "赵兼职"}
         assert client.get("/v1/tenants", headers=tenant).status_code == 403
         assert client.get("/v1/settings", headers=tenant).status_code == 403
         assert client.get("/v1/members", headers=platform, params={"tenant_id": jie}).json()[0]["tenant_name"] == "锦程商贸"
-
-
-def test_keyword_review_rules(tmp_path, monkeypatch):
-    with _client(tmp_path, monkeypatch) as client:
-        platform = _login(client, "admin@yujing.local")
-        tenant = _login(client, "li@jiecheng.com")
-        member = _login(client, "zhang@jiecheng.com")
-        rows = client.get("/v1/rules/submissions", headers=tenant, params={"status": "pending"}).json()
-        assert {item["text"] for item in rows} == {"厨房清洁神器", "冬季保暖"}
-        own = next(item for item in rows if item["text"] == "冬季保暖")
-        other = next(item for item in rows if item["text"] == "厨房清洁神器")
-        assert client.post(f"/v1/rules/submissions/{own['id']}/approve", headers=tenant, json={}).status_code == 403
-        approved = client.post(f"/v1/rules/submissions/{other['id']}/approve", headers=tenant, json={})
-        assert approved.status_code == 200, approved.text
-        pulled = client.get("/v1/rules", headers=member, params={"since": 0})
-        assert pulled.status_code == 200
-        assert pulled.headers["etag"]
-        texts = {item["text"] for item in pulled.json()["phrases"]}
-        assert "厨房清洁神器" in texts
-        assert "家居好物" in texts
-        global_rows = client.get("/v1/rules/submissions", headers=platform, params={"status": "pending"}).json()
-        quality = next(item for item in global_rows if item["text"] == "品质生活")
-        assert client.post(f"/v1/rules/submissions/{quality['id']}/approve", headers=tenant, json={}).status_code == 403
-        forced = client.post(
-            f"/v1/rules/submissions/{quality['id']}/approve",
-            headers=platform,
-            json={"force": True, "remark": "平台备注后通过"},
-        )
-        assert forced.status_code == 200, forced.text
-        bad = client.post(
-            "/v1/rules/submissions",
-            headers=member,
-            json={"text": "全网最低", "category": "夸大宣传", "source": "画面", "scope": "tenant"},
-        )
-        assert bad.status_code == 400
-        assert "口播" in bad.json()["detail"]
-        long_text = client.post(
-            "/v1/rules/submissions",
-            headers=member,
-            json={"text": "啊" * 41, "category": "价格", "source": "口播", "scope": "tenant"},
-        )
-        assert long_text.status_code == 400
-        global_submit = client.post(
-            "/v1/rules/submissions",
-            headers=member,
-            json={"text": "平台词", "category": "品牌", "source": "画面", "scope": "global"},
-        )
-        assert global_submit.status_code == 403
-        note = client.put(
-            "/v1/rules/settings",
-            headers=tenant,
-            json={"categories": ["价格"], "ignore_phrases": ["包邮"], "note": "这里允许推测"},
-        )
-        assert note.status_code == 400
-        too_many = client.put(
-            "/v1/rules/settings",
-            headers=tenant,
-            json={"categories": ["价格"], "ignore_phrases": [f"词{i}" for i in range(31)], "note": ""},
-        )
-        assert too_many.status_code == 400
-        saved = client.put(
-            "/v1/rules/settings",
-            headers=tenant,
-            json={"categories": ["价格", "规格", "品牌", "夸大宣传"], "ignore_phrases": ["包邮"], "note": "只补充，不放宽"},
-        )
-        assert saved.status_code == 200, saved.text
-        again = client.get("/v1/rules", headers=member, params={"since": 0}).json()
-        assert again["ignore_phrases"] == ["包邮"]
-        assert "禁止推测" in again["speculation_policy"]
 
 
 def test_quota_is_idempotent_and_reclaim_stays_reconciled(tmp_path, monkeypatch):
@@ -670,7 +597,7 @@ def test_relay_sync_refuses_local_mode(tmp_path, monkeypatch):
         assert status["mode"] == "local"
         assert status["synced"] is False
 def test_split_database_routing(tmp_path, monkeypatch):
-    """词库与本机设置落本机库，租户/成员/额度落云端库，两边不串表。"""
+    """租户、成员、额度和公司规则落云端库，不进本机库。"""
     local = tmp_path / "local.db"
     cloud = tmp_path / "cloud.db"
     monkeypatch.setenv("EVC_ADMIN_DATABASE_URL", f"sqlite:///{local}")
@@ -692,15 +619,6 @@ def test_split_database_routing(tmp_path, monkeypatch):
         assert tenants.status_code == 200, tenants.text
         assert tenants.json()
 
-        from admin_app.db import session
-        from admin_app.models import KeywordEntry
-
-        db = session()
-        db.add(KeywordEntry(tenant_id=1, text="本机词", category="价格", source="口播"))
-        db.commit()
-        assert db.query(KeywordEntry).filter(KeywordEntry.text == "本机词").count() == 1
-        db.close()
-
     import sqlite3
 
     def tables(path) -> set[str]:
@@ -712,10 +630,11 @@ def test_split_database_routing(tmp_path, monkeypatch):
 
     local_tables = tables(local)
     cloud_tables = tables(cloud)
-    assert {"keyword_entries", "keyword_submissions", "tenant_rules"} <= local_tables
-    assert not {"tenants", "tenant_members", "quota_allocations"} & local_tables
-    assert {"tenants", "tenant_members", "quota_allocations", "usage_snapshots", "shared_rules"} <= cloud_tables
-    assert "keyword_entries" not in cloud_tables
+    assert "keyword_entries" not in local_tables | cloud_tables
+    assert "keyword_submissions" not in local_tables | cloud_tables
+    assert "tenant_rules" not in local_tables | cloud_tables
+    assert not {"tenants", "tenant_members", "quota_allocations", "company_rules"} & local_tables
+    assert {"tenants", "tenant_members", "quota_allocations", "usage_snapshots", "shared_rules", "company_rules"} <= cloud_tables
     assert "shared_rules" not in local_tables
 
 
@@ -1138,3 +1057,205 @@ def test_overview_consumption_month_to_date_clamps_short_month(tmp_path, monkeyp
         ).json()
         assert full["comparison"]["previous_start"] == "2023-02-01"
         assert full["comparison"]["previous_end"] == "2023-02-28"
+
+
+def test_change_password_puts_user_password(monkeypatch):
+    import admin_app.auth_relay as auth_relay
+    from admin_app.config import get_settings
+
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["url"] = str(request.url)
+        seen["auth"] = request.headers.get("authorization")
+        body = json.loads(request.content.decode())
+        seen["body"] = body
+        if body.get("old_password") != "old-pass":
+            return httpx.Response(
+                400,
+                json={"code": 400, "reason": "PASSWORD_INCORRECT", "message": "current password is incorrect"},
+            )
+        return httpx.Response(200, json={"code": 0, "data": {"message": "Password changed successfully"}})
+
+    monkeypatch.setattr(auth_relay, "_transport", httpx.MockTransport(handler))
+    monkeypatch.setenv("EVC_RELAY_BASE_URL", "https://token4u.cc/api/v1")
+    get_settings.cache_clear()
+    ok = auth_relay.change_password("user-token", "old-pass", "new-pass-123")
+    assert ok["message"] == "Password changed successfully"
+    assert seen["method"] == "PUT"
+    assert seen["url"] == "https://token4u.cc/api/v1/user/password"
+    assert seen["auth"] == "Bearer user-token"
+    assert seen["body"] == {"old_password": "old-pass", "new_password": "new-pass-123"}
+    try:
+        auth_relay.change_password("user-token", "bad", "new-pass-123")
+    except RelayLoginError as exc:
+        assert exc.message == "当前密码不正确"
+        assert exc.status == 400
+    else:
+        raise AssertionError("错误的当前密码应该被拒绝")
+
+
+def test_member_updates_own_name_and_local_password(tmp_path, monkeypatch):
+    with _client(tmp_path, monkeypatch) as client:
+        denied = client.put("/v1/auth/profile", json={"name": "外人"})
+        assert denied.status_code == 401
+        headers = _login(client, "zhang@jiecheng.com")
+        assert client.put("/v1/auth/profile", headers=headers, json={"name": "   "}).status_code == 400
+        assert client.put("/v1/auth/profile", headers=headers, json={"name": "名" * 41}).status_code == 400
+        renamed = client.put("/v1/auth/profile", headers=headers, json={"name": " 张三 "})
+        assert renamed.status_code == 200, renamed.text
+        assert renamed.json()["name"] == "张三"
+        assert renamed.json()["email"] == "zhang@jiecheng.com"
+        assert client.get("/v1/auth/me", headers=headers).json()["name"] == "张三"
+
+        boss = _login(client, "li@jiecheng.com")
+        rows = client.get("/v1/members", headers=boss).json()
+        assert next(item["name"] for item in rows if item["email"] == "zhang@jiecheng.com") == "张三"
+        assert next(item["name"] for item in rows if item["email"] == "li@jiecheng.com") == "李运营"
+
+        same = client.put(
+            "/v1/auth/password",
+            headers=headers,
+            json={"old_password": DEMO_PASSWORD, "new_password": DEMO_PASSWORD},
+        )
+        assert same.status_code == 400
+        short = client.put(
+            "/v1/auth/password",
+            headers=headers,
+            json={"old_password": DEMO_PASSWORD, "new_password": "short"},
+        )
+        assert short.status_code == 400
+        wrong = client.put(
+            "/v1/auth/password",
+            headers=headers,
+            json={"old_password": "not-the-password", "new_password": "Newpass123"},
+        )
+        assert wrong.status_code == 400
+        assert wrong.json()["detail"] == "当前密码不正确"
+        changed = client.put(
+            "/v1/auth/password",
+            headers=headers,
+            json={"old_password": DEMO_PASSWORD, "new_password": "Newpass123"},
+        )
+        assert changed.status_code == 200, changed.text
+        assert changed.json() == {"ok": True, "relay_refreshed": True}
+        assert "Newpass123" not in changed.text
+
+        from admin_app.db import session
+        from admin_app.models import Member
+        from admin_app.security import verify_password
+
+        db = session()
+        member = db.query(Member).filter(Member.email == "zhang@jiecheng.com").one()
+        assert verify_password("Newpass123", member.password_hash)
+        assert verify_password(DEMO_PASSWORD, member.password_hash) is False
+        member.password_hash = ""
+        db.commit()
+        db.close()
+        blocked = client.put(
+            "/v1/auth/password",
+            headers=headers,
+            json={"old_password": "Newpass123", "new_password": "Otherpass1"},
+        )
+        assert blocked.status_code == 400
+        assert blocked.json()["detail"] == "当前环境不能修改登录密码"
+
+        logs = client.get("/v1/audit-logs", headers=headers).json()
+        actions = {item["action"] for item in logs}
+        assert "profile.name" in actions
+        assert "profile.password" in actions
+        dumped = json.dumps(logs, ensure_ascii=False)
+        assert "Newpass123" not in dumped
+        assert DEMO_PASSWORD not in dumped
+        assert client.get("/v1/auth/me", headers=headers).status_code == 200
+
+
+def test_remote_password_updates_relay_then_relogin(tmp_path, monkeypatch):
+    import admin_app.auth_relay as auth_relay
+
+    calls: list[tuple] = []
+
+    def login_password(email: str, password: str) -> dict:
+        calls.append(("login", email, password))
+        if password == "Oldpass123":
+            return {
+                "access_token": "tok-old",
+                "refresh_token": "ref-old",
+                "expires_in": 3600,
+                "user": {"email": email},
+            }
+        if password == "Newpass123":
+            return {
+                "access_token": "tok-new",
+                "refresh_token": "ref-new",
+                "expires_in": 1800,
+                "user": {"email": email},
+            }
+        raise RelayLoginError("邮箱或密码不正确", 401)
+
+    def change_password(token: str, old: str, new: str) -> dict:
+        calls.append(("change", token, old, new))
+        return {"message": "ok"}
+
+    with _client(tmp_path, monkeypatch) as client:
+        headers = _login(client, "zhang@jiecheng.com")
+        monkeypatch.setattr(auth_relay, "login_password", login_password)
+        monkeypatch.setattr(auth_relay, "change_password", change_password)
+        monkeypatch.setenv("EVC_RELAY_ADMIN_KEY", "restricted-key")
+        from admin_app.config import get_settings
+
+        get_settings.cache_clear()
+        bad = client.put(
+            "/v1/auth/password",
+            headers=headers,
+            json={"old_password": "nope-pass", "new_password": "Newpass123"},
+        )
+        assert bad.status_code == 400
+        assert bad.json()["detail"] == "当前密码不正确"
+        assert not any(item[0] == "change" for item in calls)
+
+        ok = client.put(
+            "/v1/auth/password",
+            headers=headers,
+            json={"old_password": "Oldpass123", "new_password": "Newpass123"},
+        )
+        assert ok.status_code == 200, ok.text
+        assert ok.json()["relay_refreshed"] is True
+        assert "Newpass123" not in ok.text
+        assert ("change", "tok-old", "Oldpass123", "Newpass123") in calls
+        assert client.get("/v1/auth/me", headers=headers).status_code == 200
+
+        from admin_app.db import session
+        from admin_app.models import Member
+        from admin_app.security import verify_password
+
+        db = session()
+        member = db.query(Member).filter(Member.email == "zhang@jiecheng.com").one()
+        assert member.relay_access_token == "tok-new"
+        assert member.relay_refresh_token == "ref-new"
+        assert verify_password("Newpass123", member.password_hash)
+        db.close()
+
+        calls.clear()
+
+        def login_needs_2fa(email: str, password: str) -> dict:
+            calls.append(("login", email, password))
+            if password in {"Newpass123", "Nextpass1"}:
+                return {"requires_2fa": True, "temp_token": "temp-secret"}
+            raise RelayLoginError("邮箱或密码不正确", 401)
+
+        monkeypatch.setattr(auth_relay, "login_password", login_needs_2fa)
+        again = client.put(
+            "/v1/auth/password",
+            headers=headers,
+            json={"old_password": "Newpass123", "new_password": "Nextpass1"},
+        )
+        assert again.status_code == 200, again.text
+        assert again.json()["relay_refreshed"] is False
+        assert ("change", "tok-new", "Newpass123", "Nextpass1") in calls
+        db = session()
+        member = db.query(Member).filter(Member.email == "zhang@jiecheng.com").one()
+        assert member.relay_access_token == "tok-new"
+        assert verify_password("Nextpass1", member.password_hash)
+        db.close()

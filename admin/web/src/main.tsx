@@ -5,7 +5,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import { App } from "./App";
-import { accessToken, saveSession } from "./api";
+import { accessToken, rememberedEmail, rememberEmail, restoreSession, saveSession, takeExpiredMark } from "./api";
 import "antd/dist/reset.css";
 import "./styles.css";
 
@@ -35,12 +35,19 @@ const theme = {
 async function singleSignOn() {
   const url = new URL(window.location.href);
   if (!url.searchParams.has("sso")) return;
-  if (!accessToken()) {
+  // 满 7 天必须重新输入密码，不再用工具端会话把登录态续上。
+  if (!takeExpiredMark() && !accessToken()) {
     try {
       const response = await fetch("/sso", { method: "POST", credentials: "include" });
       if (response.ok) {
-        const data = (await response.json()) as { access_token?: string; refresh_token?: string };
-        if (data.access_token && data.refresh_token) saveSession(data.access_token, data.refresh_token);
+        const data = (await response.json()) as {
+          access_token?: string;
+          refresh_token?: string;
+          user?: { email?: string };
+        };
+        if (data.access_token && data.refresh_token) {
+          saveSession(data.access_token, data.refresh_token, data.user?.email ?? "");
+        }
       }
     } catch {
       // 单独部署的云端后台没有 /sso，回落成正常登录页。
@@ -50,8 +57,26 @@ async function singleSignOn() {
   window.history.replaceState(null, "", url.pathname + url.search + url.hash);
 }
 
+/** 刷新令牌恢复的会话没有走过登录表单，这里把当前邮箱留给下次登录。 */
+async function rememberSignedInEmail() {
+  if (rememberedEmail() || !accessToken()) return;
+  try {
+    const response = await fetch("/v1/auth/me", {
+      credentials: "include",
+      headers: { Authorization: `Bearer ${accessToken()}` },
+    });
+    if (!response.ok) return;
+    const data = (await response.json()) as { email?: string };
+    rememberEmail(data.email ?? "");
+  } catch {
+    // 记不住邮箱不影响这次登录。
+  }
+}
+
 async function start() {
+  await restoreSession();
   await singleSignOn();
+  await rememberSignedInEmail();
   createRoot(document.getElementById("root")!).render(
     <StrictMode>
       <QueryClientProvider client={queryClient}>

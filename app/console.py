@@ -67,14 +67,14 @@ _FALLBACK = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <title>御镜管理控制台</title>
+  <title>御镜视频审核系统</title>
   <style>
     body { font-family: sans-serif; margin: 48px auto; max-width: 720px; line-height: 1.6; color: #1f2933; }
     code { background: #f3f5f7; padding: 2px 6px; }
   </style>
 </head>
 <body>
-  <h1>御镜管理控制台</h1>
+  <h1>御镜视频审核系统</h1>
   <p>控制台页面还没有构建。请在 <code>admin/web</code> 目录执行 <code>npm install</code> 和 <code>npm run build</code>，然后重新打开本程序。</p>
 </body>
 </html>
@@ -167,7 +167,7 @@ def create_console_app(
             else:
                 index_html = snippet + index_html
     app = FastAPI(
-        title="御镜管理控制台",
+        title="御镜视频审核系统",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
