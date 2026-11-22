@@ -1,22 +1,98 @@
 name: Windows package
 
+# Push to main: build the installer and keep the Actions artifacts.
+# Push a v* tag, or run this workflow on that tag with release enabled:
+# also publish a GitHub Release and upload the installer.
+
 on:
   workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish the GitHub Release and upload the installer. Run this on tag vX.Y.Z, which must match __version__."
+        type: boolean
+        default: false
   push:
     branches:
       - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
 
 concurrency:
-  group: windows-package
-  cancel-in-progress: true
+  # A push to main cancels an older main build. A tag release is left running
+  # so it is not cancelled mid-upload, and a second push of that tag waits.
+  group: windows-package-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
   package:
     name: Build Windows package
     runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      release: ${{ steps.meta.outputs.release }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Check release tag
+        id: meta
+        shell: pwsh
+        env:
+          RELEASE_REQUESTED: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.release) }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          function Write-Annotation([string]$Message) {
+            $clean = ($Message -replace '[\r\n]', ' ' -replace '::', ' ')
+            Write-Host "::error::$clean"
+          }
+
+          $init = Get-Content -Raw -Path "app/__init__.py"
+          # -cmatch fills $Matches. -cnotmatch does not.
+          if (-not ($init -cmatch '__version__\s*=\s*"([^"]+)"')) {
+            Write-Annotation "app/__init__.py does not set __version__."
+            throw "app/__init__.py does not set __version__."
+          }
+          $version = $Matches[1]
+          $releaseRequested = $env:RELEASE_REQUESTED -eq "true"
+          $valid = $version -cmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+
+          if ($releaseRequested) {
+            if (-not $valid) {
+              Write-Annotation "Refusing to release: __version__ must be X.Y.Z with no leading zeros, got '$version'."
+              throw "invalid __version__"
+            }
+            $expected = "v$version"
+            if ($env:GITHUB_REF_TYPE -ne "tag" -or $env:GITHUB_REF_NAME -ne $expected) {
+              Write-Annotation "Refusing to release: tag must be $expected (v + __version__). This run is '$($env:GITHUB_REF_NAME)' ($($env:GITHUB_REF_TYPE)). Push that tag, or re-run this workflow on it with release enabled."
+              throw "tag does not match __version__"
+            }
+            Write-Host "Release tag $expected matches __version__."
+            if ($env:GITHUB_STEP_SUMMARY) {
+              [System.IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, "Publishing $expected.`n")
+            }
+          } else {
+            Write-Host "Build only. No GitHub Release and no download-server upload."
+            if ($env:GITHUB_STEP_SUMMARY) {
+              [System.IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, "Build only. This run does not publish a release or upload the installer.`n")
+            }
+          }
+
+          if ($valid) {
+            $outputVersion = $version
+          } else {
+            $outputVersion = "invalid"
+          }
+          $releaseFlag = "false"
+          if ($releaseRequested) { $releaseFlag = "true" }
+          [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "version=$outputVersion`n")
+          [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "release=$releaseFlag`n")
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -117,3 +193,97 @@ jobs:
           path: dist/VideoCompliance-*-Setup.exe
           if-no-files-found: error
           retention-days: 14
+
+  deploy:
+    name: Upload installer to download server
+    needs: package
+    # An if replaces the implicit "needs succeeded" check, so test the result.
+    if: needs.package.result == 'success' && needs.package.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    concurrency:
+      group: videocompliance-download-upload
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download installer
+        uses: actions/download-artifact@v4
+        with:
+          name: VideoCompliance-windows-setup
+          path: installer
+
+      - name: Upload installer
+        env:
+          VERSION: ${{ needs.package.outputs.version }}
+          DEPLOY_SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: bash scripts/upload_installer.sh upload "$VERSION" installer
+
+  release:
+    name: Publish GitHub Release
+    needs: [package, deploy]
+    if: needs.package.result == 'success' && needs.package.outputs.release == 'true' && needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download installer
+        uses: actions/download-artifact@v4
+        with:
+          name: VideoCompliance-windows-setup
+          path: installer
+
+      - name: Require the version tag
+        env:
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::refusing to publish unexpected version"
+            exit 1
+          fi
+          expected="refs/tags/v${VERSION}"
+          if [[ "$GITHUB_REF" != "$expected" ]]; then
+            echo "::error::Refusing to publish a release from ${GITHUB_REF}. Expected ${expected}."
+            exit 1
+          fi
+
+      - name: Prepare release assets
+        env:
+          VERSION: ${{ needs.package.outputs.version }}
+        run: bash scripts/upload_installer.sh stage "$VERSION" installer publish
+
+      - name: Publish GitHub Release
+        id: gh-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.package.outputs.version }}
+          name: VideoCompliance ${{ needs.package.outputs.version }}
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          files: |
+            publish/VideoCompliance-${{ needs.package.outputs.version }}-Setup.exe
+            publish/VideoCompliance-${{ needs.package.outputs.version }}-Setup.exe.sha256
+          body: |
+            Windows 安装包 ${{ needs.package.outputs.version }}。
+            下载页：https://token4u.cc/download
+            附件里的 .sha256 是 sha256sum 的输出。
+
+      - name: Record the release URL
+        run: |
+          echo "Release: ${{ steps.gh-release.outputs.url }}" >> "$GITHUB_STEP_SUMMARY"
