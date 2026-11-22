@@ -13,6 +13,20 @@ from admin_app.timeutil import utcnow
 # 余额流水里的备注前缀。对账时靠它把本地幂等键和中转站流水对上。
 NOTE_PREFIX = "evc-admin:"
 _NO_KEY = "当前是演示环境，不能同步余额"
+# 查询失败必须把这句话抛出去。调用方看到它就停，不能当成「没有这个人」去建号。
+LOOKUP_FAILED = "查询中转站账号失败，请稍后再试。本次没有新建账号。"
+
+
+def _user_rows(data: object) -> list:
+    """只认用户列表，或带 items/list 的对象。认不出就当查询失败。"""
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("items", "list"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+    raise DomainError(502, LOOKUP_FAILED)
 
 
 def apply_credentials(member: Member, credentials: dict) -> None:
@@ -168,20 +182,27 @@ class HttpRelay:
         return self._payload(response, "读取")
 
     def create_user(self, email: str, password: str) -> tuple[str, dict]:
+        import httpx
+
         group = self._configured_group_id()
-        response = self.client.post(
-            self._url("/admin/users"),
-            headers={
-                "Idempotency-Key": hashlib.sha256(f"evc-admin-user:{email}".encode()).hexdigest()[:32],
-            },
-            # token4u 受限密钥的 users.create 明确拒绝附带余额，包括 balance: 0。
-            json={
-                "email": email,
-                "password": password,
-                "allowed_groups": [group],
-                "restrict_public_groups": True,
-            },
-        )
+        # 同一邮箱的幂等键固定，重试不会在中转站再开一个号。
+        try:
+            response = self.client.post(
+                self._url("/admin/users"),
+                headers={
+                    "Idempotency-Key": hashlib.sha256(f"evc-admin-user:{email}".encode()).hexdigest()[:32],
+                },
+                # token4u 受限密钥的 users.create 明确拒绝附带余额，包括 balance: 0。
+                json={
+                    "email": email,
+                    "password": password,
+                    "allowed_groups": [group],
+                    "restrict_public_groups": True,
+                },
+            )
+        except httpx.HTTPError:
+            # 异常对象可能带上请求体，不要链接到原始异常，避免密码进日志。
+            raise DomainError(502, "建号失败，请稍后再试")
         data = self._payload(response, "建号")
         user_id = data.get("id") if isinstance(data, dict) else None
         if not user_id:
@@ -190,13 +211,28 @@ class HttpRelay:
         return str(user_id), credentials
 
     def find_user_by_email(self, email: str) -> dict | None:
-        """按邮箱查中转站已有账号。列表接口支持 search，再按邮箱做精确匹配，避免搜到前缀相同的其他账号。"""
+        """按邮箱查中转站已有账号。列表接口支持 search，再按邮箱做精确匹配。
+
+        查不到返回 None。网络错误、非 2xx、或认不出的响应都抛错，不能当成新用户。
+        """
+        import httpx
+
         wanted = email.strip().lower()
-        data = self._get("/admin/users", params={"search": wanted, "page": 1, "page_size": 50})
-        rows = data if isinstance(data, list) else []
-        if isinstance(data, dict):
-            rows = data.get("items") or data.get("list") or []
-        for row in rows:
+        try:
+            response = self.client.get(
+                self._url("/admin/users"),
+                params={"search": wanted, "page": 1, "page_size": 50},
+            )
+        except httpx.HTTPError as exc:
+            raise DomainError(502, LOOKUP_FAILED) from exc
+        if response.status_code >= 400:
+            raise DomainError(502, LOOKUP_FAILED)
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise DomainError(502, LOOKUP_FAILED) from exc
+        data = body.get("data") if isinstance(body, dict) and "data" in body else body
+        for row in _user_rows(data):
             if not isinstance(row, dict):
                 continue
             if str(row.get("email") or "").strip().lower() != wanted:
@@ -210,27 +246,30 @@ class HttpRelay:
     def _create_default_key(self, email: str, password: str) -> dict:
         import httpx
 
-        with httpx.Client(timeout=20.0) as user_client:
-            response = user_client.post(
-                self._url("/auth/login"),
-                json={"email": email, "password": password},
-            )
-            self._raise(response, "账号登录验证")
-            payload = response.json()
-            data = payload.get("data") if isinstance(payload, dict) else None
-            data = data if isinstance(data, dict) else payload
-            access_token = str(data.get("access_token") or "").strip()
-            if not access_token:
-                raise DomainError(502, "开通账号失败，服务没有返回登录凭证")
-            group_id = self._configured_group_id()
-            response = user_client.post(
-                self._url("/keys"),
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "Idempotency-Key": hashlib.sha256(f"evc-admin-key:{email}:{group_id}".encode()).hexdigest()[:32],
-                },
-                json={"name": "电商视频合规", "group_id": group_id},
-            )
+        try:
+            with httpx.Client(timeout=20.0) as user_client:
+                response = user_client.post(
+                    self._url("/auth/login"),
+                    json={"email": email, "password": password},
+                )
+                self._raise(response, "账号登录验证")
+                payload = response.json()
+                data = payload.get("data") if isinstance(payload, dict) else None
+                data = data if isinstance(data, dict) else payload
+                access_token = str(data.get("access_token") or "").strip()
+                if not access_token:
+                    raise DomainError(502, "开通账号失败，服务没有返回登录凭证")
+                group_id = self._configured_group_id()
+                response = user_client.post(
+                    self._url("/keys"),
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Idempotency-Key": hashlib.sha256(f"evc-admin-key:{email}:{group_id}".encode()).hexdigest()[:32],
+                    },
+                    json={"name": "电商视频合规", "group_id": group_id},
+                )
+        except httpx.HTTPError:
+            raise DomainError(502, "开通账号失败，请稍后再试")
         self._raise(response, "创建审核密钥")
         created = self._payload(response, "创建审核密钥")
         key = ""

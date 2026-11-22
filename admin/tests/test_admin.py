@@ -720,7 +720,7 @@ def test_split_database_routing(tmp_path, monkeypatch):
 
 
 def test_link_existing_relay_account(tmp_path, monkeypatch):
-    """中转站里已经注册过的邮箱，可以绑定已有账号，不会重复建号。"""
+    """中转站里已经注册过的邮箱会自动绑定，不会重复建号，也不再看勾选框。"""
     with _client(tmp_path, monkeypatch) as client:
         platform = _login(client, "admin@yujing.local")
 
@@ -752,12 +752,13 @@ def test_link_existing_relay_account(tmp_path, monkeypatch):
                 "password": "",
                 "role": "member",
                 "tenant_id": tenant["id"],
-                "link_existing": True,
             },
         )
         assert response.status_code == 200, response.text
         created = response.json()
         assert created["relay_user_id"] == "user_9001"
+        assert created["linked_existing"] is True
+        assert "password" not in created
 
         db = session()
         assert (
@@ -767,7 +768,7 @@ def test_link_existing_relay_account(tmp_path, monkeypatch):
         assert bound.relay_user_id == "user_9001"
         db.close()
 
-        # 中转站里没有的邮箱，绑定模式要明确报错，不能静默建号。
+        # 还没有的邮箱、又没给初始密码：不能建号，也不能当成查询失败。
         missing = client.post(
             "/v1/members",
             headers=platform,
@@ -776,11 +777,13 @@ def test_link_existing_relay_account(tmp_path, monkeypatch):
                 "name": "nobody",
                 "role": "member",
                 "tenant_id": tenant["id"],
-                "link_existing": True,
             },
         )
         assert missing.status_code == 400
-        assert "没有找到这个邮箱的账号" in missing.json()["detail"]
+        assert "密码" in missing.json()["detail"]
+        db = session()
+        assert db.query(RelayAccount).filter(RelayAccount.email == "nobody@jiecheng.com").count() == 0
+        db.close()
 
         # 同号不能重复绑定。
         again = client.post(
@@ -791,12 +794,11 @@ def test_link_existing_relay_account(tmp_path, monkeypatch):
                 "name": "重复",
                 "role": "member",
                 "tenant_id": tenant["id"],
-                "link_existing": True,
             },
         )
         assert again.status_code in (400, 404)
 
-        # 普通模式（不绑定）仍然要求密码。
+        # 新账号仍然要求密码。
         no_password = client.post(
             "/v1/members",
             headers=platform,
@@ -841,7 +843,6 @@ def test_link_existing_rejects_disabled_or_missing(tmp_path, monkeypatch):
                 "name": "停用号",
                 "role": "member",
                 "tenant_id": tenant["id"],
-                "link_existing": True,
             },
         )
         assert response.status_code == 400

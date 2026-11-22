@@ -26,7 +26,7 @@ from admin_app.models import (
 )
 from admin_app.money import to_cents, yuan
 from admin_app.permissions import ROLE_LABEL, has_perm
-from admin_app.relay import apply_credentials, get_relay, relay_mode
+from admin_app.relay import LOOKUP_FAILED, apply_credentials, get_relay, relay_mode
 from admin_app.security import hash_password, new_invite_token, sha256_text
 from admin_app.timeutil import iso, shanghai_now, utcnow
 
@@ -172,19 +172,28 @@ def _password_ok(password: str) -> None:
         raise DomainError(400, "密码需要在 8 到 72 位之间")
 
 
-def _relay_account(
-    db: Session,
-    relay,
-    email: str,
-    password: str,
-    link_existing: bool,
-) -> tuple[str, dict]:
-    """建新号，或把中转站里已经注册过的账号绑进来。返回 (relay_user_id, credentials)。"""
-    if not link_existing:
-        return relay.create_user(email, password)
-    found = relay.find_user_by_email(email)
+# 中转站已经建号或绑号，但本地提交失败。重试会按邮箱再查，不会再开一个号。
+SAVE_FAILED = "中转站账号已处理，但后台保存失败。请用同一邮箱再提交一次，不会重复建号。"
+
+
+def _lookup_relay_user(relay, email: str) -> dict | None:
+    """查中转站。任何失败都抛错，调用方不能把失败当成新用户。"""
+    try:
+        found = relay.find_user_by_email(email)
+    except DomainError as exc:
+        if exc.detail == LOOKUP_FAILED:
+            raise
+        raise DomainError(502, LOOKUP_FAILED) from exc
+    except Exception as exc:
+        raise DomainError(502, LOOKUP_FAILED) from exc
     if found is None:
-        raise DomainError(400, "没有找到这个邮箱的账号，请先注册，或关闭「绑定已有账号」")
+        return None
+    if not isinstance(found, dict) or not str(found.get("id") or "").strip():
+        raise DomainError(502, LOOKUP_FAILED)
+    return found
+
+
+def _bind_existing(db: Session, found: dict) -> tuple[str, dict]:
     status = str(found.get("status") or "").strip().lower()
     if status and status != "active":
         raise DomainError(400, "这个账号已停用，请联系平台管理员启用")
@@ -200,6 +209,55 @@ def _relay_account(
     return relay_user_id, {}
 
 
+def _relay_account(db: Session, relay, email: str, password: str) -> tuple[str, dict, bool]:
+    """先按邮箱查中转站。已有就绑定，没有才用现有建号接口开通。
+
+    返回 (relay_user_id, credentials, linked_existing)。
+    查询失败直接报错。建号请求发出后如果响应丢失，会再查一次：查到就绑定，避免重复建号。
+    """
+    found = _lookup_relay_user(relay, email)
+    if found is not None:
+        relay_user_id, credentials = _bind_existing(db, found)
+        return relay_user_id, credentials, True
+    _password_ok(password)
+    try:
+        created = relay.create_user(email, password)
+    except Exception as exc:
+        again = _existing_after_create_error(relay, email)
+        if again is not None:
+            relay_user_id, credentials = _bind_existing(db, again)
+            return relay_user_id, credentials, True
+        if isinstance(exc, DomainError):
+            raise
+        raise DomainError(502, "建号失败，请稍后再试。本次没有写入后台。") from None
+    if not isinstance(created, tuple) or len(created) != 2:
+        raise DomainError(502, "开通账号失败，服务没有返回用户编号")
+    relay_user_id, credentials = created
+    if not str(relay_user_id or "").strip():
+        raise DomainError(502, "开通账号失败，服务没有返回用户编号")
+    return str(relay_user_id), credentials if isinstance(credentials, dict) else {}, False
+
+
+def _existing_after_create_error(relay, email: str) -> dict | None:
+    """建号报错后再查一次。查询也失败时返回 None，调用方必须沿用原来的建号错误，不能当成新建成功。"""
+    try:
+        found = relay.find_user_by_email(email)
+    except Exception:
+        return None
+    if isinstance(found, dict) and str(found.get("id") or "").strip():
+        return found
+    return None
+
+
+def _commit_bound_member(db: Session) -> None:
+    """中转站已经处理完才提交本地。写库失败就回滚，留下的中转站账号按邮箱再提交即可绑上。"""
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise DomainError(500, SAVE_FAILED) from None
+
+
 def create_tenant(
     db: Session,
     actor: Member,
@@ -209,9 +267,8 @@ def create_tenant(
     admin_name: str,
     admin_password: str,
     seats: int,
-    link_existing: bool = False,
     ip: str = "",
-) -> tuple[Tenant, Member]:
+) -> tuple[Tenant, Member, bool]:
     _require(actor, "tenant.manage")
     cleaned = name.strip()
     if not cleaned or len(cleaned) > 40:
@@ -223,8 +280,6 @@ def create_tenant(
         raise DomainError(400, "已经有这家公司")
     if db.query(Member).filter(Member.email == email).first():
         raise DomainError(400, "这个邮箱已经开通")
-    if not link_existing:
-        _password_ok(admin_password)
     if seats < 1 or seats > 10000:
         raise DomainError(400, "席位数需要在 1 到 10000 之间")
     from admin_app.relay import group_id_of, group_name_of
@@ -243,7 +298,7 @@ def create_tenant(
     db.add(tenant)
     db.flush()
     relay = get_relay(db)
-    relay_user_id, credentials = _relay_account(db, relay, email, admin_password, link_existing)
+    relay_user_id, credentials, linked = _relay_account(db, relay, email, admin_password)
     admin_member = Member(
         tenant_id=tenant.id,
         email=email,
@@ -266,10 +321,19 @@ def create_tenant(
         )
     )
     audit(db, actor, "tenant.create", cleaned, f"新建公司 {cleaned}", tenant_id=tenant.id, ip=ip)
-    audit(db, actor, "member.create", email, f"创建公司管理员 {admin_member.name}", tenant_id=tenant.id, after={"relay_user_id": relay_user_id, "role": "tenant_admin"}, ip=ip)
-    db.commit()
+    audit(
+        db,
+        actor,
+        "member.create",
+        email,
+        f"创建公司管理员 {admin_member.name}",
+        tenant_id=tenant.id,
+        after={"relay_user_id": relay_user_id, "role": "tenant_admin", "linked_existing": linked},
+        ip=ip,
+    )
+    _commit_bound_member(db)
     db.refresh(tenant)
-    return tenant, admin_member
+    return tenant, admin_member, linked
 
 
 def set_tenant_status(
@@ -376,9 +440,8 @@ def create_member(
     password: str,
     role: str,
     tenant_id: int | None,
-    link_existing: bool = False,
     ip: str = "",
-) -> Member:
+) -> tuple[Member, bool]:
     _require(actor, "member.manage")
     if role not in ("tenant_admin", "member"):
         raise DomainError(400, "角色只能是公司管理员或普通用户")
@@ -397,10 +460,8 @@ def create_member(
         raise DomainError(400, "这个邮箱已经开通")
     if seats_used(db, tenant.id) >= tenant.seat_quota:
         raise DomainError(400, "席位已满")
-    if not link_existing:
-        _password_ok(password)
     relay = get_relay(db)
-    relay_user_id, credentials = _relay_account(db, relay, address, password, link_existing)
+    relay_user_id, credentials, linked = _relay_account(db, relay, address, password)
     member = Member(
         tenant_id=tenant.id,
         email=address,
@@ -412,13 +473,22 @@ def create_member(
     )
     apply_credentials(member, credentials)
     db.add(member)
-    audit(db, actor, "member.create", member.email, f"创建成员 {member.name}", tenant_id=tenant.id, after={"relay_user_id": relay_user_id, "role": role}, ip=ip)
-    db.commit()
+    audit(
+        db,
+        actor,
+        "member.create",
+        member.email,
+        f"创建成员 {member.name}",
+        tenant_id=tenant.id,
+        after={"relay_user_id": relay_user_id, "role": role, "linked_existing": linked},
+        ip=ip,
+    )
+    _commit_bound_member(db)
     db.refresh(member)
-    return member
+    return member, linked
 
 
-def accept_invite(db: Session, token: str, password: str, name: str = "") -> tuple[Member, str]:
+def accept_invite(db: Session, token: str, password: str, name: str = "") -> tuple[Member, str, bool]:
     _password_ok(password)
     row = db.query(Invite).filter(Invite.token_hash == sha256_text(token or "")).one_or_none()
     if row is None or row.used_at is not None or row.expires_at < utcnow():
@@ -431,7 +501,7 @@ def accept_invite(db: Session, token: str, password: str, name: str = "") -> tup
     if db.query(Member).filter(Member.email == row.email).first():
         raise DomainError(400, "这个邮箱已经开通")
     relay = get_relay(db)
-    relay_user_id, credentials = relay.create_user(row.email, password)
+    relay_user_id, credentials, linked = _relay_account(db, relay, row.email, password)
     member = Member(
         tenant_id=tenant.id,
         email=row.email,
@@ -451,9 +521,9 @@ def accept_invite(db: Session, token: str, password: str, name: str = "") -> tup
         member.email,
         f"开通成员 {member.name}",
         tenant_id=tenant.id,
-        after={"relay_user_id": relay_user_id, "role": member.role},
+        after={"relay_user_id": relay_user_id, "role": member.role, "linked_existing": linked},
     )
-    db.commit()
+    _commit_bound_member(db)
     db.refresh(member)
     warning = ""
     if row.initial_amount_cents > 0:
@@ -470,7 +540,7 @@ def accept_invite(db: Session, token: str, password: str, name: str = "") -> tup
             )
         except DomainError as exc:
             warning = exc.detail
-    return member, warning
+    return member, warning, linked
 
 
 def _first_admin(db: Session, tenant_id: int) -> Member | None:
