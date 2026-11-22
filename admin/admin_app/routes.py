@@ -954,7 +954,6 @@ def post_shared_approve(
         actor,
         rule_id,
         comment=body.remark,
-        force=body.force,
         ip=client_ip(request),
     )
     return shared_rule_dict(db, row)

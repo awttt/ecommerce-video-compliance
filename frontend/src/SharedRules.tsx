@@ -53,7 +53,7 @@ export function SharedRulesPanel() {
     <div className="rule-group">
       <Typography.Text strong>共享违规词</Typography.Text>
       <Typography.Paragraph type="secondary">
-        提交后由平台管理员审批。通过的词所有人都能看到，之后的检测会自动带上，不用写进上面的本机规则。
+        提交后由本公司管理员审批。通过的词所有人都能看到，之后的检测会自动带上，不用写进上面的本机规则。
       </Typography.Paragraph>
       {error ? <Alert type="warning" showIcon message={error} style={{ marginBottom: 12 }} /> : null}
       <Form

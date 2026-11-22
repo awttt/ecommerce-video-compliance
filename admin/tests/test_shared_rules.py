@@ -41,15 +41,20 @@ def test_submit_review_visibility_and_permissions(tmp_path, monkeypatch):
         assert client.get("/v1/shared-rules/mine", headers=other).json() == []
 
         assert client.get("/v1/shared-rules/pending", headers=member).status_code == 403
-        assert client.get("/v1/shared-rules/pending", headers=company_admin).status_code == 403
+        assert client.get("/v1/shared-rules/pending", headers=platform).status_code == 403
         assert client.post(f"/v1/shared-rules/{rule_id}/approve", headers=member, json={}).status_code == 403
-        assert client.post(f"/v1/shared-rules/{rule_id}/approve", headers=company_admin, json={}).status_code == 403
+        assert client.post(f"/v1/shared-rules/{rule_id}/approve", headers=platform, json={}).status_code == 403
+        assert client.post(f"/v1/shared-rules/{rule_id}/reject", headers=platform, json={"remark": "不行"}).status_code == 403
+        cross = client.post(f"/v1/shared-rules/{rule_id}/approve", headers=other_company, json={})
+        assert cross.status_code == 403
+        assert "本公司" in cross.json()["detail"]
 
-        pending = client.get("/v1/shared-rules/pending", headers=platform)
-        assert pending.status_code == 200
+        pending = client.get("/v1/shared-rules/pending", headers=company_admin)
+        assert pending.status_code == 200, pending.text
         assert [item["id"] for item in pending.json()] == [rule_id]
+        assert client.get("/v1/shared-rules/pending", headers=other_company).json() == []
 
-        passed = client.post(f"/v1/shared-rules/{rule_id}/approve", headers=platform, json={"remark": ""})
+        passed = client.post(f"/v1/shared-rules/{rule_id}/approve", headers=company_admin, json={"remark": ""})
         assert passed.status_code == 200, passed.text
         assert passed.json()["status"] == "approved"
 
@@ -77,7 +82,7 @@ def test_submit_review_visibility_and_permissions(tmp_path, monkeypatch):
         ]
         denied = client.post(
             f"/v1/shared-rules/{rejected_id}/reject",
-            headers=platform,
+            headers=company_admin,
             json={"remark": "表述太绝对"},
         )
         assert denied.status_code == 200, denied.text
@@ -106,7 +111,7 @@ def test_relay_token_can_read_approved_without_admin_jwt(tmp_path, monkeypatch):
 
     monkeypatch.setattr("admin_app.auth_relay.current_account", fake_account)
     with _client(tmp_path, monkeypatch) as client:
-        platform = _login(client, "admin@yujing.local")
+        company_admin = _login(client, "li@jiecheng.com")
         member = _login(client, "zhang@jiecheng.com")
         created = client.post(
             "/v1/shared-rules",
@@ -116,7 +121,7 @@ def test_relay_token_can_read_approved_without_admin_jwt(tmp_path, monkeypatch):
         assert created.status_code == 200, created.text
         approved = client.post(
             f"/v1/shared-rules/{created.json()['id']}/approve",
-            headers=platform,
+            headers=company_admin,
             json={},
         )
         assert approved.status_code == 200, approved.text
@@ -127,6 +132,59 @@ def test_relay_token_can_read_approved_without_admin_jwt(tmp_path, monkeypatch):
         assert via_relay.status_code == 200, via_relay.text
         assert [item["word"] for item in via_relay.json()] == ["假一赔十"]
         assert "relay-token-for-test" not in via_relay.text
+
+
+def test_company_admin_cannot_review_own_submission(tmp_path, monkeypatch):
+    """自己提交的词不自动通过，要等同一家公司的另一位管理员。"""
+    with _client(tmp_path, monkeypatch) as client:
+        company_admin = _login(client, "li@jiecheng.com")
+        created = client.post(
+            "/v1/shared-rules",
+            headers=company_admin,
+            json={"word": "管理员自提", "category": "品牌"},
+        )
+        assert created.status_code == 200, created.text
+        rule_id = created.json()["id"]
+        assert created.json()["status"] == "pending"
+        own = client.post(f"/v1/shared-rules/{rule_id}/approve", headers=company_admin, json={})
+        assert own.status_code == 403
+        assert "自己" in own.json()["detail"]
+
+        from admin_app.db import session
+        from admin_app.models import Member
+
+        db = session()
+        li = db.query(Member).filter(Member.email == "li@jiecheng.com").one()
+        db.add(
+            Member(
+                tenant_id=li.tenant_id,
+                email="li2@jiecheng.com",
+                name="第二管理员",
+                role="tenant_admin",
+                password_hash="",
+                status="active",
+            )
+        )
+        db.commit()
+        db.close()
+
+        second = _login(client, "li2@jiecheng.com")
+        queued = client.get("/v1/shared-rules/pending", headers=second).json()
+        assert rule_id in [item["id"] for item in queued]
+        passed = client.post(f"/v1/shared-rules/{rule_id}/approve", headers=second, json={})
+        assert passed.status_code == 200, passed.text
+        assert passed.json()["status"] == "approved"
+
+
+def test_platform_admin_cannot_submit_shared_rule(tmp_path, monkeypatch):
+    with _client(tmp_path, monkeypatch) as client:
+        platform = _login(client, "admin@yujing.local")
+        response = client.post(
+            "/v1/shared-rules",
+            headers=platform,
+            json={"word": "平台词", "category": "价格"},
+        )
+        assert response.status_code == 403
 
 
 def test_migration_adds_table_without_seed_rows(tmp_path):

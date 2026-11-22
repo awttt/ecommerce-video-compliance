@@ -13,6 +13,7 @@ export function SharedRules() {
   const user = useOutletContext<User>();
   const { message } = AntApp.useApp();
   const client = useQueryClient();
+  const canSubmit = user.permissions.includes("shared_rule.submit");
   const reviewer = user.permissions.includes("shared_rule.review");
   const [tab, setTab] = useState(reviewer ? "pending" : "mine");
   const [open, setOpen] = useState(false);
@@ -41,7 +42,7 @@ export function SharedRules() {
       api<SharedRule>("/v1/shared-rules", { method: "POST", body: JSON.stringify(values) }),
     onSuccess: () => {
       setOpen(false);
-      message.success("已提交，等待平台管理员审批");
+      message.success("已提交，等待本公司管理员审批");
       refresh();
     },
     onError: (error) => message.error(error instanceof ApiError ? error.message : "提交失败"),
@@ -71,13 +72,17 @@ export function SharedRules() {
         title="共享违规词"
         description={
           reviewer
-            ? "普通成员提交的违规词先放在待审。通过后所有公司都能看到，检测时也会用上。"
-            : "提交后由平台管理员审批。通过的词所有公司和成员都能看到，检测时也会用上。"
+            ? "审批本公司成员提交的违规词。自己提交的要由另一位公司管理员审。通过后所有公司都能看到，检测时也会用上。"
+            : canSubmit
+              ? "提交后由本公司管理员审批。通过的词所有公司和成员都能看到，检测时也会用上。"
+              : "已通过的违规词所有公司共用，检测时也会用上。审批由各公司的公司管理员负责。"
         }
         extra={
-          <Button type="primary" onClick={() => setOpen(true)}>
-            提交违规词
-          </Button>
+          canSubmit ? (
+            <Button type="primary" onClick={() => setOpen(true)}>
+              提交违规词
+            </Button>
+          ) : null
         }
       />
       <Card>
@@ -105,16 +110,19 @@ export function SharedRules() {
                           { title: "时间", dataIndex: "created_at", render: (value: string) => when(value) },
                           {
                             title: "操作",
-                            render: (_value, row) => (
-                              <>
-                                <Button type="link" size="small" onClick={() => review.mutate({ id: row.id, action: "approve" })}>
-                                  通过
-                                </Button>
-                                <Button type="link" size="small" danger onClick={() => setRejectId(row.id)}>
-                                  驳回
-                                </Button>
-                              </>
-                            ),
+                            render: (_value, row) =>
+                              row.member_id === user.id ? (
+                                "请由另一位公司管理员审批"
+                              ) : (
+                                <>
+                                  <Button type="link" size="small" onClick={() => review.mutate({ id: row.id, action: "approve" })}>
+                                    通过
+                                  </Button>
+                                  <Button type="link" size="small" danger onClick={() => setRejectId(row.id)}>
+                                    驳回
+                                  </Button>
+                                </>
+                              ),
                           },
                         ]}
                       />
@@ -160,7 +168,7 @@ export function SharedRules() {
         style={{ marginTop: 16 }}
         type="info"
         showIcon
-        message="已通过的词在所有公司之间共用。待审和驳回只有提交人自己和平台管理员看得到。"
+        message="已通过的词在所有公司之间共用。待审只出现在提交人所在公司的管理员列表里。平台管理员不参与审批。"
       />
       <Modal title="提交违规词" open={open} onCancel={() => setOpen(false)} footer={null} destroyOnClose>
         <Form layout="vertical" initialValues={{ category: "价格" }} onFinish={(values) => submit.mutate(values)}>

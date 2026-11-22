@@ -127,7 +127,6 @@ def submit_shared_rule(
 
 
 def list_own_shared_rules(db: Session, actor: Member) -> list[SharedRule]:
-    _require_submit(actor)
     return (
         db.query(SharedRule)
         .filter(SharedRule.member_id == actor.id)
@@ -138,7 +137,7 @@ def list_own_shared_rules(db: Session, actor: Member) -> list[SharedRule]:
 
 
 def list_approved_shared_rules(db: Session, actor: Member) -> list[SharedRule]:
-    _require_submit(actor)
+    del actor
     return (
         db.query(SharedRule)
         .filter(SharedRule.status == "approved")
@@ -150,21 +149,28 @@ def list_approved_shared_rules(db: Session, actor: Member) -> list[SharedRule]:
 
 def list_pending_shared_rules(db: Session, actor: Member) -> list[SharedRule]:
     _require_review(actor)
+    if actor.tenant_id is None:
+        raise DomainError(403, "没有权限")
     return (
         db.query(SharedRule)
-        .filter(SharedRule.status == "pending")
+        .filter(SharedRule.status == "pending", SharedRule.tenant_id == actor.tenant_id)
         .order_by(SharedRule.id)
         .limit(300)
         .all()
     )
 
 
-def _pending(db: Session, rule_id: int) -> SharedRule:
+def _pending(db: Session, actor: Member, rule_id: int) -> SharedRule:
+    _require_review(actor)
     row = db.get(SharedRule, rule_id)
     if row is None:
         raise DomainError(404, "违规词不存在")
     if row.status != "pending":
         raise DomainError(400, "这条已经审过了")
+    if actor.tenant_id is None or row.tenant_id != actor.tenant_id:
+        raise DomainError(403, "只能审批本公司提交的违规词")
+    if row.member_id == actor.id:
+        raise DomainError(403, "不能审批自己提交的违规词")
     return row
 
 
@@ -174,15 +180,10 @@ def approve_shared_rule(
     rule_id: int,
     *,
     comment: str = "",
-    force: bool = False,
     ip: str = "",
 ) -> SharedRule:
-    _require_review(actor)
-    row = _pending(db, rule_id)
+    row = _pending(db, actor, rule_id)
     note = _note(comment, required=False, empty="")
-    if row.member_id == actor.id:
-        if not (force and actor.role == "platform_admin" and note):
-            raise DomainError(403, "不能审批自己提交的违规词")
     row.status = "approved"
     row.reviewer_id = actor.id
     row.review_comment = note
@@ -195,7 +196,7 @@ def approve_shared_rule(
         f"通过共享违规词「{row.word}」",
         tenant_id=row.tenant_id,
         before={"status": "pending"},
-        after={"status": "approved", "force": force},
+        after={"status": "approved"},
         ip=ip,
     )
     _commit(db)
@@ -211,10 +212,7 @@ def reject_shared_rule(
     comment: str,
     ip: str = "",
 ) -> SharedRule:
-    _require_review(actor)
-    row = _pending(db, rule_id)
-    if row.member_id == actor.id and actor.role != "platform_admin":
-        raise DomainError(403, "不能审批自己提交的违规词")
+    row = _pending(db, actor, rule_id)
     note = _note(comment, required=True, empty="驳回需要填写原因")
     row.status = "rejected"
     row.reviewer_id = actor.id
