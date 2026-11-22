@@ -38,6 +38,7 @@ import {
   App as AntApp,
 } from "antd";
 import { useEffect, useRef, useState } from "react";
+import { SharedRulesPanel } from "./SharedRules";
 import {
   cancelJob,
   clearQueue,
@@ -1579,6 +1580,7 @@ export function Shell() {
             onChange={(event) => setRuleNote(event.target.value)}
           />
         </div>
+        <SharedRulesPanel />
       </Drawer>
 
       <Drawer title="测试" open={testOpen} onClose={() => setTestOpen(false)} width={460}>

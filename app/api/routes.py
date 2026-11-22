@@ -71,6 +71,12 @@ class QueueState(BaseModel):
     paused: bool
 
 
+class SharedRuleSubmit(BaseModel):
+    word: str = ""
+    category: str = ""
+    description: str = ""
+
+
 _MEDIA_TYPES = {
     ".mp4": "video/mp4",
     ".m4v": "video/mp4",
@@ -148,6 +154,38 @@ async def health(request: Request) -> dict:
     else:
         payload["ffmpeg_error"] = "未找到 ffmpeg 或 ffprobe"
     return payload
+
+
+def _shared_proxy(method: str, path: str, body: dict | None = None):
+    from app.core.shared_rules import SharedRulesError, admin_shared_request
+
+    token = get_manager().relay_credentials()[0]
+    try:
+        return admin_shared_request(token, method, path, body)
+    except SharedRulesError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from None
+
+
+@router.get("/shared-rules/approved")
+async def shared_rules_approved() -> list:
+    data = _shared_proxy("GET", "/v1/shared-rules/approved")
+    return data if isinstance(data, list) else []
+
+
+@router.get("/shared-rules/mine")
+async def shared_rules_mine() -> list:
+    data = _shared_proxy("GET", "/v1/shared-rules/mine")
+    return data if isinstance(data, list) else []
+
+
+@router.post("/shared-rules")
+async def shared_rules_submit(body: SharedRuleSubmit) -> dict:
+    data = _shared_proxy(
+        "POST",
+        "/v1/shared-rules",
+        {"word": body.word, "category": body.category, "description": body.description},
+    )
+    return data if isinstance(data, dict) else {}
 
 
 @router.get("/console")

@@ -1,5 +1,23 @@
 export type Role = "platform_admin" | "tenant_admin" | "member";
 
+export interface SharedRule {
+  id: number;
+  word: string;
+  category: string;
+  description: string;
+  member_id: number;
+  member_name: string;
+  tenant_id: number | null;
+  tenant_name: string;
+  status: "pending" | "approved" | "rejected";
+  status_label: string;
+  reviewer_id: number | null;
+  reviewer_name: string;
+  review_comment: string;
+  created_at: string;
+  reviewed_at: string | null;
+}
+
 export interface User {
   id: number;
   email: string;

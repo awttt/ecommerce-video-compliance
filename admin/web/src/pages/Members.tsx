@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, App as AntApp, Button, Card, Checkbox, Form, Input, Modal, Popconfirm, Select, Space, Table, Tag, Typography } from "antd";
+import { Alert, App as AntApp, Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Table, Tag, Typography } from "antd";
 import { useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import { ApiError, api } from "../api";
@@ -13,7 +13,6 @@ export function Members() {
   const { message } = AntApp.useApp();
   const client = useQueryClient();
   const [open, setOpen] = useState(false);
-  const [linkExisting, setLinkExisting] = useState(false);
   const [devicesOf, setDevicesOf] = useState<Member | null>(null);
   const [tenantId, setTenantId] = useState<number | undefined>(undefined);
   const tenants = useQuery({
@@ -38,15 +37,18 @@ export function Members() {
   };
 
   const create = useMutation({
-    mutationFn: (values: { email: string; name: string; password: string; role: string; link_existing: boolean }) =>
-      api<Member>("/v1/members", {
+    mutationFn: (values: { email: string; name: string; password?: string; role: string }) =>
+      api<Member & { linked_existing?: boolean }>("/v1/members", {
         method: "POST",
         body: JSON.stringify({ ...values, tenant_id: scope ?? null }),
       }),
     onSuccess: (data) => {
       setOpen(false);
-      setLinkExisting(false);
-      message.success(`${data.name} 已创建，可从额度分配页划拨额度`);
+      message.success(
+        data.linked_existing
+          ? `${data.name} 已绑定原有中转站账号，沿用原来的密码`
+          : `${data.name} 已创建，可从额度分配页划拨额度`,
+      );
       refresh();
     },
     onError: (error) => message.error(error instanceof ApiError ? error.message : "创建失败"),
@@ -212,29 +214,27 @@ export function Members() {
         message="账号创建后，额度需要在额度分配页单独划拨。「刷新余额」只读取最新余额和用量，不会改动分配记录。"
       />
       <Modal title="新建成员" open={open} onCancel={() => setOpen(false)} footer={null} destroyOnClose>
-        <Form layout="vertical" initialValues={{ role: "member", link_existing: false }} onFinish={(values) => create.mutate(values)}>
+        <Form layout="vertical" initialValues={{ role: "member" }} onFinish={(values) => create.mutate(values)}>
           <Form.Item name="name" label="姓名" rules={[{ required: true, message: "请填写姓名" }]}>
             <Input placeholder="例如：张剪辑" />
           </Form.Item>
           <Form.Item name="email" label="邮箱" rules={[{ required: true, type: "email", message: "请填写邮箱" }]}>
             <Input />
           </Form.Item>
-          <Form.Item name="link_existing" valuePropName="checked">
-            <Checkbox onChange={(event) => setLinkExisting(event.target.checked)}>
-              该邮箱已经注册过账号，直接绑定已有账号
-            </Checkbox>
-          </Form.Item>
           <Form.Item
             name="password"
             label="初始密码"
-            rules={linkExisting ? [] : [{ required: true, min: 8, message: "密码至少 8 位" }]}
-            extra={linkExisting ? "绑定已有账号时沿用原来的密码。" : undefined}
+            extra="系统会按邮箱自动识别：已在中转站的账号直接绑定，沿用原密码，这里可以不填；还没有账号时，会用这个初始密码开通并完成绑定。"
+            rules={[
+              {
+                validator: async (_rule, value: string) => {
+                  if (!value) return;
+                  if (value.length < 8) throw new Error("密码至少 8 位");
+                },
+              },
+            ]}
           >
-            <Input.Password
-              autoComplete="new-password"
-              disabled={linkExisting}
-              placeholder={linkExisting ? "无需填写" : undefined}
-            />
+            <Input.Password autoComplete="new-password" placeholder="新账号必填，已有账号可留空" />
           </Form.Item>
           <Form.Item name="role" label="角色">
             <Select

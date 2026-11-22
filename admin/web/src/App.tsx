@@ -9,6 +9,7 @@ import { Tenants } from "./pages/Tenants";
 import { Members } from "./pages/Members";
 import { Quota } from "./pages/Quota";
 import { Keywords } from "./pages/Keywords";
+import { SharedRules } from "./pages/SharedRules";
 import { Usage } from "./pages/Usage";
 import { Audit } from "./pages/Audit";
 import { Settings } from "./pages/Settings";
@@ -30,6 +31,7 @@ export function App() {
         <Route path="/members" element={<Members />} />
         <Route path="/quota" element={<Quota />} />
         <Route path="/keywords" element={<Keywords />} />
+        <Route path="/shared-rules" element={<SharedRules />} />
         <Route path="/usage" element={<Usage />} />
         <Route path="/recharge" element={<Recharge />} />
         <Route path="/audit" element={<Audit />} />

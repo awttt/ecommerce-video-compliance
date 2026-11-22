@@ -38,9 +38,19 @@ from admin_app.present import (
 )
 from admin_app.relay import apply_credentials, relay_mode
 from admin_app.security import (
+    decode_token,
     new_access_token,
     new_refresh_value,
     sha256_text,
+)
+from admin_app.shared_rules import (
+    approve_shared_rule,
+    list_approved_shared_rules,
+    list_own_shared_rules,
+    list_pending_shared_rules,
+    reject_shared_rule,
+    shared_rule_dict,
+    submit_shared_rule,
 )
 from admin_app.service import (
     accept_invite,
@@ -104,8 +114,6 @@ class TenantBody(BaseModel):
     admin_name: str = ""
     admin_password: str = ""
     seats: int = 10
-    # 公司管理员邮箱已经在中转站注册过时，绑定已有账号，不再新建。
-    link_existing: bool = False
 
 
 class StatusBody(BaseModel):
@@ -127,8 +135,6 @@ class CreateMemberBody(BaseModel):
     password: str = ""
     role: str = "member"
     tenant_id: int | None = None
-    # 该邮箱已经在中转站注册过时，绑定已有账号，不再新建。
-    link_existing: bool = False
 
 
 class AcceptBody(BaseModel):
@@ -143,6 +149,12 @@ class QuotaBody(BaseModel):
     remark: str = ""
     period: str = ""
     direction: str = "add"
+
+
+class SharedRuleBody(BaseModel):
+    word: str
+    category: str
+    description: str = ""
 
 
 class KeywordBody(BaseModel):
@@ -498,7 +510,7 @@ def post_tenant(
     user: Member = Depends(require("tenant.manage")),
     db: Session = Depends(get_db),
 ) -> dict:
-    tenant, member = create_tenant(
+    tenant, member, linked = create_tenant(
         db,
         user,
         name=body.name,
@@ -506,10 +518,13 @@ def post_tenant(
         admin_name=body.admin_name,
         admin_password=body.admin_password,
         seats=body.seats,
-        link_existing=body.link_existing,
         ip=client_ip(request),
     )
-    return {"tenant": tenant_dict(db, tenant), "admin": member_dict(db, member)}
+    return {
+        "tenant": tenant_dict(db, tenant),
+        "admin": member_dict(db, member),
+        "linked_existing": linked,
+    }
 
 
 @router.put("/tenants/{tenant_id}/status")
@@ -576,7 +591,7 @@ def post_member(
     user: Member = Depends(require("member.manage")),
     db: Session = Depends(get_db),
 ) -> dict:
-    member = create_member(
+    member, linked = create_member(
         db,
         user,
         email=body.email,
@@ -584,10 +599,11 @@ def post_member(
         password=body.password,
         role=body.role,
         tenant_id=body.tenant_id,
-        link_existing=body.link_existing,
         ip=client_ip(request),
     )
-    return member_dict(db, member)
+    payload = member_dict(db, member)
+    payload["linked_existing"] = linked
+    return payload
 
 
 @router.get("/invites")
@@ -607,8 +623,8 @@ def list_invites(
 
 @router.post("/invites/{token}/accept")
 def post_accept(token: str, body: AcceptBody, db: Session = Depends(get_db)) -> dict:
-    member, warning = accept_invite(db, token, body.password, body.name)
-    return {"member": member_dict(db, member), "warning": warning}
+    member, warning, linked = accept_invite(db, token, body.password, body.name)
+    return {"member": member_dict(db, member), "warning": warning, "linked_existing": linked}
 
 
 @router.post("/members/{member_id}/disable")
@@ -868,6 +884,103 @@ def remove_entry(
 ) -> dict:
     row = delete_keyword(db, user, entry_id, ip=client_ip(request))
     return entry_dict(db, row)
+
+
+def _shared_actor(request: Request, db: Session) -> Member:
+    """管理后台令牌或工具端的中转站令牌都可以。令牌本身不写进错误信息。"""
+    header = request.headers.get("authorization", "")
+    token = header[7:].strip() if header.lower().startswith("bearer ") else ""
+    if not token:
+        token = request.cookies.get("evc_admin_access", "")
+    if not token:
+        raise HTTPException(status_code=401, detail="请先登录")
+    try:
+        payload = decode_token(token)
+    except Exception:
+        payload = None
+    if isinstance(payload, dict) and payload.get("typ") in ("access", "member"):
+        return current_user(request, db)
+    try:
+        profile = auth_relay.current_account(token)
+    except auth_relay.RelayLoginError as exc:
+        raise HTTPException(status_code=401, detail=exc.message) from exc
+    email = str(profile.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=401, detail="请先登录")
+    member = db.query(Member).filter(Member.email == email, Member.deleted_at.is_(None)).one_or_none()
+    if member is None or member.status != "active":
+        raise HTTPException(status_code=403, detail="这个账号没有后台权限")
+    if member.tenant_id is not None:
+        tenant = db.get(Tenant, member.tenant_id)
+        if tenant is None or tenant.status != "active":
+            raise HTTPException(status_code=403, detail="公司已停用")
+    return member
+
+
+@router.post("/shared-rules")
+def post_shared_rule(
+    body: SharedRuleBody,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    actor = _shared_actor(request, db)
+    row = submit_shared_rule(
+        db,
+        actor,
+        word=body.word,
+        category=body.category,
+        description=body.description,
+        ip=client_ip(request),
+    )
+    return shared_rule_dict(db, row)
+
+
+@router.get("/shared-rules/mine")
+def get_own_shared_rules(request: Request, db: Session = Depends(get_db)) -> list:
+    actor = _shared_actor(request, db)
+    return [shared_rule_dict(db, row) for row in list_own_shared_rules(db, actor)]
+
+
+@router.get("/shared-rules/approved")
+def get_approved_shared_rules(request: Request, db: Session = Depends(get_db)) -> list:
+    actor = _shared_actor(request, db)
+    return [shared_rule_dict(db, row) for row in list_approved_shared_rules(db, actor)]
+
+
+@router.get("/shared-rules/pending")
+def get_pending_shared_rules(request: Request, db: Session = Depends(get_db)) -> list:
+    actor = _shared_actor(request, db)
+    return [shared_rule_dict(db, row) for row in list_pending_shared_rules(db, actor)]
+
+
+@router.post("/shared-rules/{rule_id}/approve")
+def post_shared_approve(
+    rule_id: int,
+    body: ReviewBody,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    actor = _shared_actor(request, db)
+    row = approve_shared_rule(
+        db,
+        actor,
+        rule_id,
+        comment=body.remark,
+        ip=client_ip(request),
+    )
+    return shared_rule_dict(db, row)
+
+
+@router.post("/shared-rules/{rule_id}/reject")
+def post_shared_reject(
+    rule_id: int,
+    body: ReviewBody,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    actor = _shared_actor(request, db)
+    row = reject_shared_rule(db, actor, rule_id, comment=body.remark, ip=client_ip(request))
+    return shared_rule_dict(db, row)
 
 
 @router.get("/usage/summary")
