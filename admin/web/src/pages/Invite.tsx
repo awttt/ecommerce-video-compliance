@@ -10,13 +10,16 @@ export function AcceptInvite() {
   const [done, setDone] = useState("");
   const accept = useMutation({
     mutationFn: (values: { password: string; name: string }) =>
-      api<{ warning: string }>(`/v1/invites/${token}/accept`, {
+      api<{ warning: string; linked_existing?: boolean }>(`/v1/invites/${token}/accept`, {
         method: "POST",
         body: JSON.stringify(values),
       }),
     onSuccess: (data) => {
-      setDone(data.warning || "");
-      message.success(data.warning ? `已开通。${data.warning}` : "已开通，请用这个邮箱和密码登录御镜客户端。");
+      const text = data.linked_existing
+        ? "已绑定原有中转站账号，请用原来的密码登录。"
+        : "已开通，请用这个邮箱和刚才的密码登录。";
+      setDone(data.warning ? `${text}${data.warning}` : text);
+      message.success(data.warning ? `已开通。${data.warning}` : text);
     },
     onError: (error) => message.error(error instanceof ApiError ? error.message : "开通失败"),
   });
@@ -26,7 +29,7 @@ export function AcceptInvite() {
       <Card className="login-card">
         <Typography.Title level={4}>接受邀请</Typography.Title>
         <Typography.Paragraph type="secondary">
-          邮件里只有这张链接，没有初始密码。设好密码后账号就会开通。
+          系统会按邮箱自动识别。还没有中转站账号时，用这里设置的密码开通并绑定；已经注册过的账号会直接绑定，沿用原来的密码。
         </Typography.Paragraph>
         {accept.isSuccess ? (
           <Result

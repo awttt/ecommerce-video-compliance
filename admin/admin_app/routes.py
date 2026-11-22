@@ -103,8 +103,6 @@ class TenantBody(BaseModel):
     admin_name: str = ""
     admin_password: str = ""
     seats: int = 10
-    # 公司管理员邮箱已经在中转站注册过时，绑定已有账号，不再新建。
-    link_existing: bool = False
 
 
 class StatusBody(BaseModel):
@@ -126,8 +124,6 @@ class CreateMemberBody(BaseModel):
     password: str = ""
     role: str = "member"
     tenant_id: int | None = None
-    # 该邮箱已经在中转站注册过时，绑定已有账号，不再新建。
-    link_existing: bool = False
 
 
 class AcceptBody(BaseModel):
@@ -486,7 +482,7 @@ def post_tenant(
     user: Member = Depends(require("tenant.manage")),
     db: Session = Depends(get_db),
 ) -> dict:
-    tenant, member = create_tenant(
+    tenant, member, linked = create_tenant(
         db,
         user,
         name=body.name,
@@ -494,10 +490,13 @@ def post_tenant(
         admin_name=body.admin_name,
         admin_password=body.admin_password,
         seats=body.seats,
-        link_existing=body.link_existing,
         ip=client_ip(request),
     )
-    return {"tenant": tenant_dict(db, tenant), "admin": member_dict(db, member)}
+    return {
+        "tenant": tenant_dict(db, tenant),
+        "admin": member_dict(db, member),
+        "linked_existing": linked,
+    }
 
 
 @router.put("/tenants/{tenant_id}/status")
@@ -564,7 +563,7 @@ def post_member(
     user: Member = Depends(require("member.manage")),
     db: Session = Depends(get_db),
 ) -> dict:
-    member = create_member(
+    member, linked = create_member(
         db,
         user,
         email=body.email,
@@ -572,10 +571,11 @@ def post_member(
         password=body.password,
         role=body.role,
         tenant_id=body.tenant_id,
-        link_existing=body.link_existing,
         ip=client_ip(request),
     )
-    return member_dict(db, member)
+    payload = member_dict(db, member)
+    payload["linked_existing"] = linked
+    return payload
 
 
 @router.get("/invites")
@@ -595,8 +595,8 @@ def list_invites(
 
 @router.post("/invites/{token}/accept")
 def post_accept(token: str, body: AcceptBody, db: Session = Depends(get_db)) -> dict:
-    member, warning = accept_invite(db, token, body.password, body.name)
-    return {"member": member_dict(db, member), "warning": warning}
+    member, warning, linked = accept_invite(db, token, body.password, body.name)
+    return {"member": member_dict(db, member), "warning": warning, "linked_existing": linked}
 
 
 @router.post("/members/{member_id}/disable")

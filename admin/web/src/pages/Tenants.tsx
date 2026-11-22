@@ -14,16 +14,18 @@ export function Tenants() {
   const [open, setOpen] = useState(false);
   const [stop, setStop] = useState<Tenant | null>(null);
   const [alsoDisable, setAlsoDisable] = useState(false);
-  const [linkExisting, setLinkExisting] = useState(false);
   const query = useQuery({ queryKey: ["tenants"], queryFn: () => api<Tenant[]>("/v1/tenants") });
 
   const create = useMutation({
-    mutationFn: (values: { name: string; admin_email: string; admin_name: string; admin_password: string; seats: number; link_existing: boolean }) =>
-      api<{ admin: { name: string } }>("/v1/tenants", { method: "POST", body: JSON.stringify(values) }),
+    mutationFn: (values: { name: string; admin_email: string; admin_name: string; admin_password?: string; seats: number }) =>
+      api<{ admin: { name: string }; linked_existing?: boolean }>("/v1/tenants", { method: "POST", body: JSON.stringify(values) }),
     onSuccess: (data) => {
       setOpen(false);
-      setLinkExisting(false);
-      message.success(`公司和管理员 ${data.admin.name} 已创建`);
+      message.success(
+        data.linked_existing
+          ? `公司已创建，管理员 ${data.admin.name} 已绑定原有中转站账号`
+          : `公司和管理员 ${data.admin.name} 已创建`,
+      );
       void client.invalidateQueries({ queryKey: ["tenants"] });
     },
     onError: (error) => message.error(error instanceof ApiError ? error.message : "创建失败"),
@@ -125,7 +127,7 @@ export function Tenants() {
         message="新建公司只绑定专属分组「电商审核专属-bot创建」。开通账号不再自动挂上其他分组。第二版再改成每家公司一个分组。"
       />
       <Modal title="新建公司" open={open} onCancel={() => setOpen(false)} footer={null} destroyOnClose>
-        <Form layout="vertical" onFinish={(values) => create.mutate(values)} initialValues={{ seats: 10, link_existing: false }}>
+        <Form layout="vertical" onFinish={(values) => create.mutate(values)} initialValues={{ seats: 10 }}>
           <Form.Item name="name" label="公司名称" rules={[{ required: true, message: "请填写公司名称" }]}>
             <Input placeholder="例如：锦程商贸" />
           </Form.Item>
@@ -135,22 +137,20 @@ export function Tenants() {
           <Form.Item name="admin_email" label="管理员邮箱" rules={[{ required: true, type: "email", message: "请填写邮箱" }]}>
             <Input placeholder="用于登录管理后台" />
           </Form.Item>
-          <Form.Item name="link_existing" valuePropName="checked">
-            <Checkbox onChange={(event) => setLinkExisting(event.target.checked)}>
-              该邮箱已经注册过，直接绑定已有账号
-            </Checkbox>
-          </Form.Item>
           <Form.Item
             name="admin_password"
             label="初始密码"
-            rules={linkExisting ? [] : [{ required: true, min: 8, message: "密码至少 8 位" }]}
-            extra={linkExisting ? "绑定已有账号时不改密码，沿用原密码。" : undefined}
+            extra="系统会按邮箱自动识别：已在中转站的账号直接绑定，沿用原密码，这里可以不填；还没有账号时，会用这个初始密码开通并完成绑定。"
+            rules={[
+              {
+                validator: async (_rule, value: string) => {
+                  if (!value) return;
+                  if (value.length < 8) throw new Error("密码至少 8 位");
+                },
+              },
+            ]}
           >
-            <Input.Password
-              autoComplete="new-password"
-              disabled={linkExisting}
-              placeholder={linkExisting ? "无需填写" : undefined}
-            />
+            <Input.Password autoComplete="new-password" placeholder="新账号必填，已有账号可留空" />
           </Form.Item>
           <Form.Item name="seats" label="席位数">
             <InputNumber min={1} max={10000} style={{ width: "100%" }} />
