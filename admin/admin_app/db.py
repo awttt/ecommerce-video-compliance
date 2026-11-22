@@ -26,6 +26,7 @@ from admin_app.models import (
     RelayAccount,
     RelayLedger,
     SessionToken,
+    SharedRule,
     Tenant,
     TenantRules,
     UsageSnapshot,
@@ -46,6 +47,7 @@ CLOUD_MODELS = (
     AppMeta,
     RelayAccount,
     RelayLedger,
+    SharedRule,
 )
 # 本机库：审核任务、命中结果和词库规则。视频文件在 data/engine/videos。
 LOCAL_MODELS = (KeywordEntry, KeywordSubmission, TenantRules)
@@ -164,14 +166,23 @@ def _add_missing_columns(engine: Engine) -> None:
                     )
 
 
+def ensure_shared_rules(engine: Engine) -> None:
+    """在已有库上补 shared_rules。不插入数据，也不依赖演示账号。"""
+    SharedRule.__table__.create(engine, checkfirst=True)
+    for index in SharedRule.__table__.indexes:
+        index.create(engine, checkfirst=True)
+
+
 def init_db() -> None:
     local = get_engine()
     cloud = get_cloud_engine()
     if cloud is None:
         Base.metadata.create_all(local)
         _add_missing_columns(local)
+        ensure_shared_rules(local)
         return
     Base.metadata.create_all(local, tables=[model.__table__ for model in LOCAL_MODELS])
     Base.metadata.create_all(cloud, tables=[model.__table__ for model in CLOUD_MODELS])
     _add_missing_columns(local)
     _add_missing_columns(cloud)
+    ensure_shared_rules(cloud)

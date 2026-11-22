@@ -1393,7 +1393,7 @@ class JobManager:
             tencent_secret_key=secret_key,
             tencent_region=FIXED_TENCENT_REGION,
             asr_engine=configured_engine(options.get("asr_engine")),
-            rules=self._rules_from(options),
+            rules=self._rules_with_shared(options),
         )
 
     def _rules_from(self, options: dict) -> DetectionRules:
@@ -1404,6 +1404,34 @@ class JobManager:
             return DetectionRules.model_validate(raw)
         except Exception:
             return self._rules()
+
+    def _load_shared_phrases(self):
+        """检测时带上已通过的共享违规词。测试进程不访问管理后台。"""
+        from app.core.shared_rules import SharedRulesError, fetch_approved_shared_rules, phrases_from_shared
+
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            return []
+        if os.environ.get("EVC_SHARED_RULES", "1").strip().lower() in {"0", "false", "off", "no"}:
+            return []
+        token = str(self._settings.get("relay_access_token") or "").strip()
+        if not token:
+            return []
+        try:
+            rows = fetch_approved_shared_rules(token)
+        except SharedRulesError:
+            log.warning("读取共享违规词失败，本次检测只用本机规则")
+            return []
+        return phrases_from_shared(rows)
+
+    def _rules_with_shared(self, options: dict) -> DetectionRules:
+        from app.core.shared_rules import merge_shared_rules
+
+        rules = self._rules_from(options)
+        try:
+            return merge_shared_rules(rules, self._load_shared_phrases())
+        except Exception:
+            log.warning("合并共享违规词失败，本次检测只用本机规则")
+            return rules
 
     def _env_tencent(self) -> tuple[str, str, str] | None:
         """未登录时的调试密钥。已登录则改向中转站要临时凭证，不读这里。"""
