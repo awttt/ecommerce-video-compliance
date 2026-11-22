@@ -60,7 +60,6 @@ from app.schemas import (
     AccountAction,
     AccountOptions,
     CutSpan,
-    RechargeBonusTier,
     RechargeInfo,
     RechargeMethod,
     RechargeOrder,
@@ -136,7 +135,10 @@ _RELAY_FIELDS = (
     "relay_frozen_balance",
     "relay_today_cost",
     "relay_total_cost",
+    "relay_login_at",
 )
+# 登录态只保留 7 天。上次邮箱单独记下，过期或退出后表单还用它。
+SESSION_KEEP_SECONDS = 7 * 24 * 60 * 60
 
 
 def _email_ok(value: str) -> str:
@@ -543,6 +545,7 @@ class JobManager:
         was_paused = await self.db.has_status("paused")
         await self.db.fail_interrupted(utcnow())
         self._settings = await self.db.load_settings()
+        await self._expire_login_if_needed()
         if was_paused or bool(self._settings.get("queue_paused")):
             self._queue_paused = True
             self._resume.clear()
@@ -585,10 +588,20 @@ class JobManager:
 
     def relay_credentials(self) -> tuple[str, str]:
         """工具端登录后的中转站令牌。只给同进程的控制台做单点登录，不经过 HTTP。"""
+        if not self._relay_logged_in():
+            return "", ""
         return (
             str(self._settings.get("relay_access_token") or ""),
             str(self._settings.get("relay_refresh_token") or ""),
         )
+
+    async def prepare_settings(self) -> SettingPublic:
+        """满 7 天的登录态在读设置时清掉，邮箱仍留给登录表单。"""
+        if self._login_expired() and str(self._settings.get("relay_access_token") or "").strip():
+            async with self._account_lock:
+                if self._login_expired() and str(self._settings.get("relay_access_token") or "").strip():
+                    await self._drop_session()
+        return self.public_settings()
 
     def public_settings(self) -> SettingPublic:
         key, source = self._effective_key()
@@ -622,6 +635,7 @@ class JobManager:
             rules=self._rules(),
             account_logged_in=self._relay_logged_in(),
             account_email=self._account_email(),
+            remembered_email=self._remembered_email(),
             account_balance=self._account_number("relay_balance"),
             account_frozen_balance=self._account_number("relay_frozen_balance"),
             account_today_cost=self._account_number("relay_today_cost"),
@@ -675,10 +689,39 @@ class JobManager:
         await self.db.save_settings(data)
         return self.public_settings()
 
+    def _login_expired(self) -> bool:
+        started = _number(self._settings.get("relay_login_at"))
+        if started is None:
+            return False
+        return time.time() >= started + SESSION_KEEP_SECONDS
+
     def _relay_logged_in(self) -> bool:
         token = str(self._settings.get("relay_access_token") or "").strip()
         email = str(self._settings.get("relay_email") or "").strip()
-        return bool(token and email)
+        if not token or not email or self._login_expired():
+            return False
+        return True
+
+    def _remembered_email(self) -> str:
+        saved = str(self._settings.get("last_login_email") or "").strip()
+        if saved:
+            return saved
+        return str(self._settings.get("relay_email") or "").strip()
+
+    async def _expire_login_if_needed(self) -> None:
+        """已有登录但没有记下时间的，从这次启动开始算 7 天。超过 7 天就清登录态。"""
+        token = str(self._settings.get("relay_access_token") or "").strip()
+        if not token:
+            return
+        if _number(self._settings.get("relay_login_at")) is None:
+            self._settings["relay_login_at"] = time.time()
+            email = str(self._settings.get("relay_email") or "").strip()
+            if email and not str(self._settings.get("last_login_email") or "").strip():
+                self._settings["last_login_email"] = email
+            await self.db.save_settings(self._settings)
+            return
+        if self._login_expired():
+            await self._drop_session()
 
     def ensure_logged_in(self) -> None:
         if not self._relay_logged_in():
@@ -1211,6 +1254,19 @@ class JobManager:
             flush=lambda: self._flush_route(state),
         )
         await self._flush_route(state)
+
+        # 如果用户已登录、没开 mock 但 key 为空，自动补取一次。
+        # 这处理登录时网络偶发导致 key 获取失败的情况。
+        if (not config.mock and self._relay_logged_in() and not config.api_key):
+            try:
+                async with self._account_lock:
+                    await self._ensure_relay_key()
+                    await self.db.save_settings(self._settings)
+                # 重新生成 config，用补取的 key
+                config = self._config_for(state)
+            except RelayError as exc:
+                log.warning("start job %s: failed to fetch relay key: %s", state.id, exc)
+
         try:
             recognizer = build_recognizer(config, route)
             holder["recognizer"] = recognizer
@@ -1393,7 +1449,7 @@ class JobManager:
             tencent_secret_key=secret_key,
             tencent_region=FIXED_TENCENT_REGION,
             asr_engine=configured_engine(options.get("asr_engine")),
-            rules=self._rules_with_shared(options),
+            rules=self._rules_from(options),
         )
 
     def _rules_from(self, options: dict) -> DetectionRules:
@@ -1404,34 +1460,6 @@ class JobManager:
             return DetectionRules.model_validate(raw)
         except Exception:
             return self._rules()
-
-    def _load_shared_phrases(self):
-        """检测时带上已通过的共享违规词。测试进程不访问管理后台。"""
-        from app.core.shared_rules import SharedRulesError, fetch_approved_shared_rules, phrases_from_shared
-
-        if os.environ.get("PYTEST_CURRENT_TEST"):
-            return []
-        if os.environ.get("EVC_SHARED_RULES", "1").strip().lower() in {"0", "false", "off", "no"}:
-            return []
-        token = str(self._settings.get("relay_access_token") or "").strip()
-        if not token:
-            return []
-        try:
-            rows = fetch_approved_shared_rules(token)
-        except SharedRulesError:
-            log.warning("读取共享违规词失败，本次检测只用本机规则")
-            return []
-        return phrases_from_shared(rows)
-
-    def _rules_with_shared(self, options: dict) -> DetectionRules:
-        from app.core.shared_rules import merge_shared_rules
-
-        rules = self._rules_from(options)
-        try:
-            return merge_shared_rules(rules, self._load_shared_phrases())
-        except Exception:
-            log.warning("合并共享违规词失败，本次检测只用本机规则")
-            return rules
 
     def _env_tencent(self) -> tuple[str, str, str] | None:
         """未登录时的调试密钥。已登录则改向中转站要临时凭证，不读这里。"""
@@ -2104,6 +2132,8 @@ class JobManager:
             self._settings.pop("relay_api_key", None)
             self._settings.pop("relay_api_key_id", None)
         self._settings["relay_email"] = email
+        self._settings["last_login_email"] = email
+        self._settings["relay_login_at"] = time.time()
         self._settings["relay_access_token"] = access
         if refresh:
             self._settings["relay_refresh_token"] = refresh
@@ -2250,6 +2280,9 @@ class JobManager:
         return first
 
     async def _token(self) -> str:
+        if self._login_expired():
+            await self._drop_session()
+            raise RelayError("登录已过期，请重新登录", 401)
         token = str(self._settings.get("relay_access_token") or "").strip()
         if not token:
             raise RelayError("还没有登录", 400)
@@ -2449,21 +2482,6 @@ def _recharge_info(data: dict) -> RechargeInfo:
                     single_max=_money(item.get("single_max")),
                 )
             )
-    tiers: list[RechargeBonusTier] = []
-    raw_tiers = data.get("recharge_bonus_tiers")
-    if isinstance(raw_tiers, list):
-        for item in raw_tiers[:20]:
-            if not isinstance(item, dict):
-                continue
-            minimum = _number(item.get("min_amount"))
-            percent = _number(item.get("bonus_percent"))
-            if minimum is None or percent is None or minimum < 0 or percent <= 0 or percent > 1000:
-                continue
-            tiers.append(RechargeBonusTier(min_amount=round(minimum, 2), bonus_percent=round(percent, 2)))
-    tiers.sort(key=lambda item: item.min_amount)
-    mode = str(data.get("recharge_bonus_mode") or "").strip().lower()
-    if mode not in {"bonus", "discount"}:
-        mode = "bonus"
     disabled = bool(data.get("balance_disabled"))
     multiplier = _number(data.get("balance_recharge_multiplier"))
     if multiplier is None or multiplier <= 0:
@@ -2480,9 +2498,10 @@ def _recharge_info(data: dict) -> RechargeInfo:
         global_max=_money(data.get("global_max")),
         recharge_fee_rate=min(_money(data.get("recharge_fee_rate"), 100), 100),
         balance_recharge_multiplier=round(multiplier, 4),
-        bonus_mode=mode,
-        bonus_notice=_plain(data.get("recharge_bonus_notice"), 500),
-        bonus_tiers=tiers,
+        # 本产品不提供充值优惠。中转站的阶梯和活动文案不往页面传。
+        bonus_mode="bonus",
+        bonus_notice="",
+        bonus_tiers=[],
         help_text=_plain(data.get("help_text"), 2000),
         methods=methods,
         message=message,
