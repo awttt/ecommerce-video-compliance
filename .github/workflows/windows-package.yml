@@ -1,6 +1,8 @@
 name: Windows package
 
-# Push to main: build the installer and keep the Actions artifacts.
+# Push to main: build the installer and keep the setup executable as an
+# Actions artifact for 3 days. The unpacked dist/VideoCompliance tree is not
+# uploaded; hundreds of files were exhausting artifact storage quota.
 # Push a v* tag, or run this workflow on that tag with release enabled:
 # also publish a GitHub Release and upload the installer.
 
@@ -178,21 +180,15 @@ jobs:
             }
           }
 
-      - name: Upload package
-        uses: actions/upload-artifact@v4
-        with:
-          name: VideoCompliance-windows
-          path: dist/VideoCompliance
-          if-no-files-found: error
-          retention-days: 14
-
+      # deploy and release download only this installer. The unpacked
+      # dist/VideoCompliance directory stays on the runner.
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
           name: VideoCompliance-windows-setup
           path: dist/VideoCompliance-*-Setup.exe
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 3
 
   deploy:
     name: Upload installer to download server
