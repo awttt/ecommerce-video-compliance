@@ -1,5 +1,5 @@
 import json
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import httpx
@@ -874,3 +874,265 @@ def test_sso_accepts_relay_token_without_password(tmp_path, monkeypatch):
 
         me = client.get("/v1/auth/me", headers={"Authorization": f"Bearer {body['access_token']}"})
         assert me.status_code == 200
+
+
+def _add_usage(email: str, day: date, cents: int) -> None:
+    from admin_app.db import session
+    from admin_app.models import Member, UsageSnapshot
+
+    db = session()
+    member = db.query(Member).filter(Member.email == email).one()
+    db.add(
+        UsageSnapshot(
+            tenant_id=member.tenant_id,
+            member_id=member.id,
+            day=day,
+            requests=1,
+            input_tokens=0,
+            output_tokens=0,
+            cost_cents=cents,
+        )
+    )
+    db.commit()
+    db.close()
+
+
+def test_overview_consumption_defaults_to_current_month(tmp_path, monkeypatch):
+    with _client(tmp_path, monkeypatch) as client:
+        from admin_app.db import session
+        from admin_app.models import Member, UsageSnapshot
+        from admin_app.timeutil import business_today
+
+        today = business_today()
+        month_start = today.replace(day=1)
+        headers = _login(client, "admin@yujing.local")
+        body = client.get("/v1/overview/consumption", headers=headers)
+        assert body.status_code == 200, body.text
+        payload = body.json()
+        assert payload["timezone"] == "Asia/Shanghai"
+        assert payload["start"] == month_start.isoformat()
+        assert payload["end"] == today.isoformat()
+        assert len(payload["by_day"]) == (today - month_start).days + 1
+        assert payload["comparison"]["label"] == "较上月"
+        previous_last = month_start - timedelta(days=1)
+        previous_first = previous_last.replace(day=1)
+        month_last = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+        if today == month_last:
+            expected_previous_end = previous_last
+        else:
+            expected_previous_end = previous_first.replace(day=min(today.day, previous_last.day))
+        assert payload["comparison"]["previous_start"] == previous_first.isoformat()
+        assert payload["comparison"]["previous_end"] == expected_previous_end.isoformat()
+
+        db = session()
+        cents = sum(
+            row.cost_cents
+            for row in db.query(UsageSnapshot).filter(UsageSnapshot.day >= month_start, UsageSnapshot.day <= today).all()
+        )
+        demo_month = sum(row.month_cost_cents for row in db.query(Member).all())
+        db.close()
+        assert payload["total"] == round(cents / 100, 2)
+        assert cents != demo_month
+        explicit = client.get(
+            "/v1/overview/consumption",
+            headers=headers,
+            params={"start": month_start.isoformat(), "end": today.isoformat()},
+        )
+        assert explicit.status_code == 200
+        assert explicit.json()["total"] == payload["total"]
+        assert explicit.json()["by_day"] == payload["by_day"]
+
+
+def test_overview_consumption_custom_range_breaks_down_usage(tmp_path, monkeypatch):
+    with _client(tmp_path, monkeypatch) as client:
+        _add_usage("li@jiecheng.com", date(2024, 6, 1), 100)
+        _add_usage("li@jiecheng.com", date(2024, 6, 2), 300)
+        _add_usage("zhou@youpin.com", date(2024, 6, 1), 50)
+        _add_usage("zhang@jiecheng.com", date(2024, 5, 1), 999)
+        platform = _login(client, "admin@yujing.local")
+        ranged = client.get(
+            "/v1/overview/consumption",
+            headers=platform,
+            params={"start": "2024-06-01", "end": "2024-06-02"},
+        )
+        assert ranged.status_code == 200, ranged.text
+        body = ranged.json()
+        assert body["total"] == 4.5
+        assert body["comparison"] is None
+        assert body["by_day"] == [
+            {"date": "2024-06-01", "cost": 1.5},
+            {"date": "2024-06-02", "cost": 3.0},
+        ]
+        companies = {item["name"]: item["cost"] for item in body["by_company"]}
+        assert companies["锦程商贸"] == 4.0
+        assert companies["优品优选"] == 0.5
+        assert companies["测试公司"] == 0
+        members = {item["name"]: item["cost"] for item in body["by_member"]}
+        assert members["李运营"] == 4.0
+        assert members["周主管"] == 0.5
+        assert members["张剪辑"] == 0
+
+        partial = client.get(
+            "/v1/overview/consumption",
+            headers=platform,
+            params={"start": "2024-06-01", "end": "2024-06-15"},
+        )
+        assert partial.json()["comparison"] is None
+
+        month = client.get(
+            "/v1/overview/consumption",
+            headers=platform,
+            params={"start": "2024-06-01", "end": "2024-06-30"},
+        )
+        assert month.status_code == 200, month.text
+        compared = month.json()["comparison"]
+        assert compared["label"] == "较上月"
+        assert compared["previous_start"] == "2024-05-01"
+        assert compared["previous_end"] == "2024-05-31"
+        assert compared["previous_total"] == 9.99
+        assert month.json()["total"] == 4.5
+
+
+def test_overview_consumption_rejects_invalid_range(tmp_path, monkeypatch):
+    with _client(tmp_path, monkeypatch) as client:
+        headers = _login(client, "admin@yujing.local")
+        backwards = client.get(
+            "/v1/overview/consumption",
+            headers=headers,
+            params={"start": "2024-06-02", "end": "2024-06-01"},
+        )
+        assert backwards.status_code == 400
+        assert backwards.json()["detail"] == "开始日期不能晚于结束日期"
+        one_side = client.get("/v1/overview/consumption", headers=headers, params={"start": "2024-06-01"})
+        assert one_side.status_code == 400
+        assert "同时填写" in one_side.json()["detail"]
+        too_long = client.get(
+            "/v1/overview/consumption",
+            headers=headers,
+            params={"start": "2024-01-01", "end": "2025-01-01"},
+        )
+        assert too_long.status_code == 400
+        assert "366" in too_long.json()["detail"]
+        leap_year = client.get(
+            "/v1/overview/consumption",
+            headers=headers,
+            params={"start": "2024-01-01", "end": "2024-12-31"},
+        )
+        assert leap_year.status_code == 200, leap_year.text
+        assert len(leap_year.json()["by_day"]) == 366
+        assert leap_year.json()["total"] == 0
+        bad_day = client.get(
+            "/v1/overview/consumption",
+            headers=headers,
+            params={"start": "2024-02-31", "end": "2024-03-01"},
+        )
+        assert bad_day.status_code == 422
+
+
+def test_overview_consumption_empty_data_is_zero(tmp_path, monkeypatch):
+    with _client(tmp_path, monkeypatch) as client:
+        headers = _login(client, "admin@yujing.local")
+        empty = client.get(
+            "/v1/overview/consumption",
+            headers=headers,
+            params={"start": "2020-01-01", "end": "2020-01-31"},
+        )
+        assert empty.status_code == 200, empty.text
+        body = empty.json()
+        assert body["total"] == 0
+        assert body["comparison"]["previous_total"] == 0
+        assert body["by_day"]
+        assert all(item["cost"] == 0 for item in body["by_day"])
+        assert body["by_company"]
+        assert all(item["cost"] == 0 for item in body["by_company"])
+
+    monkeypatch.setenv("EVC_ADMIN_SEED", "0")
+    blank_dir = tmp_path / "blank"
+    blank_dir.mkdir()
+    with _client(blank_dir, monkeypatch) as client:
+        headers = _login(client, SUPER_ADMIN_EMAIL)
+        blank = client.get("/v1/overview/consumption", headers=headers)
+        assert blank.status_code == 200, blank.text
+        payload = blank.json()
+        assert payload["timezone"] == "Asia/Shanghai"
+        assert payload["total"] == 0
+        assert payload["by_company"] == []
+        assert payload["by_member"] == []
+        assert payload["by_day"]
+        assert all(item["cost"] == 0 for item in payload["by_day"])
+
+
+def test_overview_consumption_isolates_tenants(tmp_path, monkeypatch):
+    with _client(tmp_path, monkeypatch) as client:
+        _add_usage("li@jiecheng.com", date(2024, 6, 1), 100)
+        _add_usage("li@jiecheng.com", date(2024, 6, 2), 300)
+        _add_usage("zhou@youpin.com", date(2024, 6, 1), 50)
+        _add_usage("zhang@jiecheng.com", date(2024, 5, 1), 999)
+        platform = _login(client, "admin@yujing.local")
+        jie = _login(client, "li@jiecheng.com")
+        you = _login(client, "zhou@youpin.com")
+        member = _login(client, "zhang@jiecheng.com")
+        params = {"start": "2024-06-01", "end": "2024-06-02"}
+        everyone = client.get("/v1/overview/consumption", headers=platform, params=params).json()
+        own = client.get("/v1/overview/consumption", headers=jie, params=params)
+        assert own.status_code == 200, own.text
+        own_body = own.json()
+        assert everyone["total"] == 4.5
+        assert own_body["total"] == 4.0
+        assert {item["name"] for item in own_body["by_company"]} == {"锦程商贸"}
+        assert "周主管" not in {item["name"] for item in own_body["by_member"]}
+        assert "优品优选" not in {item["name"] for item in own_body["by_company"]}
+        other = client.get("/v1/overview/consumption", headers=you, params=params).json()
+        assert other["total"] == 0.5
+        assert {item["name"] for item in other["by_company"]} == {"优品优选"}
+
+        tenants = client.get("/v1/tenants", headers=platform).json()
+        youpin = next(item["id"] for item in tenants if item["name"] == "优品优选")
+        denied = client.get("/v1/overview/consumption", headers=jie, params={**params, "tenant_id": youpin})
+        assert denied.status_code == 403
+
+        mine = client.get("/v1/overview/consumption", headers=member, params=params).json()
+        assert mine["total"] == 0
+        assert {item["name"] for item in mine["by_member"]} == {"张剪辑"}
+        assert mine["by_company"][0]["cost"] == 0
+        may = client.get(
+            "/v1/overview/consumption",
+            headers=member,
+            params={"start": "2024-05-01", "end": "2024-05-31"},
+        ).json()
+        assert may["total"] == 9.99
+        company_may = client.get(
+            "/v1/overview/consumption",
+            headers=jie,
+            params={"start": "2024-05-01", "end": "2024-05-31"},
+        ).json()
+        assert company_may["total"] == 9.99
+        assert client.get(
+            "/v1/overview/consumption",
+            headers=you,
+            params={"start": "2024-05-01", "end": "2024-05-31"},
+        ).json()["total"] == 0
+        client.cookies.clear()
+        assert client.get("/v1/overview/consumption", params=params).status_code == 401
+
+
+def test_overview_consumption_month_to_date_clamps_short_month(tmp_path, monkeypatch):
+    import admin_app.service as service
+
+    monkeypatch.setattr(service, "business_today", lambda: date(2023, 3, 30))
+    with _client(tmp_path, monkeypatch) as client:
+        headers = _login(client, "admin@yujing.local")
+        body = client.get("/v1/overview/consumption", headers=headers)
+        assert body.status_code == 200, body.text
+        payload = body.json()
+        assert payload["start"] == "2023-03-01"
+        assert payload["end"] == "2023-03-30"
+        assert payload["comparison"]["previous_start"] == "2023-02-01"
+        assert payload["comparison"]["previous_end"] == "2023-02-28"
+        full = client.get(
+            "/v1/overview/consumption",
+            headers=headers,
+            params={"start": "2023-03-01", "end": "2023-03-31"},
+        ).json()
+        assert full["comparison"]["previous_start"] == "2023-02-01"
+        assert full["comparison"]["previous_end"] == "2023-02-28"

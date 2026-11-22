@@ -1,7 +1,7 @@
 """租户、成员、额度、命中词和用量。租户范围以登录账号为准，不读请求体里的租户来放权。"""
 
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy.exc import IntegrityError
@@ -28,7 +28,10 @@ from admin_app.money import to_cents, yuan
 from admin_app.permissions import ROLE_LABEL, has_perm
 from admin_app.relay import apply_credentials, get_relay, relay_mode
 from admin_app.security import hash_password, new_invite_token, sha256_text
-from admin_app.timeutil import iso, shanghai_now, utcnow
+from admin_app.timeutil import business_today, business_timezone_name, iso, shanghai_now, utcnow
+
+# 一次查询最长跨度。含首尾，正好覆盖一个闰年。
+MAX_CONSUMPTION_DAYS = 366
 
 CATEGORIES = ("价格", "规格", "品牌", "夸大宣传")
 SOURCES = ("口播", "画面")
@@ -1289,6 +1292,184 @@ def trend(db: Session, member_ids: list[int] | None) -> list[dict]:
         key = day.isoformat()
         days.append({"date": key, "cost": yuan(buckets.get(key, 0))})
     return days
+
+
+def resolve_consumption_range(start: date | None, end: date | None, today: date | None = None) -> tuple[date, date]:
+    """缺省是业务时区的本月 1 日到今天。两边都要给，且不能超过 366 天。"""
+    clock = today or business_today()
+    if start is None and end is None:
+        return clock.replace(day=1), clock
+    if start is None or end is None:
+        raise DomainError(400, "开始日期和结束日期需要同时填写")
+    if start > end:
+        raise DomainError(400, "开始日期不能晚于结束日期")
+    if (end - start).days + 1 > MAX_CONSUMPTION_DAYS:
+        raise DomainError(400, "查询区间不能超过 366 天")
+    return start, end
+
+
+def _month_last_day(day: date) -> date:
+    if day.month == 12:
+        nxt = date(day.year + 1, 1, 1)
+    else:
+        nxt = date(day.year, day.month + 1, 1)
+    return nxt - timedelta(days=1)
+
+
+def previous_month_window(start: date, end: date, today: date) -> tuple[date, date] | None:
+    """整月，或本月 1 日到今天，才和上一个日历月比。其他区间不比。
+
+    整月对整月。本月还没过完时，上月只取到同一个日号，短月截到月末。
+    """
+    if start.day != 1 or (start.year, start.month) != (end.year, end.month):
+        return None
+    last = _month_last_day(start)
+    month_to_date = (start.year, start.month) == (today.year, today.month) and end == today
+    if end != last and not month_to_date:
+        return None
+    previous_last = start - timedelta(days=1)
+    previous_first = previous_last.replace(day=1)
+    if end == last:
+        return previous_first, previous_last
+    return previous_first, previous_first.replace(day=min(end.day, previous_last.day))
+
+
+def _as_day(value: object) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value)[:10])
+
+
+def _consumption_scope(db: Session, actor: Member, tenant_id: int | None) -> tuple[int | None, int | None, list[int]]:
+    """返回 (成员过滤, 公司过滤, 要列出的公司)。平台不传公司时两个过滤都是 None。"""
+    if not any(has_perm(actor.role, item) for item in ("usage.read.all", "usage.read.tenant", "usage.read.self")):
+        raise DomainError(403, "没有权限")
+    if actor.role == "member":
+        if tenant_id is not None and tenant_id != actor.tenant_id:
+            raise DomainError(403, "不能查看或修改其他公司的数据")
+        tenant_ids = [actor.tenant_id] if actor.tenant_id else []
+        return actor.id, actor.tenant_id, tenant_ids
+    target = resolve_tenant(actor, tenant_id)
+    if actor.role == "platform_admin" and target is None:
+        return None, None, [row.id for row in db.query(Tenant.id).order_by(Tenant.id).all()]
+    if target is None:
+        return None, None, []
+    return None, target, [target]
+
+
+def _snapshots_between(
+    db: Session,
+    start: date,
+    end: date,
+    member_id: int | None,
+    tenant_id: int | None,
+) -> list[UsageSnapshot]:
+    query = db.query(UsageSnapshot).filter(UsageSnapshot.day >= start, UsageSnapshot.day <= end)
+    if member_id is not None:
+        query = query.filter(UsageSnapshot.member_id == member_id)
+    if tenant_id is not None:
+        query = query.filter(UsageSnapshot.tenant_id == tenant_id)
+    return query.all()
+
+
+def consumption_report(
+    db: Session,
+    actor: Member,
+    start: date | None,
+    end: date | None,
+    tenant_id: int | None = None,
+) -> dict:
+    """按区间汇总实际消耗。
+
+    只加 usage_snapshots 的每日扣费。同步用量时按天写下的就是这张账，能按任意区间重算。
+    不读成员表的 month_cost_cents：演示数据会把那一列写成固定数，也不能代表选中的区间。
+    relay_ledger 只记额度划入划出，不是识别扣费，不计入消耗。
+    """
+    today = business_today()
+    start, end = resolve_consumption_range(start, end, today)
+    member_id, scoped_tenant, tenant_ids = _consumption_scope(db, actor, tenant_id)
+    rows = _snapshots_between(db, start, end, member_id, scoped_tenant)
+    by_member: dict[int, int] = {}
+    by_tenant: dict[int, int] = {}
+    by_day: dict[date, int] = {}
+    total_cents = 0
+    for row in rows:
+        cents = max(0, int(row.cost_cents or 0))
+        total_cents += cents
+        by_member[row.member_id] = by_member.get(row.member_id, 0) + cents
+        by_tenant[row.tenant_id] = by_tenant.get(row.tenant_id, 0) + cents
+        day = _as_day(row.day)
+        by_day[day] = by_day.get(day, 0) + cents
+
+    company_ids = list(tenant_ids)
+    for item_id in by_tenant:
+        if item_id not in company_ids:
+            company_ids.append(item_id)
+    tenant_rows = db.query(Tenant).filter(Tenant.id.in_(company_ids)).all() if company_ids else []
+    tenant_names = {item.id: item.name for item in tenant_rows}
+    companies = [
+        {"tenant_id": item_id, "name": tenant_names.get(item_id, "未知公司"), "cost": yuan(by_tenant.get(item_id, 0))}
+        for item_id in company_ids
+    ]
+    companies.sort(key=lambda item: (-int(round(item["cost"] * 100)), item["name"], item["tenant_id"]))
+
+    member_query = db.query(Member).filter(Member.deleted_at.is_(None), Member.role != "platform_admin")
+    if member_id is not None:
+        member_query = member_query.filter(Member.id == member_id)
+    elif scoped_tenant is not None:
+        member_query = member_query.filter(Member.tenant_id == scoped_tenant)
+    listed = member_query.all()
+    listed_ids = {item.id for item in listed}
+    extra_ids = [item_id for item_id in by_member if item_id not in listed_ids]
+    extras = db.query(Member).filter(Member.id.in_(extra_ids)).all() if extra_ids else []
+    people = listed + extras
+    for person in people:
+        if person.tenant_id and person.tenant_id not in tenant_names:
+            company = db.get(Tenant, person.tenant_id)
+            if company is not None:
+                tenant_names[company.id] = company.name
+    members = [
+        {
+            "member_id": person.id,
+            "name": person.name,
+            "tenant_id": person.tenant_id,
+            "tenant_name": tenant_names.get(person.tenant_id or 0, ""),
+            "cost": yuan(by_member.get(person.id, 0)),
+        }
+        for person in people
+    ]
+    members.sort(key=lambda item: (-int(round(item["cost"] * 100)), item["name"], item["member_id"]))
+
+    days = []
+    cursor = start
+    while cursor <= end:
+        days.append({"date": cursor.isoformat(), "cost": yuan(by_day.get(cursor, 0))})
+        cursor += timedelta(days=1)
+
+    comparison = None
+    window = previous_month_window(start, end, today)
+    if window is not None:
+        previous_start, previous_end = window
+        previous_rows = _snapshots_between(db, previous_start, previous_end, member_id, scoped_tenant)
+        previous_cents = sum(max(0, int(row.cost_cents or 0)) for row in previous_rows)
+        comparison = {
+            "label": "较上月",
+            "previous_start": previous_start.isoformat(),
+            "previous_end": previous_end.isoformat(),
+            "previous_total": yuan(previous_cents),
+        }
+    return {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "timezone": business_timezone_name(),
+        "total": yuan(total_cents),
+        "comparison": comparison,
+        "by_day": days,
+        "by_company": companies,
+        "by_member": members,
+    }
 
 
 def record_usage_snapshot(
