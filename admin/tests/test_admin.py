@@ -343,6 +343,108 @@ def test_quota_is_idempotent_and_reclaim_stays_reconciled(tmp_path, monkeypatch)
         assert restored["month_cost"] == before["month_cost"]
 
 
+def test_quota_batch_allocates_and_reclaims(tmp_path, monkeypatch):
+    with _client(tmp_path, monkeypatch) as client:
+        tenant = _login(client, "li@jiecheng.com")
+        member = _login(client, "zhang@jiecheng.com")
+        people = client.get("/v1/members", headers=tenant).json()
+        by_name = {item["name"]: item for item in people}
+        zhang, wang, li, zhao = by_name["张剪辑"], by_name["王审核"], by_name["李运营"], by_name["赵兼职"]
+        denied = client.post(
+            "/v1/quotas/allocate-batch",
+            headers=member,
+            json={"member_ids": [zhang["id"]], "amount": 10, "idempotency_key": "batch-denied", "direction": "add"},
+        )
+        assert denied.status_code == 403
+        empty = client.post(
+            "/v1/quotas/allocate-batch",
+            headers=tenant,
+            json={"member_ids": [], "amount": 10, "idempotency_key": "batch-empty", "direction": "add"},
+        )
+        assert empty.status_code == 400
+        body = {
+            "member_ids": [zhang["id"], wang["id"], zhang["id"]],
+            "amount": 10,
+            "idempotency_key": "batch-add",
+            "direction": "add",
+            "remark": "批量",
+        }
+        first = client.post("/v1/quotas/allocate-batch", headers=tenant, json=body)
+        assert first.status_code == 200, first.text
+        payload = first.json()
+        assert payload["succeeded"] == 2
+        assert payload["failed"] == 0
+        assert [item["member_id"] for item in payload["results"]] == [zhang["id"], wang["id"]]
+        again = client.post("/v1/quotas/allocate-batch", headers=tenant, json=body)
+        assert again.status_code == 200
+        assert [item["record"]["id"] for item in again.json()["results"]] == [item["record"]["id"] for item in payload["results"]]
+        updated = {item["name"]: item for item in client.get("/v1/members", headers=tenant).json()}
+        assert updated["张剪辑"]["balance"] == round(zhang["balance"] + 10, 2)
+        assert updated["王审核"]["balance"] == round(wang["balance"] + 10, 2)
+        assert updated["李运营"]["balance"] == round(li["balance"] - 20, 2)
+        reclaim = client.post(
+            "/v1/quotas/allocate-batch",
+            headers=tenant,
+            json={
+                "member_ids": [zhang["id"], wang["id"]],
+                "amount": 10,
+                "idempotency_key": "batch-reclaim",
+                "direction": "subtract",
+            },
+        )
+        assert reclaim.status_code == 200, reclaim.text
+        assert reclaim.json()["succeeded"] == 2
+        restored = {item["name"]: item for item in client.get("/v1/members", headers=tenant).json()}
+        assert restored["张剪辑"]["balance"] == zhang["balance"]
+        assert restored["王审核"]["balance"] == wang["balance"]
+        assert restored["李运营"]["balance"] == li["balance"]
+        partial = client.post(
+            "/v1/quotas/allocate-batch",
+            headers=tenant,
+            json={
+                "member_ids": [li["id"], zhao["id"], zhang["id"]],
+                "amount": 1,
+                "idempotency_key": "batch-partial",
+                "direction": "add",
+            },
+        )
+        assert partial.status_code == 200, partial.text
+        outcome = {item["member_id"]: item for item in partial.json()["results"]}
+        assert outcome[zhang["id"]]["ok"] is True
+        assert outcome[li["id"]]["ok"] is False
+        assert outcome[zhao["id"]]["ok"] is False
+        assert "停用" in outcome[zhao["id"]]["detail"]
+        after_partial = {item["name"]: item for item in client.get("/v1/members", headers=tenant).json()}
+        assert after_partial["张剪辑"]["balance"] == round(zhang["balance"] + 1, 2)
+        assert after_partial["李运营"]["balance"] == round(li["balance"] - 1, 2)
+        youpin = _login(client, "zhou@youpin.com")
+        foreign = next(item for item in client.get("/v1/members", headers=youpin).json() if item["name"] == "陈店长")
+        mixed = client.post(
+            "/v1/quotas/allocate-batch",
+            headers=tenant,
+            json={
+                "member_ids": [zhang["id"], foreign["id"]],
+                "amount": 1,
+                "idempotency_key": "batch-mixed",
+                "direction": "add",
+            },
+        )
+        assert mixed.status_code == 400
+        stayed = {item["name"]: item for item in client.get("/v1/members", headers=tenant).json()}
+        assert stayed["张剪辑"]["balance"] == after_partial["张剪辑"]["balance"]
+        too_many = client.post(
+            "/v1/quotas/allocate-batch",
+            headers=tenant,
+            json={
+                "member_ids": list(range(1, 22)),
+                "amount": 1,
+                "idempotency_key": "batch-too-many",
+                "direction": "add",
+            },
+        )
+        assert too_many.status_code == 400
+
+
 def test_overdraft_shows_zero_and_breaks_reconcile(tmp_path, monkeypatch):
     with _client(tmp_path, monkeypatch) as client:
         tenant = _login(client, "li@jiecheng.com")

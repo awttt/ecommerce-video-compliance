@@ -671,6 +671,77 @@ def allocate(
     return _finish_quota(db, actor, row, ip)
 
 
+def allocate_batch(
+    db: Session,
+    actor: Member,
+    *,
+    member_ids: list[int],
+    amount: object,
+    idempotency_key: str,
+    remark: str = "",
+    period: str = "",
+    direction: str = "add",
+    ip: str = "",
+) -> list[tuple[int, QuotaAllocation | None, str]]:
+    """按同一金额逐个分配或退回。每人用独立幂等键，重复提交不会重复扣款。
+
+    返回 (成员编号, 记录, 错误说明)。错误说明为空表示这一笔成功。某一笔失败不影响已经完成的其他成员。
+    """
+    _require(actor, "quota.allocate")
+    key = (idempotency_key or "").strip()
+    if not key or len(key) > 64:
+        raise DomainError(400, "请求缺少编号，请刷新页面后重试")
+    if direction not in ("add", "subtract"):
+        raise DomainError(400, "方向不正确")
+    cents = to_cents(amount)
+    if cents <= 0:
+        raise DomainError(400, "金额需要大于 0")
+    if cents > 100_000_000:
+        raise DomainError(400, "单笔金额过大")
+    ids: list[int] = []
+    seen: set[int] = set()
+    for raw in member_ids:
+        try:
+            member_id = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise DomainError(400, "成员不正确") from exc
+        if member_id in seen:
+            continue
+        seen.add(member_id)
+        ids.append(member_id)
+    if not ids:
+        raise DomainError(400, "请选择成员")
+    if len(ids) > 20:
+        raise DomainError(400, "一次最多选择 20 名成员")
+    companies: set[int] = set()
+    for member_id in ids:
+        member = db.get(Member, member_id)
+        if member is None or member.deleted_at is not None or member.tenant_id is None:
+            continue
+        companies.add(member.tenant_id)
+    if len(companies) > 1:
+        raise DomainError(400, "一次只能给同一家公司的成员分配")
+    results: list[tuple[int, QuotaAllocation | None, str]] = []
+    for member_id in ids:
+        try:
+            row = allocate(
+                db,
+                actor,
+                member_id=member_id,
+                amount=amount,
+                idempotency_key=f"{key}:{member_id}",
+                remark=remark,
+                period=period,
+                direction=direction,
+                ip=ip,
+            )
+        except DomainError as exc:
+            results.append((member_id, None, exc.detail))
+            continue
+        results.append((member_id, row, ""))
+    return results
+
+
 def _finish_quota(db: Session, actor: Member, row: QuotaAllocation, ip: str) -> QuotaAllocation:
     if row.status == "success":
         return row

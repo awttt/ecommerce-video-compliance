@@ -64,6 +64,7 @@ from admin_app.shared_rules import (
 from admin_app.service import (
     accept_invite,
     allocate,
+    allocate_batch,
     audit,
     bind_device,
     consumption_report,
@@ -155,6 +156,15 @@ class AcceptBody(BaseModel):
 
 class QuotaBody(BaseModel):
     member_id: int
+    amount: float
+    idempotency_key: str
+    remark: str = ""
+    period: str = ""
+    direction: str = "add"
+
+
+class QuotaBatchBody(BaseModel):
+    member_ids: list[int] = Field(default_factory=list)
     amount: float
     idempotency_key: str
     remark: str = ""
@@ -854,6 +864,53 @@ def post_quota(
         ip=client_ip(request),
     )
     return quota_dict(db, row)
+
+
+@router.post("/quotas/allocate-batch")
+def post_quota_batch(
+    body: QuotaBatchBody,
+    request: Request,
+    user: Member = Depends(require("quota.allocate")),
+    db: Session = Depends(get_db),
+) -> dict:
+    rows = allocate_batch(
+        db,
+        user,
+        member_ids=body.member_ids,
+        amount=body.amount,
+        idempotency_key=body.idempotency_key,
+        remark=body.remark,
+        period=body.period,
+        direction=body.direction,
+        ip=client_ip(request),
+    )
+    results = []
+    succeeded = 0
+    for member_id, row, detail in rows:
+        if row is not None and not detail:
+            succeeded += 1
+            record = quota_dict(db, row)
+            results.append(
+                {
+                    "member_id": record["member_id"],
+                    "member_name": record["member_name"],
+                    "ok": True,
+                    "detail": "",
+                    "record": record,
+                }
+            )
+            continue
+        member = db.get(Member, member_id)
+        results.append(
+            {
+                "member_id": member_id,
+                "member_name": member.name if member else "",
+                "ok": False,
+                "detail": detail or "额度操作失败，请稍后再试",
+                "record": None,
+            }
+        )
+    return {"succeeded": succeeded, "failed": len(results) - succeeded, "results": results}
 
 
 @router.get("/relay/status")
