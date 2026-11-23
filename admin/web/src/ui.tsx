@@ -1,4 +1,5 @@
-import { Tag, Typography } from "antd";
+import { ReloadOutlined } from "@ant-design/icons";
+import { Button, Spin, Tag, Typography } from "antd";
 import type { ReactNode } from "react";
 
 const CATEGORY: Record<string, { color: string; background: string }> = {
@@ -63,6 +64,23 @@ const STATUS: Record<string, string> = {
 
 export function StatusTag({ status, label }: { status: string; label: string }) {
   return <Tag color={STATUS[status] || STATUS[label] || "default"}>{label}</Tag>;
+}
+
+export function PageLoading({ tip = "正在加载数据…" }: { tip?: string }) {
+  return (
+    <div className="page-loading">
+      <Spin size="large" />
+      <span>{tip}</span>
+    </div>
+  );
+}
+
+export function RefreshButton({ onClick, loading = false }: { onClick: () => void; loading?: boolean }) {
+  return (
+    <Button icon={<ReloadOutlined />} loading={loading} onClick={onClick}>
+      刷新数据
+    </Button>
+  );
 }
 
 export function PageHead({

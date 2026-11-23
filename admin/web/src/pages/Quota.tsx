@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, App as AntApp, Button, Card, Col, Form, Input, InputNumber, Popconfirm, Radio, Row, Select, Statistic, Table, Tag } from "antd";
-import { useMemo, useRef, useState } from "react";
+import { Alert, App as AntApp, Button, Card, Col, Form, Input, InputNumber, Popconfirm, Radio, Row, Select, Space, Statistic, Table, Tag } from "antd";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import { ApiError, api } from "../api";
 import { money, when } from "../format";
+import { assignableMemberIds, chunkIds } from "../quotaSelection";
 import type { Member, QuotaRecord, Reconcile, RelayReport, Tenant, User } from "../types";
-import { PageHead, StatusTag } from "../ui";
+import { PageHead, PageLoading, RefreshButton, StatusTag } from "../ui";
 
 interface BatchResult {
   succeeded: number;
@@ -59,8 +60,10 @@ export function Quota() {
     mutationFn: () =>
       api<RelayReport>(scope ? `/v1/relay/sync?tenant_id=${scope}` : "/v1/relay/sync", { method: "POST" }),
     onSuccess: (data) => {
+      const failed = data.failed?.length ?? 0;
       const bad = data.members.filter((item) => !item.ok).length;
-      if (bad) message.warning(`已刷新，${bad} 名成员有差额`);
+      if (failed) message.warning(`已刷新，还有 ${failed} 人暂时没读到，请再点一次`);
+      else if (bad) message.warning(`已刷新，${bad} 名成员有差额`);
       else message.success("已刷新余额");
       void client.invalidateQueries({ queryKey: ["relay-status"] });
       void client.invalidateQueries({ queryKey: ["quota-summary"] });
@@ -70,12 +73,79 @@ export function Quota() {
   });
   const relayData = relay.data;
 
+  const names = useMemo(() => new Map((members.data ?? []).map((item) => [item.id, item.name])), [members.data]);
+  const fillAllRef = useRef(false);
+  const selectEveryone = () => {
+    if (platform && scope == null) {
+      message.warning("请先选择公司");
+      return false;
+    }
+    if (members.isLoading || (members.isFetching && !members.data)) {
+      fillAllRef.current = true;
+      setFailures([]);
+      return true;
+    }
+    const ids = assignableMemberIds(members.data ?? []);
+    if (!ids.length) {
+      message.warning("这家公司没有可分配的成员");
+      return false;
+    }
+    form.setFieldValue("member_ids", ids);
+    setFailures([]);
+    return true;
+  };
+  useEffect(() => {
+    if (!fillAllRef.current) return;
+    if (platform && scope == null) return;
+    if (members.isLoading || (members.isFetching && !members.data)) return;
+    fillAllRef.current = false;
+    const ids = assignableMemberIds(members.data ?? []);
+    if (!ids.length) {
+      message.warning("这家公司没有可分配的成员");
+      form.setFieldValue("direction", "add");
+      return;
+    }
+    form.setFieldValue("member_ids", ids);
+    setFailures([]);
+  }, [form, members.data, members.isFetching, members.isLoading, message, platform, scope]);
   const submit = useMutation({
-    mutationFn: (values: { member_ids: number[]; amount: number; remark?: string; direction: "add" | "subtract" }) =>
-      api<BatchResult>("/v1/quotas/allocate-batch", {
-        method: "POST",
-        body: JSON.stringify({ ...values, idempotency_key: keyRef.current }),
-      }),
+    mutationFn: async (values: { member_ids: number[]; amount: number; remark?: string; direction: "add" | "all" | "subtract" }) => {
+      const direction = values.direction === "subtract" ? "subtract" : "add";
+      const seen = new Set<number>();
+      const ids = values.member_ids.filter((id) => {
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      });
+      const combined: BatchResult = { succeeded: 0, failed: 0, results: [] };
+      const chunks = chunkIds(ids);
+      for (let index = 0; index < chunks.length; index += 1) {
+        const memberIds = chunks[index];
+        try {
+          const part = await api<BatchResult>("/v1/quotas/allocate-batch", {
+            method: "POST",
+            body: JSON.stringify({ ...values, direction, member_ids: memberIds, idempotency_key: keyRef.current }),
+          });
+          combined.succeeded += part.succeeded;
+          combined.failed += part.failed;
+          combined.results.push(...part.results);
+        } catch (error) {
+          const detail = error instanceof ApiError ? error.message : "分配失败";
+          const rest = chunks.slice(index).flat();
+          combined.failed += rest.length;
+          combined.results.push(
+            ...rest.map((member_id) => ({
+              member_id,
+              member_name: names.get(member_id) || "成员",
+              ok: false,
+              detail,
+            })),
+          );
+          break;
+        }
+      }
+      return combined;
+    },
     onSuccess: (data, variables) => {
       const missed = data.results.filter((item) => !item.ok);
       void client.invalidateQueries({ queryKey: ["quota-summary"] });
@@ -100,14 +170,31 @@ export function Quota() {
   const reclaim = direction === "subtract";
   const selectedCount = selectedIds.length;
   const total = selectedCount > 0 && typeof amount === "number" ? amount * selectedCount : 0;
-
-  return (
-    <>
-      <PageHead
-        title="额度分配"
-        description="可以一次选多名成员，按同一金额分配或退回。重复提交不会重复扣款。"
-        extra={
-          user.role === "platform_admin" ? (
+  const loading =
+    summary.isLoading ||
+    members.isLoading ||
+    records.isLoading ||
+    (platform && (tenants.isLoading || relay.isLoading));
+  const refreshing =
+    summary.isFetching ||
+    members.isFetching ||
+    records.isFetching ||
+    (platform && (tenants.isFetching || relay.isFetching));
+  const reload = () => {
+    void summary.refetch();
+    void members.refetch();
+    void records.refetch();
+    if (platform) {
+      void tenants.refetch();
+      void relay.refetch();
+    }
+  };
+  const head = (
+    <PageHead
+      title="额度分配"
+      extra={
+        <Space>
+          {user.role === "platform_admin" ? (
             <Select
               placeholder="选择公司"
               style={{ width: 180 }}
@@ -116,26 +203,40 @@ export function Quota() {
                 setTenantId(value);
                 form.setFieldValue("member_ids", []);
                 setFailures([]);
+                fillAllRef.current = form.getFieldValue("direction") === "all";
               }}
               options={(tenants.data ?? []).filter((item) => item.status === "active").map((item) => ({ value: item.id, label: item.name }))}
             />
-          ) : null
-        }
-      />
+          ) : null}
+          <RefreshButton loading={refreshing} onClick={reload} />
+        </Space>
+      }
+    />
+  );
+
+  if (loading) {
+    return (
+      <>
+        {head}
+        <PageLoading />
+      </>
+    );
+  }
+
+  return (
+    <>
+      {head}
       <Row gutter={[16, 16]}>
         <Col xs={24} lg={14}>
           <Card title="公司池">
             <Row gutter={16}>
-              <Col span={12} md={6}>
+              <Col span={12} md={8}>
                 <Statistic title="公司余额" value={report?.balance ?? 0} precision={2} prefix="¥" />
               </Col>
-              <Col span={12} md={6}>
-                <Statistic title="公司总额" value={report?.pool_total ?? 0} precision={2} prefix="¥" />
-              </Col>
-              <Col span={12} md={6}>
+              <Col span={12} md={8}>
                 <Statistic title="可划拨" value={report?.pool_remaining ?? 0} precision={2} prefix="¥" valueStyle={{ color: "#52c41a" }} />
               </Col>
-              <Col span={12} md={6}>
+              <Col span={12} md={8}>
                 <Statistic title="累计已消耗" value={report?.cumulative_cost ?? 0} precision={2} prefix="¥" />
               </Col>
             </Row>
@@ -200,24 +301,18 @@ export function Quota() {
           ) : null}
         </Col>
         <Col xs={24} lg={10}>
-          <Card title="划拨" extra="先校验公司池剩余">
+          <Card title="划拨">
             <Form form={form} layout="vertical" initialValues={{ direction: "add", member_ids: [] }} onFinish={(values) => submit.mutate(values)}>
               <Form.Item name="direction" label="方向">
-                <Radio.Group
-                  options={[
-                    { value: "add", label: "分配给成员" },
-                    { value: "subtract", label: "从成员退回" },
-                  ]}
-                />
+                <DirectionField onPickAll={selectEveryone} />
               </Form.Item>
               <Form.Item name="member_ids" label="成员" rules={[{ required: true, message: "请选择成员" }]}>
                 <Select
                   mode="multiple"
-                  maxCount={20}
                   allowClear
                   showSearch
                   optionFilterProp="label"
-                  placeholder="可多选，一次最多 20 人"
+                  placeholder="可多选"
                   options={choices.map((item) => ({
                     value: item.id,
                     label: `${item.name}（${item.email}）余额 ${money(item.balance)}${item.status === "active" ? "" : " · 已停用"}`,
@@ -264,6 +359,7 @@ export function Quota() {
         <Table
           rowKey="id"
           dataSource={records.data ?? []}
+          loading={records.isFetching}
           pagination={{ pageSize: 8, hideOnSinglePage: true }}
           columns={[
             { title: "时间", dataIndex: "created_at", render: (value: string) => when(value) },
@@ -281,11 +377,37 @@ export function Quota() {
   );
 }
 
+function DirectionField({
+  value,
+  onChange,
+  onPickAll,
+}: {
+  value?: string;
+  onChange?: (value: string) => void;
+  onPickAll: () => boolean;
+}) {
+  return (
+    <Radio.Group
+      value={value}
+      onChange={(event) => {
+        const next = String(event.target.value);
+        if (next === "all" && !onPickAll()) return;
+        onChange?.(next);
+      }}
+      options={[
+        { value: "add", label: "分配给成员" },
+        { value: "all", label: "分配给全部" },
+        { value: "subtract", label: "从成员退回" },
+      ]}
+    />
+  );
+}
+
 function TypographyHint({ remaining, count }: { remaining?: number; count: number }) {
   return (
     <div style={{ marginTop: 8 }}>
       <span style={{ color: "rgba(0,0,0,.45)" }}>
-        当前可分配 {money(remaining ?? 0)}。已选 {count} 人，一次最多 20 人。公司管理员的余额就是公司余额，不能选本人。未完成的再提交一次不会重复扣已经成功的。
+        当前可分配 {money(remaining ?? 0)}。已选 {count} 人。选「分配给全部」会选中这家公司除管理员以外的成员。公司管理员的余额就是公司余额，不能选本人。未完成的再提交一次不会重复扣已经成功的。
       </span>
     </div>
   );

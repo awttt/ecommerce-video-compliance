@@ -257,7 +257,7 @@ export function Recharge() {
   if (loading) {
     return (
       <div className="recharge-page">
-        <PageHead title="充值" description="充值记到当前登录账号，识别按余额扣费，到账后余额自动更新。" />
+        <PageHead title="充值" />
         <div className="recharge-state"><Spin /><span>正在加载充值信息…</span></div>
       </div>
     );
@@ -266,7 +266,7 @@ export function Recharge() {
   if (balanceError) {
     return (
       <div className="recharge-page">
-        <PageHead title="充值" description="充值记到当前登录账号，识别按余额扣费，到账后余额自动更新。" />
+        <PageHead title="充值" />
         <Card>
           <Alert type="error" showIcon message="登录状态已失效，请退出后重新登录再充值" />
         </Card>
@@ -277,7 +277,7 @@ export function Recharge() {
   if (error) {
     return (
       <div className="recharge-page">
-        <PageHead title="充值" description="充值记到当前登录账号，识别按余额扣费，到账后余额自动更新。" />
+        <PageHead title="充值" />
         <Card>
           <Alert
             type="error"
@@ -294,14 +294,14 @@ export function Recharge() {
   if (!info) {
     return (
       <div className="recharge-page">
-        <PageHead title="充值" description="充值记到当前登录账号，识别按余额扣费，到账后余额自动更新。" />
+        <PageHead title="充值" />
       </div>
     );
   }
 
   return (
     <div className="recharge-page">
-      <PageHead title="充值" description="充值记到当前登录账号，识别按余额扣费，到账后余额自动更新。" />
+      <PageHead title="充值" />
 
       <Card style={{ marginBottom: 16 }}>
         <Statistic title="当前余额" value={account.balance ?? 0} precision={2} prefix="¥" />

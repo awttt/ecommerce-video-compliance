@@ -5,7 +5,7 @@ import { useNavigate } from "react-router-dom";
 import { ApiError, api } from "../api";
 import { money, when } from "../format";
 import type { Tenant } from "../types";
-import { PageHead, StatusTag } from "../ui";
+import { PageHead, PageLoading, RefreshButton, StatusTag } from "../ui";
 
 export function Tenants() {
   const { message } = AntApp.useApp();
@@ -15,6 +15,7 @@ export function Tenants() {
   const [stop, setStop] = useState<Tenant | null>(null);
   const [alsoDisable, setAlsoDisable] = useState(false);
   const query = useQuery({ queryKey: ["tenants"], queryFn: () => api<Tenant[]>("/v1/tenants") });
+  const loading = query.isLoading;
 
   const create = useMutation({
     mutationFn: (values: { name: string; admin_email: string; admin_name: string; admin_password?: string; seats: number }) =>
@@ -46,21 +47,37 @@ export function Tenants() {
     onError: (error) => message.error(error instanceof ApiError ? error.message : "更新失败"),
   });
 
-  return (
-    <>
-      <PageHead
-        title="租户管理"
-        description="一个租户是一家入驻公司。账号和余额按成员保存，公司本身不单独开户；余额合计来自最近一次刷新。"
-        extra={
+  const head = (
+    <PageHead
+      title="租户管理"
+      extra={
+        <Space>
+          <RefreshButton loading={query.isFetching} onClick={() => void query.refetch()} />
           <Button type="primary" onClick={() => setOpen(true)}>
             新建公司
           </Button>
-        }
-      />
+        </Space>
+      }
+    />
+  );
+
+  if (loading) {
+    return (
+      <>
+        {head}
+        <PageLoading />
+      </>
+    );
+  }
+
+  return (
+    <>
+      {head}
       <Card>
         <Table
           rowKey="id"
           dataSource={query.data ?? []}
+          loading={query.isFetching}
           pagination={false}
           scroll={{ x: 1100 }}
           columns={[

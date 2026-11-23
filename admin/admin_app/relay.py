@@ -1,6 +1,7 @@
 """中转站管理接口。没有管理密钥时走本地账本，不访问网络，也不读取中转站。"""
 
 import hashlib
+import time
 from datetime import date, timedelta
 
 from sqlalchemy.orm import Session
@@ -15,6 +16,8 @@ NOTE_PREFIX = "evc-admin:"
 _NO_KEY = "当前是演示环境，不能同步余额"
 # 查询失败必须把这句话抛出去。调用方看到它就停，不能当成「没有这个人」去建号。
 LOOKUP_FAILED = "查询中转站账号失败，请稍后再试。本次没有新建账号。"
+# 管理密钥有每分钟次数上限。调用方看到这句话就停手，不要继续把次数打光。
+RATE_LIMITED = "操作太频繁，请稍后再试"
 
 
 def _user_rows(data: object) -> list:
@@ -27,6 +30,21 @@ def _user_rows(data: object) -> list:
             if isinstance(value, list):
                 return value
     raise DomainError(502, LOOKUP_FAILED)
+
+
+def _retry_wait(response) -> float:
+    """429 的 Retry-After 只认秒数，并且最多等 2 秒。认不出就等半秒。"""
+    raw = ""
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        raw = str(headers.get("Retry-After") or "")
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError):
+        seconds = 0.5
+    if seconds <= 0:
+        seconds = 0.5
+    return min(seconds, 2.0)
 
 
 def apply_credentials(member: Member, credentials: dict) -> None:
@@ -155,6 +173,8 @@ class HttpRelay:
         return self.base_url + path
 
     def _raise(self, response, action: str) -> None:
+        if response.status_code == 429:
+            raise DomainError(502, RATE_LIMITED)
         if response.status_code in (401, 403):
             raise DomainError(502, f"{action}失败，服务配置不完整，请联系平台管理员")
         if response.status_code >= 400:
@@ -173,10 +193,17 @@ class HttpRelay:
     def _get(self, path: str, params: dict | None = None) -> object | None:
         import httpx
 
-        try:
-            response = self.client.get(self._url(path), params=params)
-        except httpx.HTTPError as exc:
-            raise DomainError(502, "连不上服务，读取数据失败") from exc
+        response = None
+        for attempt in range(2):
+            try:
+                response = self.client.get(self._url(path), params=params)
+            except httpx.HTTPError as exc:
+                raise DomainError(502, "连不上服务，读取数据失败") from exc
+            # 限流只再试一次。刷新余额会连续读很多人，一直重试会把整次同步拖过超时。
+            if response.status_code == 429 and attempt == 0:
+                time.sleep(_retry_wait(response))
+                continue
+            break
         if response.status_code == 404:
             return None
         return self._payload(response, "读取")

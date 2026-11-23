@@ -1288,7 +1288,8 @@ export function Shell() {
                     <VideoPane
                       mediaUrl={mediaUrl}
                       mimeType={mediaMime}
-                      emptyText={previewBlocked && job.preview_hint ? job.preview_hint : "还没有可预览的视频"}
+                      loading={job.preview_status === "pending"}
+                      emptyText={job.preview_status === "failed" && job.preview_hint ? job.preview_hint : "还没有可预览的视频"}
                       onTime={handleTime}
                       onReady={(player) => {
                         seekRef.current = player.seek;

@@ -68,6 +68,7 @@ export interface RelayReport {
   ok: boolean;
   members: RelayMemberRow[];
   missing?: string[];
+  failed?: string[];
   totals: {
     local_balance: number;
     relay_balance: number;

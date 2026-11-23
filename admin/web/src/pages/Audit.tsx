@@ -4,7 +4,7 @@ import { useOutletContext } from "react-router-dom";
 import { api } from "../api";
 import { when } from "../format";
 import type { AuditRow, User } from "../types";
-import { PageHead, StatusTag } from "../ui";
+import { PageHead, PageLoading, RefreshButton, StatusTag } from "../ui";
 
 const statusMap: Record<string, string> = {
   active: "正常",
@@ -32,13 +32,30 @@ export function Audit() {
   const user = useOutletContext<User>();
   const platform = user.role === "platform_admin";
   const query = useQuery({ queryKey: ["audit"], queryFn: () => api<AuditRow[]>("/v1/audit-logs") });
+  const head = (
+    <PageHead
+      title="审计日志"
+      extra={<RefreshButton loading={query.isFetching} onClick={() => void query.refetch()} />}
+    />
+  );
+
+  if (query.isLoading) {
+    return (
+      <>
+        {head}
+        <PageLoading />
+      </>
+    );
+  }
+
   return (
     <>
-      <PageHead title="审计日志" description="只追加，不修改不删除。额度操作和命中词审批都会留在这里。" />
+      {head}
       <Card>
         <Table
           rowKey="id"
           dataSource={query.data ?? []}
+          loading={query.isFetching}
           pagination={{ pageSize: 10, hideOnSinglePage: true }}
           scroll={{ x: 960 }}
           columns={[

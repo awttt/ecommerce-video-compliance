@@ -1,3 +1,4 @@
+import { Spin } from "antd";
 import { useEffect, useRef } from "react";
 import videojs from "video.js";
 import "video.js/dist/video-js.css";
@@ -13,12 +14,14 @@ export function VideoPane({
   mediaUrl,
   mimeType,
   emptyText,
+  loading = false,
   onReady,
   onTime,
 }: {
   mediaUrl: string | null;
   mimeType: string;
   emptyText: string;
+  loading?: boolean;
   onReady: (player: PlayerControls) => void;
   onTime?: (seconds: number, playing: boolean) => void;
 }) {
@@ -65,15 +68,19 @@ export function VideoPane({
   if (!mediaUrl) {
     return (
       <div className="video-empty">
-        <div className="empty-state">
-          <span className="empty-mark">
-            <svg width={22} height={22} viewBox="0 0 24 24" fill="none" aria-hidden="true">
-              <rect x="3" y="5" width="18" height="14" rx="3" stroke="currentColor" strokeWidth="1.6" />
-              <path d="M10 9.5l5 2.5-5 2.5v-5z" fill="currentColor" />
-            </svg>
-          </span>
-          <span className="empty-title">{emptyText}</span>
-        </div>
+        {loading ? (
+          <Spin size="large" />
+        ) : (
+          <div className="empty-state">
+            <span className="empty-mark">
+              <svg width={22} height={22} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <rect x="3" y="5" width="18" height="14" rx="3" stroke="currentColor" strokeWidth="1.6" />
+                <path d="M10 9.5l5 2.5-5 2.5v-5z" fill="currentColor" />
+              </svg>
+            </span>
+            <span className="empty-title">{emptyText}</span>
+          </div>
+        )}
       </div>
     );
   }

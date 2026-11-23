@@ -27,7 +27,7 @@ export function Settings() {
 
   return (
     <>
-      <PageHead title="接入设置" description="服务地址和分组可以改。管理密钥只存在服务端环境变量，页面上看不到，也不会下发给客户端。" />
+      <PageHead title="接入设置" />
       <Row gutter={[16, 16]}>
         <Col xs={24} lg={14}>
           <Card title="服务连接">

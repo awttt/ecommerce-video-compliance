@@ -214,6 +214,38 @@ def test_http_relay_matches_token4u_admin_contract(monkeypatch):
     snapshot = sender.user_snapshot("77")
     assert snapshot["status"] == "active"
     assert snapshot["balance_cents"] == 1250
+    class LimitedThenOk:
+        def __init__(self):
+            self.calls = 0
+
+        def get(self, url, params=None):
+            del url, params
+            self.calls += 1
+            if self.calls == 1:
+                return httpx.Response(429, headers={"Retry-After": "1"}, json={"message": "slow"})
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "id": 77,
+                        "email": "staff@example.com",
+                        "status": "active",
+                        "balance": 1,
+                        "total_recharged": 1,
+                    },
+                },
+            )
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(relay.time, "sleep", lambda seconds: sleeps.append(seconds))
+    original = sender.client
+    sender.client = LimitedThenOk()
+    limited = sender.user_snapshot("77")
+    assert limited["balance_cents"] == 100
+    assert sleeps == [1.0]
+    sender.client = original
+
     month = sender.usage_summary("77", date(2026, 11, 1), date(2026, 11, 20))
     assert month == {"requests": 4, "input_tokens": 100, "output_tokens": 20, "cost_cents": 360}
     assert sender.was_applied("idem-add", "77") is True
@@ -687,6 +719,83 @@ def test_relay_sync_pulls_balance_and_usage(tmp_path, monkeypatch):
         status = client.get("/v1/relay/status", headers=tenant)
         assert status.status_code == 200
         assert status.json()["totals"]["relay_balance"] == body["totals"]["relay_balance"]
+
+
+def test_relay_sync_keeps_balances_when_rate_limited(tmp_path, monkeypatch):
+    """一个人触发限流时，前面已经读到的余额要留下，后面的人不再继续打。"""
+    with _client(tmp_path, monkeypatch) as client:
+        tenant = _login(client, "li@jiecheng.com")
+        import admin_app.service as service
+        from admin_app.errors import DomainError
+        from admin_app.relay import RATE_LIMITED
+
+        monkeypatch.setattr(service, "SYNC_RATE_LIMIT_WAIT", 0)
+        seen: list[str] = []
+
+        class FakeRemote:
+            mode = "remote"
+
+            def user_snapshot(self, rid: str) -> dict:
+                seen.append(rid)
+                if rid == "user_1042":
+                    raise DomainError(502, RATE_LIMITED)
+                return {
+                    "id": rid,
+                    "email": "",
+                    "status": "active",
+                    "balance_cents": 4800,
+                    "total_recharged_cents": 5000,
+                }
+
+            def usage_summary(self, rid: str, start: date, end: date) -> dict:
+                del rid, start, end
+                return {"requests": 3, "input_tokens": 100, "output_tokens": 50, "cost_cents": 200}
+
+        monkeypatch.setattr(service, "get_relay", lambda db: FakeRemote())
+        synced = client.post("/v1/relay/sync", headers=tenant)
+        assert synced.status_code == 200, synced.text
+        body = synced.json()
+        assert body["failed"] == ["张剪辑", "王审核", "赵兼职"]
+        # 李运营读成功；张剪辑限流后再试一次；后面两个人不再请求。
+        assert seen == ["user_1043", "user_1042", "user_1042"]
+        rows = {item["name"]: item for item in body["members"]}
+        assert rows["李运营"]["relay_balance"] == 48.0
+        assert rows["李运营"]["local_balance"] == 48.0
+        assert rows["张剪辑"]["local_balance"] == 4200.0
+
+
+def test_relay_sync_continues_after_one_member_fails(tmp_path, monkeypatch):
+    with _client(tmp_path, monkeypatch) as client:
+        tenant = _login(client, "li@jiecheng.com")
+        import admin_app.service as service
+        from admin_app.errors import DomainError
+
+        class FakeRemote:
+            mode = "remote"
+
+            def user_snapshot(self, rid: str) -> dict:
+                if rid == "user_1044":
+                    raise DomainError(502, "读取失败，请稍后再试")
+                return {
+                    "id": rid,
+                    "email": "",
+                    "status": "active",
+                    "balance_cents": 4800,
+                    "total_recharged_cents": 5000,
+                }
+
+            def usage_summary(self, rid: str, start: date, end: date) -> dict:
+                del rid, start, end
+                return {"requests": 1, "input_tokens": 1, "output_tokens": 1, "cost_cents": 100}
+
+        monkeypatch.setattr(service, "get_relay", lambda db: FakeRemote())
+        synced = client.post("/v1/relay/sync", headers=tenant)
+        assert synced.status_code == 200, synced.text
+        body = synced.json()
+        assert body["failed"] == ["王审核"]
+        rows = {item["name"]: item for item in body["members"]}
+        assert rows["赵兼职"]["local_balance"] == 48.0
+        assert rows["王审核"]["local_balance"] == 3682.0
 
 
 def test_relay_sync_refuses_local_mode(tmp_path, monkeypatch):

@@ -7,7 +7,7 @@ import { ApiError, api } from "../api";
 import { consumptionTitle, rangeFor, type RangePreset } from "../dates";
 import { deltaText, fromNow, money } from "../format";
 import type { Consumption, Dashboard as DashboardData, User } from "../types";
-import { PageHead } from "../ui";
+import { PageHead, PageLoading, RefreshButton } from "../ui";
 
 const PRESETS: { label: string; value: RangePreset }[] = [
   { label: "今天", value: "today" },
@@ -68,28 +68,42 @@ export function Dashboard() {
   const spentValue = spent?.total ?? 0;
   const compared = spent?.comparison ? deltaText(spent.total, spent.comparison.previous_total, "较上月") : null;
   const spentHint = compared ?? (spent?.comparison ? "较上月 —" : spent ? `${spent.start} 至 ${spent.end}` : "按北京时间统计");
+  const loading = query.isLoading || consumption.isLoading || trend.isLoading;
+  const refreshing = query.isFetching || consumption.isFetching || trend.isFetching;
 
   function applyPreset(next: RangePreset) {
     setPreset(next);
     setRange(rangeFor(next));
   }
 
+  const head = (
+    <PageHead
+      title="总览"
+      description={member ? "这里只看你自己的余额和消耗。日期按北京时间。" : undefined}
+      extra={
+        <RefreshButton
+          loading={refreshing}
+          onClick={() => {
+            void client.invalidateQueries({ queryKey: ["dashboard"] });
+            void client.invalidateQueries({ queryKey: ["consumption"] });
+          }}
+        />
+      }
+    />
+  );
+
+  if (loading) {
+    return (
+      <>
+        {head}
+        <PageLoading />
+      </>
+    );
+  }
+
   return (
     <>
-      <PageHead
-        title="总览"
-        description={member ? "这里只看你自己的余额和消耗。日期按北京时间。" : undefined}
-        extra={
-          <Button
-            onClick={() => {
-              void client.invalidateQueries({ queryKey: ["dashboard"] });
-              void client.invalidateQueries({ queryKey: ["consumption"] });
-            }}
-          >
-            刷新数据
-          </Button>
-        }
-      />
+      {head}
       <Card style={{ marginBottom: 16 }} styles={{ body: { paddingBottom: 12 } }}>
         <Space wrap>
           <Radio.Group
@@ -126,42 +140,19 @@ export function Dashboard() {
           }
         />
       ) : null}
-      {report ? (
-        <Alert
-          style={{ marginBottom: 16 }}
-          showIcon
-          type={member ? "info" : report.ok ? "success" : "error"}
-          message={member ? "你可以在后台直接审核视频" : report.ok ? "对账状态：正常" : report.overdraft ? "对账状态：不平，有成员透支" : "对账状态：不平"}
-          description={
-            member
-              ? "上传、抽帧、画面和口播识别、剪辑和导出都在后台完成。识别会从你的账户余额扣费。"
-              : `公司余额 ${money(report.balance)}，累计已消耗 ${money(report.cumulative_cost)}，公司总额 ${money(report.pool_total)}。${
-                  report.overdraft_members.length ? `透支按 0 计入：${report.overdraft_members.join("、")}。` : ""
-                }`
-          }
-        />
-      ) : null}
       <Row gutter={[16, 16]}>
-        <Col xs={24} sm={12} lg={member ? 12 : 8}>
+        <Col xs={24} sm={12}>
           <Card>
             <Statistic title={member ? "我的余额" : "成员余额合计"} value={report?.balance ?? 0} precision={2} prefix="¥" />
             <Typography.Text type="secondary">当前还能用的额度</Typography.Text>
           </Card>
         </Col>
-        <Col xs={24} sm={12} lg={member ? 12 : 8}>
+        <Col xs={24} sm={12}>
           <Card>
-            <Statistic title={member ? spentTitle : "已分配累计"} value={member ? spentValue : report?.allocated ?? 0} precision={2} prefix="¥" />
-            <Typography.Text type="secondary">{member ? spentHint : `公司余额 ${money(report?.pool_remaining ?? 0)}`}</Typography.Text>
+            <Statistic title={spentTitle} value={spentValue} precision={2} prefix="¥" />
+            <Typography.Text type={compared ? "success" : "secondary"}>{spentHint}</Typography.Text>
           </Card>
         </Col>
-        {member ? null : (
-          <Col xs={24} sm={12} lg={8}>
-            <Card>
-              <Statistic title={spentTitle} value={spentValue} precision={2} prefix="¥" />
-              <Typography.Text type={compared ? "success" : "secondary"}>{spentHint}</Typography.Text>
-            </Card>
-          </Col>
-        )}
       </Row>
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col xs={24} lg={14}>

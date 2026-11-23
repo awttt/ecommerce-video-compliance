@@ -1,16 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
-import { Alert, App as AntApp, Button, Card, Col, Progress, Row, Select, Space, Statistic, Table } from "antd";
+import { Alert, Card, Col, Progress, Row, Select, Space, Statistic, Table } from "antd";
 import { useState } from "react";
 import { useOutletContext } from "react-router-dom";
-import { ApiError, api, download } from "../api";
+import { api } from "../api";
 import { money, tokenText } from "../format";
 import type { Tenant, UsageMember, UsageSummary, User } from "../types";
-import { PageHead } from "../ui";
+import { PageHead, PageLoading, RefreshButton } from "../ui";
 
 export function Usage() {
   const user = useOutletContext<User>();
   const platform = user.role === "platform_admin";
-  const { message } = AntApp.useApp();
   const [tenantId, setTenantId] = useState<number | undefined>(undefined);
   const tenants = useQuery({
     queryKey: ["tenants"],
@@ -27,35 +26,46 @@ export function Usage() {
     queryFn: () => api<UsageMember[]>(scope ? `/v1/usage/by-member?tenant_id=${scope}` : "/v1/usage/by-member"),
   });
   const data = summary.data;
+  const loading = summary.isLoading || members.isLoading || (platform && tenants.isLoading);
+  const refreshing = summary.isFetching || members.isFetching || (platform && tenants.isFetching);
+  const reload = () => {
+    void summary.refetch();
+    void members.refetch();
+    if (platform) void tenants.refetch();
+  };
+  const head = (
+    <PageHead
+      title="用量看板"
+      extra={
+        <Space>
+          {user.role === "platform_admin" ? (
+            <Select
+              allowClear
+              placeholder="全部公司"
+              style={{ width: 160 }}
+              value={tenantId}
+              onChange={setTenantId}
+              options={(tenants.data ?? []).map((item) => ({ value: item.id, label: item.name }))}
+            />
+          ) : null}
+          <RefreshButton loading={refreshing} onClick={reload} />
+        </Space>
+      }
+    />
+  );
+
+  if (loading) {
+    return (
+      <>
+        {head}
+        <PageLoading />
+      </>
+    );
+  }
 
   return (
     <>
-      <PageHead
-        title="用量看板"
-        description="按月统计识别用量和消耗，日期按北京时间。"
-        extra={
-          <Space>
-            {user.role === "platform_admin" ? (
-              <Select
-                allowClear
-                placeholder="全部公司"
-                style={{ width: 160 }}
-                value={tenantId}
-                onChange={setTenantId}
-                options={(tenants.data ?? []).map((item) => ({ value: item.id, label: item.name }))}
-              />
-            ) : null}
-            <Button
-              onClick={() => {
-                const path = scope ? `/v1/usage/export?tenant_id=${scope}` : "/v1/usage/export";
-                void download(path, "用量.csv").catch((error) => message.error(error instanceof ApiError ? error.message : "导出失败"));
-              }}
-            >
-              导出
-            </Button>
-          </Space>
-        }
-      />
+      {head}
       <Row gutter={[16, 16]}>
         <Col xs={24} sm={12} lg={platform ? 6 : 8}>
           <Card>
@@ -90,6 +100,7 @@ export function Usage() {
         <Table
           rowKey="id"
           pagination={false}
+          loading={members.isFetching}
           dataSource={members.data ?? []}
           columns={[
             { title: "成员", dataIndex: "name" },

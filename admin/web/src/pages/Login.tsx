@@ -31,7 +31,8 @@ export function Login() {
     saveSession(data.access_token, data.refresh_token, data.user.email, true);
     client.clear();
     client.setQueryData(["me"], data.user);
-    navigate("/");
+    const tools = window.__EVC_TOOLS_URL__ ?? "";
+    navigate(data.user.role === "member" && tools ? "/tools" : "/");
   }
 
   const login = useMutation({

@@ -35,7 +35,7 @@ export function Account() {
 
   return (
     <>
-      <PageHead title="个人设置" description="修改自己的姓名和登录密码。" />
+      <PageHead title="个人设置" />
       <Row gutter={[16, 16]}>
         <Col xs={24} lg={12}>
           <Card title="姓名">

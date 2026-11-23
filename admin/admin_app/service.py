@@ -1,5 +1,7 @@
 """租户、成员、额度和用量。租户范围以登录账号为准，不读请求体里的租户来放权。"""
 
+import logging
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -21,12 +23,16 @@ from admin_app.models import (
 )
 from admin_app.money import to_cents, yuan
 from admin_app.permissions import ROLE_LABEL, has_perm
-from admin_app.relay import LOOKUP_FAILED, apply_credentials, get_relay, relay_mode
+from admin_app.relay import LOOKUP_FAILED, RATE_LIMITED, apply_credentials, get_relay, relay_mode
 from admin_app.security import hash_password, new_invite_token, sha256_text
 from admin_app.timeutil import business_today, business_timezone_name, iso, shanghai_now, utcnow
 
 # 一次查询最长跨度。含首尾，正好覆盖一个闰年。
 MAX_CONSUMPTION_DAYS = 366
+# 撞上限流后再等这么久，重试当前这一个成员。测试会把它改成 0。
+SYNC_RATE_LIMIT_WAIT = 5.0
+
+logger = logging.getLogger("admin_app")
 
 
 def audit(
@@ -132,8 +138,8 @@ def _wallet_owner(db: Session, tenant: Tenant) -> Member:
 
 
 def _password_ok(password: str) -> None:
-    if len(password or "") < 8 or len(password) > 72:
-        raise DomainError(400, "密码需要在 8 到 72 位之间")
+    if len(password or "") < 6 or len(password) > 72:
+        raise DomainError(400, "密码需要在 6 到 72 位之间")
 
 
 # 中转站已经建号或绑号，但本地提交失败。重试会按邮箱再查，不会再开一个号。
@@ -984,17 +990,19 @@ def relay_report(db: Session, actor: Member, tenant_id: int | None, mode: str | 
     }
 
 
-def _sync_daily_snapshots(db: Session, relayer, member: Member, days: int = 7) -> None:
+def _sync_daily_snapshots(db: Session, relayer, member: Member, days: int = 7) -> bool:
     """按天拉最近 N 天的用量，写进快照表，供总览的 7 天趋势图使用。
 
-    逐个自然日请求中转站；某一天失败就跳过，不影响其他天，也不影响同步主流程。
+    某一天失败就跳过。碰到限流返回 False，调用方停止后面的人，避免把次数再打光。
     """
     today = shanghai_now().date()
     for offset in range(days):
         day = today - timedelta(days=offset)
         try:
             stats = relayer.usage_summary(member.relay_user_id, day, day)
-        except DomainError:
+        except DomainError as exc:
+            if exc.detail == RATE_LIMITED:
+                return False
             continue
         record_usage_snapshot(
             db,
@@ -1006,10 +1014,52 @@ def _sync_daily_snapshots(db: Session, relayer, member: Member, days: int = 7) -
             output_tokens=int(stats["output_tokens"]),
             cost_cents=int(stats["cost_cents"]),
         )
+    return True
+
+
+def _read_member_relay(relayer, member: Member, today: date, month_start: date, lifetime_start: date) -> dict:
+    """只读中转站，不改成员。账号不存在时 missing 为 True。"""
+    snapshot = relayer.user_snapshot(member.relay_user_id)
+    if snapshot is None:
+        return {"missing": True}
+    return {
+        "missing": False,
+        "snapshot": snapshot,
+        "month": relayer.usage_summary(member.relay_user_id, month_start, today),
+        "lifetime": relayer.usage_summary(member.relay_user_id, lifetime_start, today),
+    }
+
+
+def _store_member_balance(member: Member, now, payload: dict) -> None:
+    member.relay_checked_at = now
+    if payload["missing"]:
+        member.relay_balance_cents = 0
+        member.relay_status = "missing"
+        return
+    snapshot = payload["snapshot"]
+    member.relay_balance_cents = int(snapshot["balance_cents"])
+    member.relay_status = str(snapshot.get("status") or "")[:16]
+    # 钱以中转站为准：同步时把本地余额对齐中转站，消耗自然从余额里减掉。
+    member.balance_cents = int(snapshot["balance_cents"])
+    member.overdraft = member.balance_cents < 0
+
+
+def _store_member_usage(member: Member, payload: dict) -> None:
+    month = payload["month"]
+    lifetime = payload["lifetime"]
+    member.month_requests = int(month["requests"])
+    member.month_input_tokens = int(month["input_tokens"])
+    member.month_output_tokens = int(month["output_tokens"])
+    member.month_cost_cents = int(month["cost_cents"])
+    member.lifetime_cost_cents = max(int(lifetime["cost_cents"]), member.month_cost_cents)
 
 
 def sync_relay(db: Session, actor: Member, tenant_id: int | None, ip: str = "") -> dict:
-    """从中转站拉余额和用量，写成成员快照。只读中转站，不动本地账本。"""
+    """从中转站拉余额和用量，写成成员快照。只读中转站，不动本地账本。
+
+    余额先读完再拉按日用量。按日用量大约占掉七成请求，以前和余额交织在一起，
+    中转站一返回 429，整次同步就失败，已经读到的余额也会回滚。
+    """
     _require(actor, "quota.allocate")
     members = _relay_members(db, actor, tenant_id)
     relayer = get_relay(db)
@@ -1021,45 +1071,65 @@ def sync_relay(db: Session, actor: Member, tenant_id: int | None, ip: str = "") 
     now = utcnow()
     synced = 0
     missing: list[str] = []
+    failed: list[str] = []
+    pulled: list[tuple[Member, dict]] = []
+    limited = False
     for member in members:
         if not member.relay_user_id:
             continue
-        snapshot = relayer.user_snapshot(member.relay_user_id)
-        member.relay_checked_at = now
-        if snapshot is None:
-            member.relay_balance_cents = 0
-            member.relay_status = "missing"
+        if limited:
+            failed.append(member.name)
+            continue
+        payload, error = _pull_member(relayer, member, today, month_start, lifetime_start)
+        if error is not None and error.detail == RATE_LIMITED:
+            time.sleep(SYNC_RATE_LIMIT_WAIT)
+            payload, error = _pull_member(relayer, member, today, month_start, lifetime_start)
+        if error is not None:
+            failed.append(member.name)
+            limited = error.detail == RATE_LIMITED
+            continue
+        _store_member_balance(member, now, payload)
+        if payload["missing"]:
             missing.append(member.name)
             continue
-        month = relayer.usage_summary(member.relay_user_id, month_start, today)
-        lifetime = relayer.usage_summary(member.relay_user_id, lifetime_start, today)
-        # 先写 7 天明细快照；它的 upsert 会重算月度合计，所以后面再用中转站的权威值覆盖。
-        _sync_daily_snapshots(db, relayer, member)
-        member.relay_balance_cents = int(snapshot["balance_cents"])
-        member.relay_status = str(snapshot.get("status") or "")[:16]
-        # 钱以中转站为准：同步时把本地余额对齐中转站，消耗自然从余额里减掉。
-        member.balance_cents = int(snapshot["balance_cents"])
-        member.overdraft = member.balance_cents < 0
-        member.month_requests = int(month["requests"])
-        member.month_input_tokens = int(month["input_tokens"])
-        member.month_output_tokens = int(month["output_tokens"])
-        member.month_cost_cents = int(month["cost_cents"])
-        member.lifetime_cost_cents = max(int(lifetime["cost_cents"]), member.month_cost_cents)
+        pulled.append((member, payload))
         synced += 1
+    for member, _payload in pulled:
+        # 按日快照会重算月度合计，循环结束后再用中转站的权威值覆盖。
+        if not _sync_daily_snapshots(db, relayer, member):
+            logger.warning("同步余额时中转站限流，剩余成员的按日用量这次不拉")
+            break
+    for member, payload in pulled:
+        _store_member_usage(member, payload)
+    if synced == 0 and failed:
+        raise DomainError(502, RATE_LIMITED if limited else "读取失败，请稍后再试")
+    note = f"更新 {synced} 名成员的余额和用量"
+    if missing:
+        note += f"，{len(missing)} 个账号未找到"
+    if failed:
+        note += f"，{len(failed)} 人暂时没有读到"
     audit(
         db,
         actor,
         "usage.refresh",
         "usage",
-        f"更新 {synced} 名成员的余额和用量" + (f"，{len(missing)} 个账号未找到" if missing else ""),
+        note,
         tenant_id=resolve_tenant(actor, tenant_id),
-        after={"synced": synced, "missing": missing},
+        after={"synced": synced, "missing": missing, "failed": failed},
         ip=ip,
     )
     db.commit()
     report = relay_report(db, actor, tenant_id, mode=relayer.mode)
     report["missing"] = missing
+    report["failed"] = failed
     return report
+
+
+def _pull_member(relayer, member: Member, today: date, month_start: date, lifetime_start: date):
+    try:
+        return _read_member_relay(relayer, member, today, month_start, lifetime_start), None
+    except DomainError as exc:
+        return None, exc
 
 
 def trend(db: Session, member_ids: list[int] | None) -> list[dict]:

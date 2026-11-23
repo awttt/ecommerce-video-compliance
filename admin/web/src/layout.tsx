@@ -33,8 +33,8 @@ const NAV: { key: string; label: string; group: string; roles: Role[]; icon: Rea
   { key: "/quota", label: "额度分配", group: "业务管理", roles: ["platform_admin", "tenant_admin"], icon: <AccountBookOutlined /> },
   { key: "/shared-rules", label: "规则审核", group: "业务管理", roles: ["platform_admin", "tenant_admin"], icon: <FileSearchOutlined /> },
   { key: "/usage", label: "用量看板", group: "业务管理", roles: ["platform_admin", "tenant_admin"], icon: <BarChartOutlined /> },
-  { key: "/recharge", label: "充值", group: "业务管理", roles: ["platform_admin", "tenant_admin", "member"], icon: <WalletOutlined /> },
   { key: "/audit", label: "审计日志", group: "业务管理", roles: ["platform_admin", "tenant_admin"], icon: <AuditOutlined /> },
+  { key: "/recharge", label: "充值", group: "系统", roles: ["platform_admin", "tenant_admin", "member"], icon: <WalletOutlined /> },
   { key: "/settings", label: "接入设置", group: "系统", roles: ["platform_admin"], icon: <SettingOutlined /> },
   { key: "/account", label: "个人设置", group: "系统", roles: ["platform_admin", "tenant_admin", "member"], icon: <UserOutlined /> },
 ];
@@ -60,7 +60,7 @@ export function AdminLayout() {
   const search = useQuery({
     queryKey: ["search", searchText],
     queryFn: () => api<{ members: { name: string; email: string }[] }>(`/v1/search?q=${encodeURIComponent(searchText.trim())}`),
-    enabled: searchText.trim().length > 0,
+    enabled: me.data?.role !== "member" && searchText.trim().length > 0,
   });
 
   useEffect(() => {
@@ -154,19 +154,21 @@ export function AdminLayout() {
           <Tag color="blue" style={{ marginInlineEnd: 0 }}>
             {user.role === "platform_admin" ? "全平台" : user.tenant_name || user.role_label}
           </Tag>
-          <AutoComplete
-            style={{ width: 220 }}
-            options={options}
-            value={searchText}
-            onChange={setSearchText}
-            onSelect={(_value, option) => {
-              const path = (option as { path?: string }).path;
-              if (path) navigate(path);
-              setSearchText("");
-            }}
-          >
-            <Input allowClear placeholder="搜索成员" />
-          </AutoComplete>
+          {user.role === "member" ? null : (
+            <AutoComplete
+              style={{ width: 220 }}
+              options={options}
+              value={searchText}
+              onChange={setSearchText}
+              onSelect={(_value, option) => {
+                const path = (option as { path?: string }).path;
+                if (path) navigate(path);
+                setSearchText("");
+              }}
+            >
+              <Input allowClear placeholder="搜索成员" />
+            </AutoComplete>
+          )}
           <Dropdown
             trigger={["click"]}
             menu={{

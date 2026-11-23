@@ -5,7 +5,7 @@ import { useOutletContext } from "react-router-dom";
 import { ApiError, api } from "../api";
 import { when } from "../format";
 import type { Tenant, User } from "../types";
-import { PageHead } from "../ui";
+import { PageHead, PageLoading, RefreshButton } from "../ui";
 
 const CATEGORIES = ["价格", "规格", "品牌", "夸大宣传"];
 const GROUPS: { source: string; category: string; title: string }[] = [
@@ -172,14 +172,25 @@ export function SharedRules() {
 
   const waiting = pending.data ?? [];
   const current = document.data;
-
-  return (
-    <>
-      <PageHead
-        title="规则审核"
-        description="这张表是公司当前生效的审核规则，默认词已经在里面。管理员可以直接改。员工提交的是单条改动：新增、修改或删除。通过一条才改一条。审核工具要点刷新，本机才会用上新规则。"
-        extra={
-          user.role === "platform_admin" ? (
+  const loading =
+    (user.role === "platform_admin" && tenants.isLoading) ||
+    (scope != null && document.isLoading) ||
+    (reviewer && pending.isLoading);
+  const refreshing =
+    (user.role === "platform_admin" && tenants.isFetching) ||
+    (scope != null && document.isFetching) ||
+    (reviewer && pending.isFetching);
+  const reload = () => {
+    if (user.role === "platform_admin") void tenants.refetch();
+    if (scope != null) void document.refetch();
+    if (reviewer) void pending.refetch();
+  };
+  const head = (
+    <PageHead
+      title="规则审核"
+      extra={
+        <Space>
+          {user.role === "platform_admin" ? (
             <Select
               placeholder="选择公司"
               style={{ width: 180 }}
@@ -187,9 +198,25 @@ export function SharedRules() {
               onChange={setTenantId}
               options={(tenants.data ?? []).map((item) => ({ value: item.id, label: item.name }))}
             />
-          ) : null
-        }
-      />
+          ) : null}
+          <RefreshButton loading={refreshing} onClick={reload} />
+        </Space>
+      }
+    />
+  );
+
+  if (loading) {
+    return (
+      <>
+        {head}
+        <PageLoading />
+      </>
+    );
+  }
+
+  return (
+    <>
+      {head}
       <Card>
         <Tabs
           activeKey={tab}

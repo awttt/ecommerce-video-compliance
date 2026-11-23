@@ -5,7 +5,8 @@ import { useOutletContext } from "react-router-dom";
 import { ApiError, api } from "../api";
 import { money, when } from "../format";
 import type { Member, RelayReport, Tenant, User } from "../types";
-import { PageHead, StatusTag } from "../ui";
+import { PageHead, PageLoading, RefreshButton, StatusTag } from "../ui";
+import { ImportMembers } from "./ImportMembers";
 
 export function Members() {
   const user = useOutletContext<User>();
@@ -13,6 +14,7 @@ export function Members() {
   const { message } = AntApp.useApp();
   const client = useQueryClient();
   const [open, setOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [tenantId, setTenantId] = useState<number | undefined>(undefined);
   const tenants = useQuery({
     queryKey: ["tenants"],
@@ -26,6 +28,12 @@ export function Members() {
   });
   const refresh = () => {
     void client.invalidateQueries({ queryKey: ["members"] });
+  };
+  const loading = members.isLoading || (platform && tenants.isLoading);
+  const refreshing = members.isFetching || tenants.isFetching;
+  const reload = () => {
+    void members.refetch();
+    if (platform) void tenants.refetch();
   };
 
   const create = useMutation({
@@ -60,8 +68,10 @@ export function Members() {
     mutationFn: () =>
       api<RelayReport>(scope ? `/v1/relay/sync?tenant_id=${scope}` : "/v1/relay/sync", { method: "POST" }),
     onSuccess: (data) => {
+      const failed = data.failed?.length ?? 0;
       const bad = data.members.filter((item) => !item.ok).length;
-      if (bad) message.warning(`已刷新，${bad} 名成员的余额与记录不一致`);
+      if (failed) message.warning(`已刷新，还有 ${failed} 人暂时没读到，请再点一次`);
+      else if (bad) message.warning(`已刷新，${bad} 名成员的余额与记录不一致`);
       else message.success("已刷新，余额一致");
       void client.invalidateQueries({ queryKey: ["members"] });
       void client.invalidateQueries({ queryKey: ["tenants"] });
@@ -71,34 +81,67 @@ export function Members() {
     onError: (error) => message.error(error instanceof ApiError ? error.message : "同步失败"),
   });
 
+  const head = (
+    <PageHead
+      title="成员管理"
+      extra={
+        <Space>
+          {user.role === "platform_admin" ? (
+            <Select
+              allowClear
+              placeholder="全部公司"
+              style={{ width: 180 }}
+              value={tenantId}
+              onChange={setTenantId}
+              options={(tenants.data ?? []).map((item) => ({ value: item.id, label: item.name }))}
+            />
+          ) : null}
+          <RefreshButton loading={refreshing} onClick={reload} />
+          {user.relay_live ? (
+            <Button onClick={() => sync.mutate()} loading={sync.isPending}>
+              刷新余额
+            </Button>
+          ) : null}
+          <Button
+            onClick={() => {
+              if (platform && !scope) {
+                message.warning("请先选择公司");
+                return;
+              }
+              setImportOpen(true);
+            }}
+          >
+            导入
+          </Button>
+          <Button
+            type="primary"
+            onClick={() => {
+              if (platform && !scope) {
+                message.warning("请先选择公司");
+                return;
+              }
+              setOpen(true);
+            }}
+          >
+            邀请成员
+          </Button>
+        </Space>
+      }
+    />
+  );
+
+  if (loading) {
+    return (
+      <>
+        {head}
+        <PageLoading />
+      </>
+    );
+  }
+
   return (
     <>
-      <PageHead
-        title="成员管理"
-        description="管理公司成员的账号和余额。"
-        extra={
-          <Space>
-            {user.role === "platform_admin" ? (
-              <Select
-                allowClear
-                placeholder="全部公司"
-                style={{ width: 180 }}
-                value={tenantId}
-                onChange={setTenantId}
-                options={(tenants.data ?? []).map((item) => ({ value: item.id, label: item.name }))}
-              />
-            ) : null}
-            {user.relay_live ? (
-              <Button onClick={() => sync.mutate()} loading={sync.isPending}>
-                刷新余额
-              </Button>
-            ) : null}
-            <Button type="primary" onClick={() => setOpen(true)} disabled={user.role === "platform_admin" && !scope}>
-              邀请成员
-            </Button>
-          </Space>
-        }
-      />
+      {head}
       {platform ? (
         <Alert
           style={{ marginBottom: 16 }}
@@ -111,6 +154,7 @@ export function Members() {
         <Table
           rowKey="id"
           dataSource={members.data ?? []}
+          loading={members.isFetching}
           pagination={false}
           scroll={{ x: platform ? 980 : 760 }}
           columns={[
@@ -187,6 +231,12 @@ export function Members() {
         type="info"
         showIcon
         message="账号创建后，额度需要在额度分配页单独划拨。「刷新余额」只读取最新余额和用量，不会改动分配记录。"
+      />
+      <ImportMembers
+        open={importOpen}
+        tenantId={scope}
+        memberEmails={(members.data ?? []).map((item) => item.email)}
+        onClose={() => setImportOpen(false)}
       />
       <Modal title="新建成员" open={open} onCancel={() => setOpen(false)} footer={null} destroyOnClose>
         <Form layout="vertical" initialValues={{ role: "member" }} onFinish={(values) => create.mutate(values)}>
