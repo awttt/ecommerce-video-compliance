@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import { ApiError, api } from "../api";
 import { money, when } from "../format";
-import type { Device, Member, RelayReport, Tenant, User } from "../types";
+import type { Member, RelayReport, Tenant, User } from "../types";
 import { PageHead, StatusTag } from "../ui";
 
 export function Members() {
@@ -13,7 +13,6 @@ export function Members() {
   const { message } = AntApp.useApp();
   const client = useQueryClient();
   const [open, setOpen] = useState(false);
-  const [devicesOf, setDevicesOf] = useState<Member | null>(null);
   const [tenantId, setTenantId] = useState<number | undefined>(undefined);
   const tenants = useQuery({
     queryKey: ["tenants"],
@@ -25,15 +24,8 @@ export function Members() {
     queryKey: ["members", scope ?? "all"],
     queryFn: () => api<Member[]>(scope ? `/v1/members?tenant_id=${scope}` : "/v1/members"),
   });
-  const devices = useQuery({
-    queryKey: ["devices", devicesOf?.id],
-    queryFn: () => api<Device[]>(`/v1/members/${devicesOf?.id}/devices`),
-    enabled: Boolean(devicesOf),
-  });
-
   const refresh = () => {
     void client.invalidateQueries({ queryKey: ["members"] });
-    void client.invalidateQueries({ queryKey: ["devices"] });
   };
 
   const create = useMutation({
@@ -79,20 +71,11 @@ export function Members() {
     onError: (error) => message.error(error instanceof ApiError ? error.message : "同步失败"),
   });
 
-  const revoke = useMutation({
-    mutationFn: (id: number) => api(`/v1/devices/${id}/revoke`, { method: "POST" }),
-    onSuccess: () => {
-      message.success("这台设备已下线，账号仍然可用");
-      refresh();
-    },
-    onError: (error) => message.error(error instanceof ApiError ? error.message : "下线失败"),
-  });
-
   return (
     <>
       <PageHead
         title="成员管理"
-        description="管理公司成员的账号、余额和设备。"
+        description="管理公司成员的账号和余额。"
         extra={
           <Space>
             {user.role === "platform_admin" ? (
@@ -176,14 +159,6 @@ export function Members() {
               : []),
             { title: "本月消耗", dataIndex: "month_cost", render: (value: number) => money(value) },
             {
-              title: "设备",
-              render: (_value, row) => (
-                <Button type="link" size="small" onClick={() => setDevicesOf(row)}>
-                  {row.devices} 台
-                </Button>
-              ),
-            },
-            {
               title: "操作",
               render: (_value, row) =>
                 row.status === "active" ? (
@@ -247,29 +222,6 @@ export function Members() {
             创建账号
           </Button>
         </Form>
-      </Modal>
-      <Modal title={devicesOf ? `${devicesOf.name} 的设备` : "设备"} open={Boolean(devicesOf)} onCancel={() => setDevicesOf(null)} footer={null}>
-        <Table
-          rowKey="id"
-          pagination={false}
-          dataSource={devices.data ?? []}
-          locale={{ emptyText: "没有设备" }}
-          columns={[
-            { title: "版本", dataIndex: "client_version", render: (value: string) => value || "—" },
-            { title: "状态", render: (_value, row) => <StatusTag status={row.active ? "active" : "disabled"} label={row.active ? "在线" : "已下线"} /> },
-            {
-              title: "",
-              render: (_value, row) =>
-                row.active ? (
-                  <Popconfirm title="只下线这一台，不禁用账号" onConfirm={() => revoke.mutate(row.id)}>
-                    <Button type="link" size="small">
-                      下线
-                    </Button>
-                  </Popconfirm>
-                ) : null,
-            },
-          ]}
-        />
       </Modal>
     </>
   );

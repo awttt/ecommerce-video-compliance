@@ -177,16 +177,7 @@ export interface Member {
   month_requests: number;
   month_input_tokens: number;
   month_output_tokens: number;
-  devices: number;
   created_at: string;
-}
-
-export interface Device {
-  id: number;
-  name: string;
-  client_version: string;
-  last_seen: string | null;
-  active: boolean;
 }
 
 export interface Invite {
