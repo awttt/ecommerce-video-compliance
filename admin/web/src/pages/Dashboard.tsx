@@ -50,10 +50,15 @@ export function Dashboard() {
   const query = useQuery({ queryKey: ["dashboard", user.id], queryFn: () => api<DashboardData>("/v1/dashboard") });
   const [preset, setPreset] = useState<RangePreset | "custom">("month");
   const [range, setRange] = useState<[string, string]>(() => rangeFor("month"));
+  const trendRange = rangeFor("days7");
   const consumption = useQuery({
     queryKey: ["consumption", user.id, range[0], range[1]],
     placeholderData: keepPreviousData,
     queryFn: () => api<Consumption>(`/v1/overview/consumption?start=${range[0]}&end=${range[1]}`),
+  });
+  const trend = useQuery({
+    queryKey: ["consumption", user.id, "days7", trendRange[0], trendRange[1]],
+    queryFn: () => api<Consumption>(`/v1/overview/consumption?start=${trendRange[0]}&end=${trendRange[1]}`),
   });
   const data = query.data;
   const report = data?.reconcile;
@@ -73,7 +78,7 @@ export function Dashboard() {
     <>
       <PageHead
         title="总览"
-        description={member ? "这里只看你自己的余额和消耗。日期按北京时间。" : "对账使用累计消耗。消耗可以按区间查询，日期按北京时间。"}
+        description={member ? "这里只看你自己的余额和消耗。日期按北京时间。" : undefined}
         extra={
           <Button
             onClick={() => {
@@ -108,16 +113,17 @@ export function Dashboard() {
             查询
           </Button>
         </Space>
-        <div className="consumption-note" style={{ marginTop: 8 }}>
-          默认本月。本周从周一开始，各预设都算到今天。时区 {spent?.timezone ?? "Asia/Shanghai"}。
-        </div>
       </Card>
-      {consumption.isError ? (
+      {consumption.isError || trend.isError ? (
         <Alert
           style={{ marginBottom: 16 }}
           showIcon
           type="error"
-          message={consumption.error instanceof ApiError ? consumption.error.message : "查询消耗失败"}
+          message={
+            (consumption.error instanceof ApiError && consumption.error.message) ||
+            (trend.error instanceof ApiError && trend.error.message) ||
+            "查询消耗失败"
+          }
         />
       ) : null}
       {report ? (
@@ -160,14 +166,10 @@ export function Dashboard() {
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col xs={24} lg={14}>
           <Card
-            title={preset === "days7" ? "近 7 日消耗" : "按日消耗"}
-            extra={
-              <Typography.Text type="secondary">
-                {spent ? `${spent.start.slice(5)} 至 ${spent.end.slice(5)} · 元` : "单位：元"}
-              </Typography.Text>
-            }
+            title="近 7 日消耗"
+            extra={<Typography.Text type="secondary">元</Typography.Text>}
           >
-            <Trend rows={spent?.by_day ?? []} />
+            <Trend rows={trend.data?.by_day ?? []} />
           </Card>
         </Col>
         <Col xs={24} lg={10}>
