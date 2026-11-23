@@ -166,7 +166,7 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "御镜视频审核系统",
             "CFBundleDisplayName": "御镜视频审核系统",
-            "CFBundleShortVersionString": "0.1.1",
+            "CFBundleShortVersionString": "0.1.2",
             "NSPrincipalClass": "NSApplication",
             "NSHighResolutionCapable": True,
             "NSRequiresAquaSystemAppearance": False,
