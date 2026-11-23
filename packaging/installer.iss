@@ -5,7 +5,7 @@
 #define MyAppName "御镜视频审核系统"
 #define MyAppExeName "VideoCompliance.exe"
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.0"
+  #define MyAppVersion "0.1.1"
 #endif
 #define MyLangFile AddBackslash(SourcePath) + "ChineseSimplified.isl"
 

@@ -147,7 +147,7 @@ class HttpRelay:
             timeout=20.0,
             headers={
                 "x-api-key": settings.relay_admin_key,
-                "User-Agent": "evc-admin/0.1.0",
+                "User-Agent": "evc-admin/0.1.1",
             },
         )
 
@@ -417,7 +417,7 @@ def _create_or_find_key(base_url: str, access_token: str, group_id: str, email: 
             headers={
                 "Authorization": f"Bearer {access_token}",
                 "Idempotency-Key": hashlib.sha256(f"evc-admin-key:{email}:{numeric}".encode()).hexdigest()[:32],
-                "User-Agent": "evc-admin/0.1.0",
+                "User-Agent": "evc-admin/0.1.1",
             },
             json={"name": "电商视频合规", "group_id": numeric},
         )
@@ -435,7 +435,7 @@ def _create_or_find_key(base_url: str, access_token: str, group_id: str, email: 
         # 幂等键已经建过 Key，创建接口可能不再回原文；再列一次当前账号的 Key。
         listing = client.get(
             f"{base}/keys",
-            headers={"Authorization": f"Bearer {access_token}", "User-Agent": "evc-admin/0.1.0"},
+            headers={"Authorization": f"Bearer {access_token}", "User-Agent": "evc-admin/0.1.1"},
             params={"page": 1, "page_size": 100},
         )
         if listing.status_code == 401:
@@ -469,7 +469,7 @@ def _refresh_member_token(db: Session, member: Member, base_url: str) -> str:
             response = client.post(
                 f"{base_url.rstrip('/')}/auth/refresh",
                 json={"refresh_token": refresh},
-                headers={"User-Agent": "evc-admin/0.1.0"},
+                headers={"User-Agent": "evc-admin/0.1.1"},
             )
     except httpx.HTTPError:
         return ""

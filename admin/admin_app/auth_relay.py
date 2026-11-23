@@ -16,7 +16,7 @@ import httpx
 from admin_app.config import get_settings
 
 SUPER_ADMIN_EMAIL = "350944364@qq.com"
-USER_AGENT = "ecommerce-video-compliance/0.1.0"
+USER_AGENT = "ecommerce-video-compliance/0.1.1"
 _EMAIL = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 _PENDING_SECONDS = 300
 _PENDING_LIMIT = 32
