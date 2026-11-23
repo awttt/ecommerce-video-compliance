@@ -1256,7 +1256,7 @@ def test_settings(user: Member = Depends(require("settings.write")), db: Session
     try:
         response = httpx.get(
             base + "/admin/users/9223372036854775807/balance-history",
-            headers={"x-api-key": env.relay_admin_key, "User-Agent": "evc-admin/0.1.0"},
+            headers={"x-api-key": env.relay_admin_key, "User-Agent": "evc-admin/0.1.1"},
             timeout=8,
         )
     except httpx.HTTPError:

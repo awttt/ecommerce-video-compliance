@@ -92,7 +92,7 @@ def test_login_uses_relay_and_marks_super_admin(tmp_path, monkeypatch):
         assert seen["url"] == "https://token4u.cc/api/v1/auth/login"
         assert seen["email"] == SUPER_ADMIN_EMAIL
         assert seen["has_password"] is True
-        assert seen["ua"] == "ecommerce-video-compliance/0.1.0"
+        assert seen["ua"] == "ecommerce-video-compliance/0.1.1"
         again = client.post("/v1/auth/login", json={"email": SUPER_ADMIN_EMAIL, "password": "real-pass"})
         assert again.status_code == 200
         assert again.json()["user"]["id"] == payload["user"]["id"]
