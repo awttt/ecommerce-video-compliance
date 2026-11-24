@@ -8,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from admin_app.db import init_db, session
 from admin_app.errors import DomainError
+from admin_app.image_routes import router as image_router
 from admin_app.routes import router
 from admin_app.seed import seed
 
@@ -40,6 +41,7 @@ def create_app() -> FastAPI:
         return JSONResponse({"detail": exc.detail}, status_code=exc.status)
 
     app.include_router(router)
+    app.include_router(image_router)
     if (DIST / "assets").is_dir():
         app.mount("/assets", StaticFiles(directory=DIST / "assets"), name="assets")
 

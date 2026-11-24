@@ -6,6 +6,7 @@ PERMISSIONS: dict[str, set[str]] = {
         "usage.read.all",
         "audit.read.all",
         "settings.write",
+        "image.workbench",
     },
     "tenant_admin": {
         "member.manage",
@@ -14,11 +15,13 @@ PERMISSIONS: dict[str, set[str]] = {
         "shared_rule.review",
         "usage.read.tenant",
         "audit.read.tenant",
+        "image.workbench",
     },
     "member": {
         "shared_rule.submit",
         "usage.read.self",
         "audit.read.self",
+        "image.workbench",
     },
 }
 

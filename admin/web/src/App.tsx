@@ -14,6 +14,7 @@ import { Audit } from "./pages/Audit";
 import { Settings } from "./pages/Settings";
 import { Account } from "./pages/Account";
 import { Recharge } from "./pages/Recharge";
+import { ImageWorkbench } from "./pages/ImageWorkbench";
 
 function RequireAuth() {
   if (!accessToken()) return <Navigate to="/login" replace />;
@@ -37,6 +38,7 @@ export function App() {
         <Route path="/settings" element={<Settings />} />
         <Route path="/account" element={<Account />} />
         <Route path="/tools" element={<ToolsFrame />} />
+        <Route path="/image-workbench" element={<ImageWorkbench />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

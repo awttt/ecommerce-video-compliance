@@ -29,6 +29,7 @@ from admin_app.models import (
     SharedRule,
     Tenant,
     UsageSnapshot,
+    ImageJob,
 )
 
 # 云端库：登录、成员、席位、额度、用量和审计。
@@ -50,8 +51,8 @@ CLOUD_MODELS = (
     CompanyRule,
     CompanyRuleSubmission,
 )
-# 词库审批已去掉。公司规则在云端库，本机库不再单独建表。
-LOCAL_MODELS: tuple[type, ...] = ()
+# 生图工作台的生成记录落在本机库（bot创建）：不设跨库外键，分库部署时不进云端库。
+LOCAL_MODELS: tuple[type, ...] = (ImageJob,)
 
 _local_engine: Engine | None = None
 _cloud_engine: Engine | None = None
@@ -141,6 +142,7 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "relay_access_token": "TEXT NOT NULL DEFAULT ''",
         "relay_refresh_token": "TEXT NOT NULL DEFAULT ''",
         "relay_token_expires_at": "DATETIME",
+        "relay_image_api_key": "TEXT NOT NULL DEFAULT ''",
     },
     "review_jobs": {
         "engine_id": "VARCHAR(32) NOT NULL DEFAULT ''",

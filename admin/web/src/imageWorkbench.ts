@@ -1,0 +1,156 @@
+/** 生图工作台的纯逻辑。能力、价格和可选状态都来自服务端元数据，这里不自填。 */
+
+export interface ImageModelOption {
+  id: string;
+  label: string;
+  ready: boolean;
+  upstream_verified?: boolean;
+  selectable?: boolean;
+  note?: string;
+}
+
+export interface ImagePricing {
+  currency: "CNY";
+  unit: "张";
+  price_per_image: number;
+  display: string;
+  note: string;
+}
+
+export interface ImageSizeOption {
+  value: string;
+  label: string;
+  note?: string;
+  verified: boolean;
+  gateway_pending?: boolean;
+  verified_for?: string[];
+  enabled: boolean;
+}
+
+export interface ImageQualityOption {
+  value: string;
+  label: string;
+  enabled: boolean;
+  note?: string;
+}
+
+export interface ImageStatus {
+  logged_in: boolean;
+  group_ready: boolean;
+  group_reason: string;
+  group_name: string;
+  key_name: string;
+  key_ready: boolean;
+  mock: boolean;
+  live_enabled: boolean;
+  models: ImageModelOption[];
+  pricing: ImagePricing;
+  sizes: ImageSizeOption[];
+  qualities: ImageQualityOption[];
+  counts: number[];
+  capability_note?: string;
+  endpoint: { method: string; url: string; editable: boolean };
+  references: { enabled: boolean; reason: string };
+  async_generation: { enabled: boolean; reason: string };
+}
+
+export interface ImageResultImage {
+  url: string;
+  mock: boolean;
+}
+
+export interface ImageJob {
+  id: string;
+  prompt: string;
+  model: string;
+  size: string;
+  quality: string;
+  n: number;
+  status: string;
+  mock: boolean;
+  message: string;
+  error: string;
+  est_cost_cents: number;
+  est_cost: number;
+  orientation: string;
+  images: ImageResultImage[];
+  created_at: string;
+}
+
+export interface ImageGenerateBody {
+  prompt: string;
+  model: string;
+  n: number;
+  size: string;
+  quality: string;
+  confirm: true;
+}
+
+export function sizeOptionLabel(option: ImageSizeOption): string {
+  const note = (option.note ?? "").trim();
+  if (note) return `${option.label}（${note}）`;
+  if (!option.verified) return `${option.label}（未验证）`;
+  return option.label;
+}
+
+/** 上游已验证尺寸只对 verified_for 里的模型开放。其余只看服务端 enabled。 */
+export function sizeEnabledFor(option: ImageSizeOption, model: string): boolean {
+  if (!option.enabled) return false;
+  const verifiedFor = option.verified_for ?? [];
+  if (verifiedFor.length > 0) return verifiedFor.includes(model.trim());
+  return true;
+}
+
+export function modelOptionLabel(model: ImageModelOption): string {
+  if (model.note) return `${model.label}（${model.note}）`;
+  if (model.upstream_verified) return `${model.label}（上游已验证 · 本站网关待验）`;
+  return model.ready ? model.label : `${model.label}（未就绪）`;
+}
+
+/** 能不能选，只看服务端的 selectable，不在前端把未确认模型标成已就绪。 */
+export function modelSelectable(model: ImageModelOption): boolean {
+  return model.selectable === true;
+}
+
+export function estimateCostYuan(pricing: ImagePricing | null | undefined, n: number): string {
+  const unit = pricing && Number.isFinite(pricing.price_per_image) ? Math.max(pricing.price_per_image, 0) : 0;
+  const count = Number.isFinite(n) ? Math.max(Math.floor(n), 1) : 1;
+  return (count * unit).toFixed(2);
+}
+
+export function imageOrientation(size: string): "square" | "landscape" | "portrait" | "auto" {
+  if (!size || size === "auto" || !size.includes("x")) return "auto";
+  const [width, height] = size.split("x").map((part) => Number.parseInt(part, 10));
+  if (!Number.isFinite(width) || !Number.isFinite(height)) return "auto";
+  if (width === height) return "square";
+  return width > height ? "landscape" : "portrait";
+}
+
+export function generationBlockReason(input: {
+  groupReady: boolean;
+  model: string;
+  models: ImageModelOption[];
+  size: string;
+  sizes: ImageSizeOption[];
+  quality: string;
+  qualities: ImageQualityOption[];
+  n: number;
+}): string {
+  if (!input.groupReady) return "当前账号没有生图专用分组";
+  const model = input.models.find((item) => item.id === input.model);
+  if (!model || !modelSelectable(model)) return "请选择可用的生图模型";
+  const size = input.sizes.find((item) => item.value === input.size);
+  if (!size || !sizeEnabledFor(size, input.model)) return "该尺寸对当前模型不可用";
+  const quality = input.qualities.find((item) => item.value === input.quality);
+  if (!quality || !quality.enabled) return "该质量尚未实测";
+  if ((size.verified_for ?? []).includes(input.model) && (input.n !== 1 || input.quality !== "auto")) {
+    return "该尺寸仅限 1 张且默认质量";
+  }
+  if (!Number.isInteger(input.n) || input.n < 1 || input.n > 4) return "张数只支持 1 到 4";
+  return "";
+}
+
+export function sizeLockedToSingle(option: ImageSizeOption | undefined, model: string): boolean {
+  if (!option || !model.trim()) return false;
+  return (option.verified_for ?? []).includes(model.trim());
+}
