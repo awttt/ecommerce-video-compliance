@@ -156,6 +156,92 @@ export function sizeLockedToSingle(option: ImageSizeOption | undefined, model: s
   return (option.verified_for ?? []).includes(model.trim());
 }
 
+export type ImageSaveResult = {
+  ok?: boolean;
+  cancelled?: boolean;
+  message?: string;
+  bytes?: number;
+  filename?: string;
+};
+
+export type ImageSaveCall = (url: string, filename: string) => Promise<ImageSaveResult>;
+
+export type DesktopSaveBridge = ImageSaveCall | "unavailable" | null;
+
+/** 桌面窗口里才有 pywebview。没有保存函数时不能退回浏览器下载，否则会装成已经保存。 */
+export function desktopImageSave(
+  pywebview: { api?: { save_generated_image?: unknown } } | null | undefined,
+): DesktopSaveBridge {
+  if (!pywebview) return null;
+  const save = pywebview.api?.save_generated_image;
+  if (typeof save !== "function") return "unavailable";
+  return (url, filename) => (save as ImageSaveCall)(url, filename);
+}
+
+export type ImageDownloadOutcome = "saved" | "cancelled" | "started";
+
+/** 桌面端必须走保存桥。取消不算成功；浏览器只允许下载本机生成记录。 */
+export async function runImageDownload(
+  url: string,
+  filename: string,
+  bridge: DesktopSaveBridge,
+  browserDownload: (path: string, filename: string) => Promise<void>,
+): Promise<ImageDownloadOutcome> {
+  if (bridge === "unavailable") throw new Error("桌面保存还没准备好，请再试一次");
+  if (bridge) {
+    let result: ImageSaveResult;
+    try {
+      result = await bridge(url, filename);
+    } catch {
+      throw new Error("下载失败");
+    }
+    const outcome = interpretImageSave(result);
+    return outcome === "cancelled" ? "cancelled" : "saved";
+  }
+  const path = localImagePath(url);
+  if (!path) throw new Error("只能保存本机已经生成的图片");
+  await browserDownload(`${path}?download=1`, filename);
+  return "started";
+}
+
+export function interpretImageSave(result: ImageSaveResult | null | undefined): "saved" | "cancelled" {
+  if (result?.cancelled) return "cancelled";
+  const bytes = result?.bytes;
+  if (!result?.ok || typeof bytes !== "number" || !Number.isInteger(bytes) || bytes < 1) {
+    throw new Error(safeSaveMessage(result?.message));
+  }
+  return "saved";
+}
+
+function safeSaveMessage(message: string | undefined): string {
+  const text = message?.trim() || "";
+  if (!text || /sk-|bearer|token|authorization/i.test(text)) return "下载失败";
+  return text;
+}
+
+const LOCAL_IMAGE = /^\/v1\/image-workbench\/jobs\/[0-9a-f]{32}\/files\/(?:mock|image)-[1-4]\.(?:svg|png|jpe?g|webp)$/;
+
+/** 只接受本机生成记录里的图片地址。远程地址、data 地址和路径跳转都拒绝。 */
+export function localImagePath(url: string): string | null {
+  if (typeof url !== "string") return null;
+  const trimmed = url.trim();
+  if (!trimmed || /[\u0000\\]/.test(trimmed)) return null;
+  const lowered = trimmed.toLowerCase();
+  if (
+    lowered.startsWith("http://") ||
+    lowered.startsWith("https://") ||
+    lowered.startsWith("data:") ||
+    lowered.startsWith("file:") ||
+    lowered.startsWith("blob:") ||
+    lowered.startsWith("//")
+  ) {
+    return null;
+  }
+  const path = trimmed.split("#")[0]?.split("?")[0] ?? "";
+  if (!path.startsWith("/") || path.split("/").includes("..")) return null;
+  return LOCAL_IMAGE.test(path) ? path : null;
+}
+
 const IMAGE_EXT = /\.(png|jpe?g|webp|gif|svg)$/i;
 
 /** 下载到本机时用的文件名。去掉路径符号，保留服务端文件的序号和扩展名。 */

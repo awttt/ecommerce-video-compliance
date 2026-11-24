@@ -150,7 +150,8 @@ export function ImageWorkbench() {
     if (!url || savingUrl) return;
     setSavingUrl(url);
     try {
-      await downloadImageFile(url, imageDownloadName(promptText, url, index + 1));
+      const outcome = await downloadImageFile(url, imageDownloadName(promptText, url, index + 1));
+      if (outcome === "saved") message.success("已保存到本地");
     } catch (error) {
       message.error(error instanceof ApiError ? error.message : "下载失败");
     } finally {
