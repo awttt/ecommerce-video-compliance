@@ -122,13 +122,15 @@ def _allowed_final_url(url: str) -> bool:
 
 class UpdateCenter:
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._release: Release | None = None
         self._available = False
         self._phase = "idle"
         self._received = 0
         self._total = 0
         self._message = ""
+        self._check_state = "idle"
+        self._check_message = ""
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -142,28 +144,48 @@ class UpdateCenter:
                 "total": self._total,
                 "message": self._message,
                 "can_apply": packaged_windows(),
+                "check_state": self._check_state,
+                "check_message": self._check_message,
             }
 
     def check(self) -> dict:
+        """只读取固定的更新清单。正在下载或安装时不再另开一次，也不在这里启动安装。"""
         with self._lock:
             if self._phase in {"downloading", "installing"}:
+                self._check_state = "busy"
+                self._check_message = "已有更新正在进行"
                 return self.snapshot()
         try:
             release = self._fetch_manifest()
         except Exception:
-            logger.info("检查更新失败", exc_info=True)
-            return self.snapshot()
+            logger.info("检查更新失败")
+            with self._lock:
+                if self._phase in {"downloading", "installing"}:
+                    self._check_state = "busy"
+                    self._check_message = "已有更新正在进行"
+                else:
+                    self._check_state = "failed"
+                    self._check_message = "暂时无法检查更新"
+                return self.snapshot()
         try:
             newer = version_key(release.version) > version_key(__version__)
         except UpdateError:
-            logger.info("下载站版本号无法比较：%s", release.version)
-            return self.snapshot()
+            logger.info("下载站版本号无法比较")
+            with self._lock:
+                self._check_state = "failed"
+                self._check_message = "暂时无法检查更新"
+                return self.snapshot()
         with self._lock:
             self._release = release
             self._available = newer
-            if self._phase != "downloading":
+            if self._phase in {"downloading", "installing"}:
+                self._check_state = "busy"
+                self._check_message = "已有更新正在进行"
+            else:
                 self._phase = "idle"
-                self._message = "" if newer else ""
+                self._message = ""
+                self._check_state = "available" if newer else "current"
+                self._check_message = ""
             return self.snapshot()
 
     def start(self, *, busy: bool) -> dict:
@@ -181,6 +203,9 @@ class UpdateCenter:
             with self._lock:
                 release = self._release
                 available = self._available
+                failed = self._check_state == "failed"
+            if failed:
+                raise UpdateError("暂时无法检查更新")
         if release is None or not available:
             raise UpdateError("已经是最新版本")
         with self._lock:

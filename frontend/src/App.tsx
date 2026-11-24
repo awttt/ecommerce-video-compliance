@@ -66,6 +66,7 @@ import {
   saveSettings,
 } from "./api";
 import { LoginPage, RegisterPage } from "./AuthPages";
+import { manualUpdateNotice } from "./updateNotice";
 import { mcpAgentPrompt, mcpEndpoint } from "./mcpPrompt";
 import { showTestMenu } from "./testMenu";
 import { CutTimeline } from "./CutTimeline";
@@ -306,6 +307,7 @@ export function Shell() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [updateInfo, setUpdateInfo] = useState<AppUpdate | null>(null);
   const [updateStarting, setUpdateStarting] = useState(false);
+  const [updateChecking, setUpdateChecking] = useState(false);
   const [keyNotice, setKeyNotice] = useState("");
   const [authPage, setAuthPage] = useState<"login" | "register">("login");
   const [bootError, setBootError] = useState("");
@@ -430,8 +432,8 @@ export function Shell() {
       getUpdate(true)
         .then((info) => {
           if (stop) return;
-          markUpdateChecked();
           setUpdateInfo(info);
+          if (info.check_state === "current" || info.check_state === "available") markUpdateChecked();
         })
         .catch(() => undefined);
     };
@@ -462,6 +464,26 @@ export function Shell() {
     }, 1000);
     return () => window.clearInterval(timer);
   }, [updateInfo?.phase]);
+
+  async function checkForUpdate() {
+    if (updateChecking) return;
+    setUpdateChecking(true);
+    try {
+      const info = await getUpdate(true);
+      setUpdateInfo(info);
+      if (info.check_state === "current" || info.check_state === "available") markUpdateChecked();
+      const notice = manualUpdateNotice(info);
+      if (!notice.text) return;
+      if (notice.level === "success") message.success(notice.text);
+      else if (notice.level === "error") message.error(notice.text);
+      else if (notice.level === "warning") message.warning(notice.text);
+      else message.info(notice.text);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "暂时无法检查更新，不能确定是不是最新版本");
+    } finally {
+      setUpdateChecking(false);
+    }
+  }
 
   async function beginUpdate() {
     setUpdateStarting(true);
@@ -1090,6 +1112,7 @@ export function Shell() {
   const updateBanner = (
     <UpdateBanner info={updateInfo} starting={updateStarting} onStart={() => void beginUpdate()} />
   );
+  const aboutNotice = updateInfo ? manualUpdateNotice(updateInfo) : null;
 
   if (!settings.account_logged_in) {
     return authPage === "register" ? (
@@ -1757,12 +1780,34 @@ export function Shell() {
           <Form.Item label="口播检测" name="asr_enabled" valuePropName="checked" extra="关闭后只检测画面，不再提取音频。口播凭证在登录后自动获取，不保存在本机。">
             <Switch checkedChildren="开" unCheckedChildren="关" />
           </Form.Item>
-          <Form.Item label="当前版本">
-            <span>{updateInfo?.current || "—"}</span>
-          </Form.Item>
           <Form.Item label="录音识别引擎" name="asr_engine" rules={[{ required: true }]} extra="口播使用腾讯云录音文件识别大模型 2.0。">
             <Select options={ASR_ENGINE_OPTIONS} />
           </Form.Item>
+          <div className="about-update" style={{ marginTop: 8, paddingTop: 12, borderTop: "1px solid #f0f0f0" }}>
+            <Text strong>关于与更新</Text>
+            <Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 8 }}>
+              当前版本 {updateInfo?.current || "—"}。检查只读取更新清单，不会下载、安装或重启。
+            </Paragraph>
+            {aboutNotice?.text ? (
+              <Paragraph type={aboutNotice.level === "error" ? "danger" : "secondary"} style={{ marginBottom: 8 }}>
+                {aboutNotice.text}
+              </Paragraph>
+            ) : null}
+            <Space>
+              <Button onClick={() => void checkForUpdate()} loading={updateChecking}>
+                检查更新
+              </Button>
+              {aboutNotice?.confirmInstall ? (
+                <Button
+                  type="primary"
+                  onClick={() => void beginUpdate()}
+                  loading={updateStarting || updateInfo?.phase === "downloading"}
+                >
+                  立即更新
+                </Button>
+              ) : null}
+            </Space>
+          </div>
         </Form>
       </Drawer>
 
