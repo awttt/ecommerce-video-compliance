@@ -54,6 +54,8 @@ class Member(Base):
     relay_access_token: Mapped[str] = mapped_column(Text, default="")
     relay_refresh_token: Mapped[str] = mapped_column(Text, default="")
     relay_token_expires_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # 生图工作台的独立密钥，绑定「生图专用-bot创建」组。只在服务端保存，接口不返回。
+    relay_image_api_key: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     deleted_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
@@ -255,4 +257,27 @@ class RelayLedger(Base):
     relay_user_id: Mapped[str] = mapped_column(String(40), default="")
     amount_cents: Mapped[int] = mapped_column(Integer, default=0)
     kind: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class ImageJob(Base):
+    """生图工作台的一条生成记录。不设跨库外键：分库部署时本表落在本机库。"""
+
+    __tablename__ = "image_jobs"
+    __table_args__ = (Index("ix_image_jobs_member_created", "member_id", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    member_id: Mapped[int] = mapped_column(Integer)
+    tenant_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    prompt: Mapped[str] = mapped_column(Text)
+    model: Mapped[str] = mapped_column(String(80))
+    size: Mapped[str] = mapped_column(String(20), default="auto")
+    quality: Mapped[str] = mapped_column(String(16), default="auto")
+    n: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(16), default="done")
+    mock: Mapped[bool] = mapped_column(Boolean, default=True)
+    message: Mapped[str] = mapped_column(String(300), default="")
+    images: Mapped[list] = mapped_column(JSON, default=list)
+    est_cost_cents: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(default=utcnow)

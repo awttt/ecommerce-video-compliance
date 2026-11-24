@@ -72,6 +72,11 @@ EVC_ADMIN_CLOUD_DATABASE_URL='postgresql+psycopg://user:pass@host:5432/evc_admin
 - `EVC_RELAY_GROUP_NAME`：新建中转站用户只进这个分组，默认「电商审核专属-bot创建」。
 - `EVC_RELAY_GROUP_ID`：审核专属分组的数字编号，远端建号和自动创建 Key 都绑定这个分组。
 - `EVC_RELAY_TIMEZONE`：用量日期，默认 `Asia/Shanghai`。
+- `EVC_ADMIN_IMAGE_GROUP_NAME`：生图专组名（bot创建），默认「生图专用-bot创建」。不读取上面的审核组名。
+- `EVC_ADMIN_IMAGE_MODELS`：生图候选模型，逗号分隔。默认四个 gpt-image 候选，不表示已经就绪。
+- `EVC_ADMIN_IMAGE_LIVE` 与 `EVC_ADMIN_IMAGE_CONTRACT_OK`：两个同时为 `1` 才允许真实同步生图。默认都关闭，页面只出带 MOCK 标记的占位图。
+
+生图工作台在侧栏「工具」分组，紧挨在「视频审核工具」下面（单独部署、没有视频工具地址时，这一组只显示生图）。接口是 `/v1/image-workbench`。真实调用只同步 POST `https://token4u.cc/v1/images/generations`，用当前用户自己的「电商生图-bot创建」密钥，不使用审核密钥或管理密钥。使用说明见 `docs/admin-image-workbench.md`。
 
 ## 和桌面客户端一起分发
 

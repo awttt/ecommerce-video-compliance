@@ -138,8 +138,11 @@ def login_totp(temp_token: str, totp_code: str) -> dict:
     return post_auth("/auth/login/2fa", {"temp_token": temp_token, "totp_code": totp_code})
 
 
-def _authed(method: str, path: str, access_token: str, payload: dict | None = None) -> dict:
-    """带用户令牌访问中转站账号接口。payload 可能含密码，异常里不要带上请求体。"""
+def _authed_data(method: str, path: str, access_token: str, payload: dict | None = None) -> object:
+    """带当前用户令牌访问中转站账号接口，保留 dict 或 list。
+
+    payload 可能含密码，异常里不要带上请求体。管理密钥不参与这里的请求。
+    """
     token = access_token.strip()
     if not token:
         raise RelayLoginError("登录已失效，请重新登录", 401)
@@ -168,14 +171,47 @@ def _authed(method: str, path: str, access_token: str, payload: dict | None = No
         body = response.json()
     except ValueError:
         body = {}
+    if isinstance(body, list):
+        if response.status_code >= 400:
+            raise RelayLoginError("请求被拒绝，请稍后再试", response.status_code if response.status_code >= 400 else 400)
+        return body
     code = body.get("code") if isinstance(body, dict) else None
     if response.status_code >= 400 or code not in (None, 0):
         if response.status_code in {401, 403}:
             # 这里校验的是令牌，不是密码，别把失败说成密码错误。
             raise RelayLoginError("登录已失效，请重新登录", response.status_code)
         raise explain_login_error(response.status_code, body)
-    data = body.get("data") if isinstance(body, dict) and "data" in body else body
+    if not isinstance(body, dict):
+        return {}
+    data = body.get("data") if "data" in body else body
+    if isinstance(data, (dict, list)):
+        return data
+    return {}
+
+
+def _authed(method: str, path: str, access_token: str, payload: dict | None = None) -> dict:
+    """账号接口的 dict 形态。列表结果交给 available_groups，不能在这里被收成空对象。"""
+    data = _authed_data(method, path, access_token, payload)
     return data if isinstance(data, dict) else {}
+
+
+def available_groups(access_token: str) -> list[dict]:
+    """当前账号可绑定的分组列表（含 id / name / status）。
+
+    只认列表或 items / list / groups 包装，认不出就当空列表。
+    分组是否可用由调用方按名称精确匹配判断。这里用的是当前用户自己的令牌，不是管理密钥。
+    """
+    data = _authed_data("GET", "/groups/available", access_token)
+    rows: list = []
+    if isinstance(data, list):
+        rows = data
+    elif isinstance(data, dict):
+        for key in ("items", "list", "groups"):
+            value = data.get(key)
+            if isinstance(value, list):
+                rows = value
+                break
+    return [row for row in rows if isinstance(row, dict)]
 
 
 def current_account(access_token: str) -> dict:

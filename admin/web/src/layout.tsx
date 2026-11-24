@@ -5,6 +5,7 @@ import {
   DashboardOutlined,
   DesktopOutlined,
   FileSearchOutlined,
+  PictureOutlined,
   LogoutOutlined,
   SettingOutlined,
   TeamOutlined,
@@ -18,6 +19,7 @@ import type { MenuProps } from "antd";
 import { useEffect, useState, type ReactNode } from "react";
 import { Navigate, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { api, clearSession } from "./api";
+import { toolMenuEntries } from "./toolNav";
 import type { Role, User } from "./types";
 
 const { Header, Sider, Content } = Layout;
@@ -78,14 +80,15 @@ export function AdminLayout() {
 
   const user = me.data;
   const toolsUrl = window.__EVC_TOOLS_URL__ ?? "";
-  const toolsItem = { key: "/tools", label: "视频审核工具", icon: <DesktopOutlined /> };
+  const toolEntries = toolMenuEntries(Boolean(toolsUrl), user.role);
   const visible = NAV.filter((item) => {
     if (item.key === "/recharge" && !toolsUrl) return false;
     return item.roles.includes(user.role);
   });
+  const toolCurrent = toolEntries.find((item) => item.key === location.pathname);
   const current =
     visible.find((item) => item.key === location.pathname) ??
-    (toolsUrl && location.pathname === "/tools" ? toolsItem : undefined);
+    (toolCurrent ? { key: toolCurrent.key, label: toolCurrent.label } : undefined);
   if (!current && location.pathname !== "/") return <Navigate to="/" replace />;
 
   const items: NonNullable<MenuProps["items"]> = GROUPS.map((group) => {
@@ -100,12 +103,16 @@ export function AdminLayout() {
     return { type: "group" as const, label: collapsed ? undefined : group, children };
   }).filter(Boolean) as NonNullable<MenuProps["items"]>;
 
-  // 从桌面工具整页跳过来时，用 iframe 把工具端嵌在这一页里；单独部署时没有这个入口。
-  if (toolsUrl) {
+  // 生图工作台固定排在「视频审核工具」正下方，同属「工具」分组。单独部署时没有视频工具入口。
+  if (toolEntries.length > 0) {
     items.push({
       type: "group" as const,
       label: collapsed ? undefined : "工具",
-      children: [{ key: "/tools", icon: <DesktopOutlined />, label: "视频审核工具" }],
+      children: toolEntries.map((entry) => ({
+        key: entry.key,
+        icon: entry.key === "/tools" ? <DesktopOutlined /> : <PictureOutlined />,
+        label: entry.label,
+      })),
     });
   }
 
