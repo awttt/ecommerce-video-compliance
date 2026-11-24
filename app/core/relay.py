@@ -389,6 +389,19 @@ class RelayClient:
         )
         return data if isinstance(data, dict) else {}
 
+    async def create_key_named(self, token: str, name: str, group_id: int) -> dict:
+        """只创建生图密钥。审核密钥仍走 create_key，避免把原密钥改到别的分组。"""
+        if name != "御镜生图":
+            raise RelayError("不能用这个入口创建其他密钥", 400)
+        data = await self._request(
+            "POST",
+            "/keys",
+            token=token,
+            json={"name": name, "group_id": group_id},
+            headers={"Idempotency-Key": uuid.uuid4().hex},
+        )
+        return data if isinstance(data, dict) else {}
+
     async def checkout_info(self, token: str) -> dict:
         data = await self._request("GET", "/payment/checkout-info", token=token)
         return data if isinstance(data, dict) else {}

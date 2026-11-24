@@ -10,6 +10,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
+from app.api.image_routes import router as image_router
 from app.api.routes import router
 from app.logging_setup import setup_logging
 from app.paths import bundle_root, load_project_dotenv
@@ -68,6 +69,7 @@ def create_app(console_url: str | None = None) -> FastAPI:
     # 管理控制台的地址。为空表示这次没有启动控制台，界面不显示入口。
     app.state.console_url = console_url or ""
     app.include_router(router)
+    app.include_router(image_router)
     try:
         from app.mcp_server import attach_mcp, mcp_enabled
 

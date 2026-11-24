@@ -8,6 +8,7 @@ import {
   HistoryOutlined,
   HomeOutlined,
   PauseOutlined,
+  PictureOutlined,
   ScissorOutlined,
   SettingOutlined,
 } from "@ant-design/icons";
@@ -82,6 +83,7 @@ import { findingKey } from "./findingsView";
 import { draftsFromPhrases, groupKey, phrasesFromDrafts, RULE_GROUPS } from "./ruleForm";
 import { diffCompanyRules } from "./ruleDiff";
 import { CATEGORY_COLOR, TERMINAL, type CutSpan, type Finding, type Job, type Settings } from "./types";
+import { ImageWorkbench } from "./ImageWorkbench";
 import { VideoPane, type PlayerControls } from "./VideoPane";
 
 const { Dragger } = Upload;
@@ -247,6 +249,7 @@ export function Shell() {
   const [authPage, setAuthPage] = useState<"login" | "register">("login");
   const [bootError, setBootError] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [desk, setDesk] = useState<"review" | "image">("review");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [history, setHistory] = useState<Job[]>([]);
   const [job, setJob] = useState<Job | null>(null);
@@ -999,8 +1002,21 @@ export function Shell() {
     <div className="app-shell">
       <header className="app-header">
         <nav className="app-nav">
-          <Button type="text" icon={<HomeOutlined />} className="is-active">
+          <Button
+            type="text"
+            icon={<HomeOutlined />}
+            className={desk === "review" ? "is-active" : ""}
+            onClick={() => setDesk("review")}
+          >
             首页
+          </Button>
+          <Button
+            type="text"
+            icon={<PictureOutlined />}
+            className={desk === "image" ? "is-active" : ""}
+            onClick={() => setDesk("image")}
+          >
+            生图
           </Button>
           <Button type="text" icon={<HistoryOutlined />} onClick={() => { setHistoryOpen(true); refreshHistory().catch(() => undefined); }}>
             历史
@@ -1028,6 +1044,7 @@ export function Shell() {
           ) : null}
         </nav>
       </header>
+      {desk === "image" ? <ImageWorkbench /> : (
       <div className="page">
         <Card className="workspace">
           <div className="workspace-top">
@@ -1563,6 +1580,7 @@ export function Shell() {
           </section>
         </Card>
       </div>
+      )}
 
       <Drawer
         title="设置"

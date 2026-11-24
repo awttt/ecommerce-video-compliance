@@ -232,6 +232,68 @@ export async function downloadBatchExport(ids: string[]): Promise<void> {
   await saveDownload(response, "批量合规结果.xlsx");
 }
 
+export interface ImageModelOption {
+  id: string;
+  label: string;
+}
+
+export interface ImageStatus {
+  enabled: boolean;
+  mode: string;
+  preview: boolean;
+  reason: string;
+  group_label: string;
+  models: ImageModelOption[];
+  sizes: { id: string; label: string; orientation: string }[];
+  counts: number[];
+  quality: string;
+  quality_enabled: boolean;
+  async_enabled: boolean;
+  reference_local: boolean;
+  upstream_fields: string[];
+  notice: string;
+}
+
+export interface ImageBatch {
+  id: string;
+  prompt: string;
+  model: string;
+  model_label: string;
+  size: string;
+  size_label: string;
+  orientation: string;
+  count: number;
+  status: string;
+  message: string;
+  preview: boolean;
+  upstream_sent: boolean;
+  created_at: string;
+  files: { index: number; url: string }[];
+  references: { index: number; url: string }[];
+}
+
+export function getImageStatus(): Promise<ImageStatus> {
+  return request<ImageStatus>("/api/images/status");
+}
+
+export function listImageBatches(): Promise<ImageBatch[]> {
+  return request<ImageBatch[]>("/api/images/batches");
+}
+
+export function createImageBatch(form: FormData): Promise<ImageBatch> {
+  return request<ImageBatch>("/api/images/generations", { method: "POST", body: form });
+}
+
+export function deleteImageBatch(id: string): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`/api/images/batches/${id}`, { method: "DELETE" });
+}
+
+export async function downloadImageFile(id: string, index: number): Promise<void> {
+  const response = await fetch(`/api/images/batches/${id}/files/${index}?download=1`);
+  if (!response.ok) throw new Error(await readError(response));
+  await saveDownload(response, `yujing-preview-${index + 1}.png`);
+}
+
 async function saveDownload(response: Response, fallback: string): Promise<void> {
   const blob = await response.blob();
   const disposition = response.headers.get("Content-Disposition") || "";
