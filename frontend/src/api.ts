@@ -46,6 +46,8 @@ export interface AppUpdate {
   total: number;
   message: string;
   can_apply: boolean;
+  check_state?: string;
+  check_message?: string;
 }
 
 export function getUpdate(refresh = false): Promise<AppUpdate> {

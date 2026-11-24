@@ -3,7 +3,7 @@ import io
 import re
 from datetime import date, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -1208,12 +1208,19 @@ def usage_export(
     )
 
 
+AUDIT_PAGE_SIZES = (20, 50, 100)
+
+
 @router.get("/audit-logs")
 def audit_logs(
     tenant_id: int | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20),
     user: Member = Depends(current_user),
     db: Session = Depends(get_db),
-) -> list:
+) -> dict:
+    if page_size not in AUDIT_PAGE_SIZES:
+        raise HTTPException(status_code=400, detail="每页条数只能是 20、50 或 100")
     query = db.query(AuditLog)
     if user.role == "member":
         query = query.filter(AuditLog.actor_id == user.id)
@@ -1222,8 +1229,14 @@ def audit_logs(
         query = query.filter(AuditLog.tenant_id == user.tenant_id)
     elif tenant_id is not None:
         query = query.filter(AuditLog.tenant_id == tenant_id)
-    rows = query.order_by(AuditLog.id.desc()).limit(200).all()
-    return [audit_dict(db, row) for row in rows]
+    total = query.count()
+    rows = query.order_by(AuditLog.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    return {
+        "items": [audit_dict(db, row) for row in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 def _settings_payload(db: Session) -> dict:

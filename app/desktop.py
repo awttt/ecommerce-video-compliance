@@ -15,6 +15,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from app.console import cloud_base_url, console_dist, console_enabled, console_port, create_console_app
+from app.core.desktop_save import create_desktop_window
 from app.core.relay import configure_tls
 from app.factory import create_app
 from app.logging_setup import ensure_stdio
@@ -130,14 +131,7 @@ def main(argv: list[str] | None = None) -> None:
             print("未安装 pywebview，已改为只启动本地服务。用浏览器打开上面的地址即可。")
             thread.join()
             return
-        webview.create_window(
-            "御镜视频审核系统",
-            start_url,
-            width=1360,
-            height=860,
-            min_size=(1100, 720),
-            text_select=True,
-        )
+        create_desktop_window(webview, start_url)
         webview.start(debug=False)
     finally:
         server.should_exit = True

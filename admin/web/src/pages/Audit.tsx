@@ -1,9 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { Card, Table } from "antd";
+import { useEffect, useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import { api } from "../api";
+import { AUDIT_PAGE_SIZE_DEFAULT, AUDIT_PAGE_SIZES, auditLogsPath, nextAuditPage } from "../auditPage";
 import { when } from "../format";
-import type { AuditRow, User } from "../types";
+import type { AuditPage, AuditRow, User } from "../types";
 import { PageHead, PageLoading, RefreshButton, StatusTag } from "../ui";
 
 const statusMap: Record<string, string> = {
@@ -31,7 +33,17 @@ function changeText(row: AuditRow): string {
 export function Audit() {
   const user = useOutletContext<User>();
   const platform = user.role === "platform_admin";
-  const query = useQuery({ queryKey: ["audit"], queryFn: () => api<AuditRow[]>("/v1/audit-logs") });
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(AUDIT_PAGE_SIZE_DEFAULT);
+  const query = useQuery({
+    queryKey: ["audit", page, pageSize],
+    queryFn: () => api<AuditPage>(auditLogsPath(page, pageSize)),
+  });
+  const total = query.data?.total ?? 0;
+  useEffect(() => {
+    const bounded = nextAuditPage(pageSize, page, pageSize, total);
+    if (bounded.page !== page) setPage(bounded.page);
+  }, [page, pageSize, total]);
   const head = (
     <PageHead
       title="审计日志"
@@ -54,9 +66,20 @@ export function Audit() {
       <Card>
         <Table
           rowKey="id"
-          dataSource={query.data ?? []}
+          dataSource={query.data?.items ?? []}
           loading={query.isFetching}
-          pagination={{ pageSize: 10, hideOnSinglePage: true }}
+          pagination={{
+            current: page,
+            pageSize,
+            total,
+            showSizeChanger: true,
+            pageSizeOptions: AUDIT_PAGE_SIZES.map(String),
+            onChange: (nextPage, nextSize) => {
+              const next = nextAuditPage(pageSize, nextPage, nextSize, total);
+              setPage(next.page);
+              setPageSize(next.pageSize);
+            },
+          }}
           scroll={{ x: 960 }}
           columns={[
             { title: "时间", dataIndex: "created_at", render: (value: string) => when(value), width: 140 },

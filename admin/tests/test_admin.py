@@ -1372,7 +1372,7 @@ def test_member_updates_own_name_and_local_password(tmp_path, monkeypatch):
         assert blocked.status_code == 400
         assert blocked.json()["detail"] == "当前环境不能修改登录密码"
 
-        logs = client.get("/v1/audit-logs", headers=headers).json()
+        logs = client.get("/v1/audit-logs?page_size=100", headers=headers).json()["items"]
         actions = {item["action"] for item in logs}
         assert "profile.name" in actions
         assert "profile.password" in actions

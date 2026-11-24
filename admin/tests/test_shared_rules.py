@@ -94,12 +94,12 @@ def test_submit_review_visibility_and_permissions(tmp_path, monkeypatch):
         assert all(item["word"] != "绝对第一" for item in client.get("/v1/shared-rules/approved", headers=other).json())
         assert all(item["word"] != "绝对第一" for item in client.get("/v1/shared-rules/mine", headers=other).json())
 
-        logs = client.get("/v1/audit-logs", headers=platform).json()
+        logs = client.get("/v1/audit-logs?page_size=100", headers=platform).json()["items"]
         actions = {item["action"] for item in logs}
         assert "shared_rule.submit" in actions
         assert "shared_rule.approve" in actions
         assert "shared_rule.reject" in actions
-        text = client.get("/v1/audit-logs", headers=platform).text
+        text = client.get("/v1/audit-logs?page_size=100", headers=platform).text
         assert "全网最低" in text
 
 

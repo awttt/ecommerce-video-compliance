@@ -116,6 +116,13 @@ export interface Consumption {
   by_member: ConsumptionMember[];
 }
 
+export interface AuditPage {
+  items: AuditRow[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
 export interface AuditRow {
   id: number;
   created_at: string;
