@@ -67,3 +67,29 @@ def test_windows_workflow_uploads_only_the_setup_artifact():
     assert text.count("actions/download-artifact@v4") == 2
     assert text.count("retention-days:") == 1
     assert "retention-days: 3" in text
+
+
+def test_windows_workflow_caches_downloads_not_pyinstaller_output():
+    text = (ROOT / ".github/workflows/windows-package.yml").read_text(encoding="utf-8")
+    assert "cache: pip" in text
+    assert "cache-dependency-path: requirements.txt" in text
+    assert "cache: npm" in text
+    assert "frontend/package-lock.json" in text
+    assert "admin/web/package-lock.json" in text
+    assert text.count("uses: actions/cache@v4") == 2
+    assert "key: ffmpeg-${{ runner.os }}-${{ env.FFMPEG_VERSION }}" in text
+    assert "key: innosetup-${{ runner.os }}-${{ env.INNO_SETUP_VERSION }}" in text
+    assert "path: .cache/ffmpeg" in text
+    assert "path: .cache/innosetup" in text
+    cache_paths = [
+        line.strip().split(":", 1)[1].strip()
+        for line in text.splitlines()
+        if line.strip().startswith("path: .cache/")
+    ]
+    assert cache_paths == [".cache/ffmpeg", ".cache/innosetup"]
+    assert "path: build" not in text
+    assert "path: dist/VideoCompliance\n" not in text
+    assert "FFMPEG_RELEASE: \"autobuild-2026-11-22-12-36\"" in text
+    assert "INNO_SETUP_VERSION: \"6.7.1\"" in text
+    build = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
+    assert "--clean" in build

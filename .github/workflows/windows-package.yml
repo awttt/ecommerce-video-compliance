@@ -32,6 +32,13 @@ jobs:
   package:
     name: Build Windows package
     runs-on: windows-latest
+    env:
+      # BtbN's "latest" tag moves every day. This is the autobuild behind
+      # that tag on 2026-11-22, when run 45041287690 downloaded it.
+      FFMPEG_VERSION: "N-129219-g359c825152"
+      FFMPEG_RELEASE: "autobuild-2026-11-22-12-36"
+      # installer.iss needs 6.6 or newer. Run 45041287690 compiled with 6.7.1.
+      INNO_SETUP_VERSION: "6.7.1"
     permissions:
       contents: read
       actions: write
@@ -100,34 +107,111 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          # build_windows.ps1 installs requirements.txt plus unpinned
+          # pyinstaller into a new .venv. This caches pip's wheel download
+          # directory only. build/ and dist/ stay uncached.
+          cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+          # npm install runs in frontend and admin/web. There is no
+          # package-lock.json at the repo root.
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            admin/web/package-lock.json
 
+      # PyInstaller runs with --clean. Do not cache build/, dist/, or the venv.
       - name: Build the desktop app
         shell: pwsh
         run: pwsh -ExecutionPolicy Bypass -File scripts\build_windows.ps1
 
+      # Only the two executables. Not the zip, and not dist/VideoCompliance.
+      - name: Restore FFmpeg
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/ffmpeg
+          key: ffmpeg-${{ runner.os }}-${{ env.FFMPEG_VERSION }}
+
       - name: Put FFmpeg next to the executable
         shell: pwsh
+        env:
+          FFMPEG_CACHE_HIT: ${{ steps.ffmpeg-cache.outputs.cache-hit }}
         run: |
-          $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
-          $dest = Join-Path $env:RUNNER_TEMP "ffmpeg"
-          Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile $zip
-          Expand-Archive -Path $zip -DestinationPath $dest
-          $ffmpeg = Get-ChildItem -Path $dest -Recurse -Filter ffmpeg.exe | Select-Object -First 1
-          if (-not $ffmpeg) { throw "ffmpeg.exe was not in the downloaded archive" }
-          $ffprobe = Join-Path $ffmpeg.DirectoryName "ffprobe.exe"
-          if (-not (Test-Path $ffprobe)) { throw "ffprobe.exe was not next to ffmpeg.exe" }
-          Copy-Item $ffmpeg.FullName, $ffprobe -Destination "dist\VideoCompliance\"
+          $ErrorActionPreference = "Stop"
+          $cacheDir = Join-Path (Get-Location) ".cache\ffmpeg"
+          New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+          $ffmpeg = Join-Path $cacheDir "ffmpeg.exe"
+          $ffprobe = Join-Path $cacheDir "ffprobe.exe"
+          $hit = $env:FFMPEG_CACHE_HIT -eq "true" -and (Test-Path $ffmpeg) -and (Test-Path $ffprobe)
+          if ($hit) {
+            Write-Host "FFmpeg cache hit: $env:FFMPEG_VERSION"
+          } else {
+            Write-Host "FFmpeg cache miss: downloading $env:FFMPEG_RELEASE ($env:FFMPEG_VERSION)"
+            $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
+            $dest = Join-Path $env:RUNNER_TEMP "ffmpeg-src"
+            if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
+            $uri = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$env:FFMPEG_RELEASE/ffmpeg-$env:FFMPEG_VERSION-win64-gpl.zip"
+            Invoke-WebRequest -Uri $uri -OutFile $zip
+            Expand-Archive -Path $zip -DestinationPath $dest
+            $found = Get-ChildItem -Path $dest -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+            if (-not $found) { throw "ffmpeg.exe was not in the downloaded archive" }
+            $probe = Join-Path $found.DirectoryName "ffprobe.exe"
+            if (-not (Test-Path $probe)) { throw "ffprobe.exe was not next to ffmpeg.exe" }
+            Copy-Item $found.FullName, $probe -Destination $cacheDir -Force
+          }
+          Copy-Item $ffmpeg, $ffprobe -Destination "dist\VideoCompliance\"
+
+      - name: Restore Inno Setup
+        id: inno-cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/innosetup
+          key: innosetup-${{ runner.os }}-${{ env.INNO_SETUP_VERSION }}
 
       - name: Install Inno Setup
         shell: pwsh
+        env:
+          INNO_CACHE_HIT: ${{ steps.inno-cache.outputs.cache-hit }}
         run: |
-          choco install innosetup --no-progress -y
-          if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed" }
+          $ErrorActionPreference = "Stop"
+          $dest = Join-Path (Get-Location) ".cache\innosetup"
+          $iscc = Join-Path $dest "ISCC.exe"
+          $languages = Join-Path $dest "Languages"
+          $hit = $env:INNO_CACHE_HIT -eq "true" -and (Test-Path $iscc) -and (Test-Path $languages)
+          if ($hit) {
+            Write-Host "Inno Setup cache hit: $env:INNO_SETUP_VERSION"
+          } else {
+            if ($env:INNO_CACHE_HIT -eq "true") {
+              Write-Host "Inno Setup cache was incomplete. Installing $env:INNO_SETUP_VERSION."
+            } else {
+              Write-Host "Inno Setup cache miss: choco install innosetup $env:INNO_SETUP_VERSION"
+            }
+            choco install innosetup --version=$env:INNO_SETUP_VERSION --no-progress -y
+            if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed" }
+            $installed = $null
+            foreach ($root in @(
+              [Environment]::GetEnvironmentVariable("ProgramFiles(x86)"),
+              [Environment]::GetEnvironmentVariable("ProgramFiles")
+            )) {
+              if (-not $root -or -not (Test-Path $root)) { continue }
+              $dir = Get-ChildItem -Path $root -Directory -Filter "Inno Setup*" -ErrorAction SilentlyContinue |
+                Where-Object { Test-Path (Join-Path $_.FullName "ISCC.exe") } |
+                Select-Object -First 1
+              if ($dir) { $installed = $dir; break }
+            }
+            if (-not $installed) { throw "ISCC.exe was not found after choco install" }
+            if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
+            Copy-Item $installed.FullName $dest -Recurse
+            $iscc = Join-Path $dest "ISCC.exe"
+          }
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe is not available at $iscc" }
+          Add-Content -Path $env:GITHUB_PATH -Value $dest
+          Write-Host "ISCC.exe=$iscc"
 
       - name: Build the installer
         shell: pwsh
