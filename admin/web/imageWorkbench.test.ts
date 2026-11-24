@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   estimateCostYuan,
   generationBlockReason,
+  imageDownloadName,
   imageOrientation,
   modelOptionLabel,
   modelSelectable,
@@ -163,4 +164,13 @@ test("model labels do not call an unverified model ready", () => {
   assert.equal(modelSelectable(flare), true);
   assert.equal(modelSelectable(sunburst), false);
   assert.equal(modelSelectable({ ...sunburst, ready: true, selectable: false }), false);
+});
+
+test("download names keep the server file number and drop path characters", () => {
+  assert.equal(
+    imageDownloadName("红色礼盒/主图", "/v1/image-workbench/jobs/abc/files/mock-1.svg"),
+    "红色礼盒 主图-1.svg",
+  );
+  assert.equal(imageDownloadName("   ", "/files/image-2.webp"), "生图-2.webp");
+  assert.equal(imageDownloadName("夜景.jpeg", "/files/image-1.jpeg"), "夜景-1.jpg");
 });

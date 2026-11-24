@@ -1,7 +1,7 @@
 """管理端生图工作台的专组、专钥、能力矩阵和请求体。
 
 与审核侧完全并行：审核继续用 EVC_RELAY_GROUP_NAME 和「电商视频合规」密钥，
-生图用「生图专用-bot创建」分组和「电商生图-bot创建」密钥。两组互不回落。
+生图用「生图专用-bot创建」分组和「生图专用」密钥。不使用审核视频的「电商视频合规」。
 解析不到生图专组就明确失败，绝不改用审核组、普通组或管理密钥。
 
 分组编号只存在于中转站返回的记录里，用来创建这一把专钥。代码不把任何
@@ -47,7 +47,7 @@ log = logging.getLogger(__name__)
 # 不读取 EVC_RELAY_GROUP_NAME，避免和审核组混用。
 DEFAULT_IMAGE_GROUP_NAME = "生图专用-bot创建"
 # 生图密钥名（bot创建）。与审核密钥「电商视频合规」是两把不同的 Key。
-IMAGE_KEY_NAME = "电商生图-bot创建"
+IMAGE_KEY_NAME = "生图专用"
 REVIEW_KEY_NAME = "电商视频合规"
 IMAGE_PRICE_CENTS = 10
 IMAGE_GENERATIONS_URL = "https://token4u.cc/v1/images/generations"
@@ -456,38 +456,38 @@ def create_or_find_image_key(base_url: str, access_token: str, group_id: int, em
         "User-Agent": "evc-admin/0.1.2",
         "Accept": "application/json",
     }
+    list_headers = {
+        "Authorization": f"Bearer {access_token}",
+        "User-Agent": "evc-admin/0.1.2",
+        "Accept": "application/json",
+    }
     with _http_client(httpx.Timeout(20.0, connect=10.0)) as client:
-        response = client.post(
+        listing = client.get(
             f"{base_url.rstrip('/')}/keys",
-            headers=headers,
-            json={"name": IMAGE_KEY_NAME, "group_id": group_id},
+            headers=list_headers,
+            params={"page": 1, "page_size": 100},
         )
-        if response.status_code in (401, 403):
+        if listing.status_code in (401, 403):
             raise DomainError(401, "登录已失效，请重新登录后再试")
-        key = ""
-        if response.status_code < 400:
-            key = _extract_key(_unwrap(response))
+        key = _key_from_list(listing, group_id)
         if not key:
-            listing = client.get(
+            response = client.post(
                 f"{base_url.rstrip('/')}/keys",
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "User-Agent": "evc-admin/0.1.2",
-                    "Accept": "application/json",
-                },
-                params={"page": 1, "page_size": 100},
+                headers=headers,
+                json={"name": IMAGE_KEY_NAME, "group_id": group_id},
             )
-            if listing.status_code in (401, 403):
+            if response.status_code in (401, 403):
                 raise DomainError(401, "登录已失效，请重新登录后再试")
-            key = _key_from_list(listing, group_id)
+            if response.status_code < 400:
+                key = _extract_key(_unwrap(response))
         if key:
             return key
     raise DomainError(502, "没有拿到生图密钥。请重新登录后再试。不会改用审核密钥。")
 
 
-def _key_from_list(response: httpx.Response, group_id: int) -> str:
+def _key_items(response: httpx.Response) -> list[dict]:
     if response.status_code >= 400:
-        return ""
+        return []
     body = _unwrap(response)
     items: object = body
     if isinstance(body, dict):
@@ -497,10 +497,12 @@ def _key_from_list(response: httpx.Response, group_id: int) -> str:
                 items = body[key]
                 break
     if not isinstance(items, list):
-        return ""
-    for item in items:
-        if not isinstance(item, dict):
-            continue
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _key_from_list(response: httpx.Response, group_id: int) -> str:
+    for item in _key_items(response):
         name = str(item.get("name") or "").strip()
         # 审核钥即使挂在同一个分组编号上也不取，避免把「电商视频合规」当成生图钥。
         if name == REVIEW_KEY_NAME or name != IMAGE_KEY_NAME:
@@ -570,8 +572,8 @@ def ensure_model_selectable(group: dict, model: str) -> None:
         raise DomainError(400, "该模型尚未按生图专用分组的可用能力确认，暂不可用")
 
 
-def request_image_generation(*, api_key: str, payload: dict) -> list[dict]:
-    if not live_generation_enabled():
+def request_image_generation(*, api_key: str, payload: dict, live: bool = False) -> list[dict]:
+    if not live and not live_generation_enabled():
         raise DomainError(501, "真实生图默认关闭。需要同时打开两个服务端开关，并完成能力与授权校验。")
     if not str(api_key or "").strip():
         raise DomainError(403, "当前账号还没有生图密钥。")

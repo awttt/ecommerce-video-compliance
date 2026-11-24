@@ -4,6 +4,7 @@
 # Upload protocol (the download server is write-only and holds one lock):
 #   1. VideoCompliance-X.Y.Z-Setup.exe
 #   2. VideoCompliance-X.Y.Z-Setup.manifest
+#   3. latest.manifest (stable name the desktop client polls)
 # The files are sent one after another, both to ":/". Do not pass --delete
 # or --remove-source-files, and do not change the remote path.
 #
@@ -92,6 +93,13 @@ body_matches() {
     return 0
   fi
   return 1
+}
+
+manifest_matches() {
+  local body=$1
+  printf '%s\n' "$body" | grep -Fxq "version=${version}" \
+    && printf '%s\n' "$body" | grep -Fxq "sha256=${hash}" \
+    && printf '%s\n' "$body" | grep -Fxq "file=${expected}"
 }
 
 http_get() {
@@ -282,10 +290,11 @@ cmd_upload() {
     esac
     sleep 5
   done
+  skip_payload=0
   case "$state" in
     same)
-      note "Download server already has ${expected} with the same sha256. Not uploading again."
-      exit 0
+      note "Download server already has ${expected} with the same sha256. Refreshing latest.manifest only."
+      skip_payload=1
       ;;
     absent) ;;
     different)
@@ -309,25 +318,55 @@ cmd_upload() {
 
   # shellcheck disable=SC2088
   SSH="ssh -i ~/.ssh/ecv_deploy -o UserKnownHostsFile=~/.ssh/known_hosts_ecv -o StrictHostKeyChecking=yes -o BatchMode=yes -o IdentitiesOnly=yes"
+  printf 'version=%s\nfile=%s\nsha256=%s\n' "$version" "$expected" "$hash" > "$work/latest.manifest"
   echo "Remote path is :/"
-  echo "Uploading ${expected}"
-  rsync -t --chmod=F644 -e "$SSH" "$work/$expected" "$remote"
-  echo "Uploading ${manifest}"
-  rsync -t --chmod=F644 -e "$SSH" "$work/$manifest" "$remote"
+  if [[ "$skip_payload" -eq 0 ]]; then
+    echo "Uploading ${expected}"
+    rsync -t --chmod=F644 -e "$SSH" "$work/$expected" "$remote"
+    echo "Uploading ${manifest}"
+    rsync -t --chmod=F644 -e "$SSH" "$work/$manifest" "$remote"
 
+    poll=$(poll_seconds)
+    deadline=$((SECONDS + poll))
+    attempt=0
+    while true; do
+      attempt=$((attempt + 1))
+      classify_remote "$url" "$hash"
+      if [[ "$REMOTE_STATE" == "same" ]]; then
+        note "Published sha256 matches ${url}"
+        break
+      fi
+      echo "Published sha256 not ready (attempt ${attempt}, HTTP ${REMOTE_CODE}, ${REMOTE_STATE})."
+      if ((SECONDS >= deadline)); then
+        die "sha256 at ${url} did not match within ${poll} seconds (last HTTP ${REMOTE_CODE})."
+      fi
+      remain=$((deadline - SECONDS))
+      if ((remain > 10)); then
+        sleep 10
+      elif ((remain > 0)); then
+        sleep "$remain"
+      fi
+    done
+  fi
+
+  echo "Uploading latest.manifest"
+  rsync -t --chmod=F644 -e "$SSH" "$work/latest.manifest" "$remote"
   poll=$(poll_seconds)
   deadline=$((SECONDS + poll))
   attempt=0
   while true; do
     attempt=$((attempt + 1))
-    classify_remote "$url" "$hash"
-    if [[ "$REMOTE_STATE" == "same" ]]; then
-      note "Published sha256 matches ${url}"
+    latest_tmp=$(mktemp)
+    latest_code=$(http_get "${DOWNLOAD_BASE}/latest.manifest" "$latest_tmp")
+    latest_body=$(cat "$latest_tmp" 2>/dev/null || true)
+    rm -f "$latest_tmp"
+    if [[ "$latest_code" == "200" ]] && manifest_matches "$latest_body"; then
+      note "Published latest.manifest for ${version}"
       exit 0
     fi
-    echo "Published sha256 not ready (attempt ${attempt}, HTTP ${REMOTE_CODE}, ${REMOTE_STATE})."
+    echo "latest.manifest not ready (attempt ${attempt}, HTTP ${latest_code})."
     if ((SECONDS >= deadline)); then
-      die "sha256 at ${url} did not match within ${poll} seconds (last HTTP ${REMOTE_CODE})."
+      die "latest.manifest did not match within ${poll} seconds (last HTTP ${latest_code})."
     fi
     remain=$((deadline - SECONDS))
     if ((remain > 10)); then

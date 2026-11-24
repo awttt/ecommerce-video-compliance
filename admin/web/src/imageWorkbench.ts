@@ -83,6 +83,7 @@ export interface ImageGenerateBody {
   n: number;
   size: string;
   quality: string;
+  references?: string[];
   confirm: true;
 }
 
@@ -153,4 +154,23 @@ export function generationBlockReason(input: {
 export function sizeLockedToSingle(option: ImageSizeOption | undefined, model: string): boolean {
   if (!option || !model.trim()) return false;
   return (option.verified_for ?? []).includes(model.trim());
+}
+
+const IMAGE_EXT = /\.(png|jpe?g|webp|gif|svg)$/i;
+
+/** 下载到本机时用的文件名。去掉路径符号，保留服务端文件的序号和扩展名。 */
+export function imageDownloadName(prompt: string, url: string, index = 1): string {
+  const leaf = decodeURIComponent(url.split("?")[0]?.split("/").pop() || "");
+  const extMatch = IMAGE_EXT.exec(leaf);
+  const ext = extMatch ? extMatch[0].toLowerCase().replace(/\.jpeg$/, ".jpg") : ".png";
+  const numbered = /-(\d+)\.[^.]+$/.exec(leaf);
+  const order = numbered?.[1] || String(Number.isFinite(index) && index > 0 ? Math.floor(index) : 1);
+  const base = prompt
+    .replace(/[\\/:*?"<>|\u0000-\u001f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 40)
+    .replace(/(?:\.(?:png|jpe?g|webp|gif|svg))+$/i, "")
+    .replace(/[. ]+$/g, "");
+  return `${base || "生图"}-${order}${ext}`;
 }

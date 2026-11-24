@@ -232,11 +232,31 @@ def create_console_app(
         return Response(content=upstream.content, status_code=upstream.status_code, headers=outgoing)
 
     @app.api_route(
+        "/v1/image-workbench",
+        methods=["GET", "POST", "DELETE"],
+        include_in_schema=False,
+    )
+    @app.api_route(
+        "/v1/image-workbench/{path:path}",
+        methods=["GET", "POST", "DELETE"],
+        include_in_schema=False,
+    )
+    async def image_workbench(request: Request, path: str = "") -> Response:
+        """生图不转给 admin.token4u.cc，由本机直接请求 token4u.cc。"""
+        from app.core.direct_image import handle_image_workbench
+
+        return await handle_image_workbench(path, request)
+
+    @app.api_route(
         "/v1/{path:path}",
         methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         include_in_schema=False,
     )
     async def proxy(path: str, request: Request) -> Response:
+        if path == "image-workbench" or path.startswith("image-workbench/"):
+            from app.core.direct_image import handle_image_workbench
+
+            return await handle_image_workbench(path.removeprefix("image-workbench").lstrip("/"), request)
         if not base:
             return JSONResponse({"detail": "还没有配置管理服务器地址"}, status_code=503)
         url = f"{base}/v1/{path}"

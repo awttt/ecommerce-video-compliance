@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -18,6 +19,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from app import __version__
 from app.core.editor import EditorError
+from app.core.updates import UpdateError, get_updates
 from app.core.ffmpeg import FFmpegError, ffmpeg_available, resolve_bin
 from app.core.relay import RelayError
 from app.paths import data_dir, exports_dir, video_dir
@@ -150,6 +152,23 @@ def open_in_file_manager(path: Path) -> None:
         return
     command = ["open", str(path)] if sys.platform == "darwin" else ["xdg-open", str(path)]
     subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+@router.get("/update")
+async def update_status(refresh: int = 0) -> dict:
+    center = get_updates()
+    if refresh:
+        return await asyncio.to_thread(center.check)
+    return center.snapshot()
+
+
+@router.post("/update")
+async def update_apply() -> dict:
+    busy = get_manager().active_job_count() > 0
+    try:
+        return await asyncio.to_thread(get_updates().start, busy=busy)
+    except UpdateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/health")

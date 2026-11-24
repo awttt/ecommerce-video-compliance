@@ -105,7 +105,7 @@ def _key_handler(request: httpx.Request) -> httpx.Response:
     assert request.url.path == "/api/v1/keys"
     if request.method == "POST":
         body = json.loads(request.content.decode())
-        assert body == {"name": "电商生图-bot创建", "group_id": 42}
+        assert body == {"name": "生图专用", "group_id": 42}
         expected = hashlib.sha256(b"evc-admin-image-key:zhang@jiecheng.com:42").hexdigest()[:32]
         assert request.headers.get("idempotency-key") == expected
         return httpx.Response(200, json={"code": 0, "data": {"key": IMAGE_KEY}})
@@ -323,6 +323,13 @@ def test_mock_generation_keeps_review_key_and_isolation(tmp_path, monkeypatch):
             assert downloaded.status_code == 200
             assert downloaded.headers["content-type"].startswith("image/svg+xml")
             assert "private" in downloaded.headers["cache-control"]
+            assert "inline" in downloaded.headers["content-disposition"]
+            saved = client.get(f"{file_url}?download=1", headers=headers)
+            assert saved.status_code == 200
+            assert saved.content == downloaded.content
+            disposition = saved.headers["content-disposition"]
+            assert "attachment" in disposition
+            assert "mock-1.svg" in disposition
             assert b"MOCK" in downloaded.content
             assert b'width="2048"' in downloaded.content
             assert b'height="1152"' in downloaded.content
@@ -333,7 +340,7 @@ def test_mock_generation_keeps_review_key_and_isolation(tmp_path, monkeypatch):
             assert again.status_code == 200, again.text
             assert again.json()["est_cost_cents"] == 40
             assert len(again.json()["images"]) == 4
-            assert [request.method for request in seen if request.url.path.endswith("/keys")] == ["POST"]
+            assert [request.method for request in seen if request.url.path.endswith("/keys")] == ["GET", "POST"]
 
             member, db = _member("zhang@jiecheng.com")
             assert member.relay_api_key == REVIEW_KEY
@@ -415,8 +422,8 @@ def test_listed_key_ignores_review_key(tmp_path, monkeypatch):
                 "data": {
                     "items": [
                         {"name": "电商视频合规", "group_id": 42, "key": REVIEW_KEY},
-                        {"name": "电商生图-bot创建", "group_id": 15, "key": "wrong-group"},
-                        {"name": "电商生图-bot创建", "group_id": 42, "key": "sk-image-listed"},
+                        {"name": "生图专用", "group_id": 15, "key": "wrong-group"},
+                        {"name": "生图专用", "group_id": 42, "key": "sk-image-listed"},
                     ]
                 },
             },

@@ -37,6 +37,25 @@ export function getHealth(): Promise<{ ok: boolean; mcp?: boolean }> {
   return request<{ ok: boolean; mcp?: boolean }>("/api/health");
 }
 
+export interface AppUpdate {
+  current: string;
+  latest: string;
+  available: boolean;
+  phase: "idle" | "downloading" | "installing" | "error" | string;
+  received: number;
+  total: number;
+  message: string;
+  can_apply: boolean;
+}
+
+export function getUpdate(refresh = false): Promise<AppUpdate> {
+  return request<AppUpdate>(refresh ? "/api/update?refresh=1" : "/api/update");
+}
+
+export function startUpdate(): Promise<AppUpdate> {
+  return request<AppUpdate>("/api/update", { method: "POST" });
+}
+
 /** 管理控制台在另一个本机端口，地址由后端给。 */
 export function getConsoleInfo(): Promise<{ enabled: boolean; url: string }> {
   return request<{ enabled: boolean; url: string }>("/api/console");

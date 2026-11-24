@@ -17,6 +17,7 @@ from admin_app.deps import client_ip, require
 from admin_app.errors import DomainError
 from admin_app.image_relay import (
     IMAGE_CAPABILITY_NOTE,
+    IMAGE_KEY_NAME,
     IMAGE_GENERATIONS_URL,
     build_generation_payload,
     combination_ready_for_live,
@@ -145,15 +146,16 @@ def _status_models(group: dict | None, ready: bool) -> list[dict]:
 def image_status(user: Member = Depends(require("image.workbench")), db: Session = Depends(get_db)) -> dict:
     group, reason = describe_image_group(db, user)
     ready = group is not None
+    live = live_generation_enabled()
     return {
         "logged_in": True,
         "group_ready": ready,
         "group_reason": reason,
-        "group_name": image_group_name(),
-        "key_name": "电商生图-bot创建",
+        "group_name": str(group.get("name") or "") if group else image_group_name(),
+        "key_name": IMAGE_KEY_NAME,
         "key_ready": bool(str(user.relay_image_api_key or "").strip()),
-        "mock": not live_generation_enabled(),
-        "live_enabled": live_generation_enabled(),
+        "mock": not live,
+        "live_enabled": live,
         "models": _status_models(group, ready),
         "pricing": image_pricing_metadata(),
         "sizes": image_size_metadata(),
@@ -194,7 +196,7 @@ def generate_image(
                     "真实生图只接受已核验组合：gpt-image-2.5-flare、2048x1152 或 3840x2160、n=1、省略 quality。"
                     "当前组合不能发起真实调用。",
                 )
-            names = store_live_images(directory, request_image_generation(api_key=api_key, payload=payload))
+            names = store_live_images(directory, request_image_generation(api_key=api_key, payload=payload, live=True))
             mock = False
             message = "已请求网关同步生图。扣费以网关实账为准。"
             action = "image.generate"
@@ -294,6 +296,7 @@ def delete_job(
 def job_file(
     job_id: str,
     name: str,
+    download: bool = False,
     user: Member = Depends(require("image.workbench")),
     db: Session = Depends(get_db),
 ) -> FileResponse:
@@ -308,6 +311,8 @@ def job_file(
     return FileResponse(
         path,
         media_type=_MEDIA.get(suffix, "application/octet-stream"),
+        filename=name,
+        content_disposition_type="attachment" if download else "inline",
         headers={"Cache-Control": "private, no-store"},
     )
 

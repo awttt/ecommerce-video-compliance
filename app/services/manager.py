@@ -1729,6 +1729,9 @@ class JobManager:
         await self.ensure_preview(state)
         return state
 
+    def active_job_count(self) -> int:
+        return sum(1 for job in self._jobs.values() if job.status in {"queued", "running", "paused"})
+
     async def list_jobs(self) -> list[JobPublic]:
         rows = await self.db.list_jobs()
         result: list[JobPublic] = []

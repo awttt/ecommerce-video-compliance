@@ -276,7 +276,7 @@ gh workflow run "Windows package" --ref vX.Y.Z -f release=true
 - `DEPLOY_SSH_KEY`：私钥全文（多行）
 - `DEPLOY_KNOWN_HOSTS`：这一台主机的一行 `known_hosts`
 
-上传后工作流会核对 `https://token4u.cc/download/VideoCompliance-X.Y.Z-Setup.exe.sha256`，大约等五分钟。和本地 sha256 不一致则失败。
+上传后工作流会核对 `https://token4u.cc/download/VideoCompliance-X.Y.Z-Setup.exe.sha256`，大约等五分钟。和本地 sha256 不一致则失败。核对通过后上传固定的 `latest.manifest`（version、file、sha256）。Windows 安装版启动后会读取这份清单，发现更高版本时提示更新；用户点「立即更新」后，程序下载安装包、核对 sha256，再静默覆盖安装并重新打开。审核数据在用户目录，安装包不会清掉。已经发出去、还没有这个检查的旧安装包，需要先手动装一版新程序。
 
 ## macOS 打包
 
