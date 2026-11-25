@@ -79,6 +79,8 @@ ecommerce-video-compliance/
 
 画面模型选 GLM 5.3 Flash 时，画面帧和口播批次都只请求 `glm-5.3-flash`，不再分到 `gpt-6-luna`。DeepSeek 和 Qwen 仍请求各自的模型。登录后的请求仍用同一把分组密钥和 `https://token4u.cc/v1`。
 
+桌面工具导航里的「生图」是另一条能力，和画面审核的分组、密钥分开。上游契约还没确认时，默认禁用；本机预览只生成带标识的模拟图，不请求 token4u，也不直连 chuanapi。说明见 `docs/image-workbench.md`。
+
 分组名称可以用 `EVC_RELAY_GROUP_NAME` 覆盖，默认就是「电商审核专属-bot创建」。名称对不上时，如果 `EVC_RELAY_GROUP_ID` 填了编号，并且该编号也在当前账号的可用分组里，才改用这个编号。编号还不确定时留空。查询可用分组失败、又配置了编号时，会直接用该编号创建；中转站拒绝绑定则同样报错。
 
 视觉请求使用 Chat Completions，图片用 base64 data URL，不带 `detail`。`glm-5.3-flash` 不能关闭思考；思考开关关闭时用 `reasoning_effort: low`，避免默认的 `max`。`qwen3.8-flash` 会把思考过程放在 `reasoning_content`，程序只读取 `content`。它的输出上限是另外两个模型的两倍，避免思考过程把结果截断。请求带应用自己的 User-Agent。系统提示会写上本机当天日期，减少把已经过去的日期说成未来日期。
@@ -196,6 +198,12 @@ EVC_FFMPEG=C:\ffmpeg\bin\ffmpeg.exe
 EVC_FFPROBE=C:\ffmpeg\bin\ffprobe.exe
 # EVC_RELAY_GROUP_NAME=电商审核专属-bot创建
 # EVC_RELAY_GROUP_ID=
+# 生图专用分组。名称和渠道备注按运维 bot 创建的命名填写，例如「生图专属-bot创建」。
+# 两项都留空则生图禁用。不会回落到上面的审核分组，也不会直连 chuanapi。
+# EVC_IMAGE_RELAY_GROUP_NAME=
+# EVC_IMAGE_RELAY_GROUP_ID=
+# 留空=禁用。mock=本机预览，不请求上游、不扣费。token4u=只在契约确认后才会调用。
+# EVC_IMAGE_PROVIDER=
 ```
 
 设置里保存的密钥优先于环境变量。界面上只显示末四位。

@@ -18,6 +18,7 @@ from pathlib import Path
 from app.core.aggregate import aggregate, refold_findings
 from app.core.deepseek import build_recognizer
 from app.core.model_route import ModelRoute, initial_route_fields, public_stats
+from app.core.image_contract import IMAGE_KEY_NAME, apply_preview_login, clear_image_session
 from app.core.relay import (
     CHAT_BASE,
     KEY_NAME,
@@ -545,7 +546,12 @@ class JobManager:
         was_paused = await self.db.has_status("paused")
         await self.db.fail_interrupted(utcnow())
         self._settings = await self.db.load_settings()
+        if apply_preview_login(self._settings):
+            await self.db.save_settings(self._settings)
         await self._expire_login_if_needed()
+        from app.services.image_jobs import sweep_interrupted
+
+        await sweep_interrupted()
         if was_paused or bool(self._settings.get("queue_paused")):
             self._queue_paused = True
             self._resume.clear()
@@ -584,6 +590,9 @@ class JobManager:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        from app.services.image_jobs import shutdown_image_jobs
+
+        await shutdown_image_jobs()
         await self.db.close()
 
     def relay_credentials(self) -> tuple[str, str]:
@@ -2134,6 +2143,7 @@ class JobManager:
         if previous and previous.lower() != email.lower():
             self._settings.pop("relay_api_key", None)
             self._settings.pop("relay_api_key_id", None)
+            clear_image_session(self._settings)
         self._settings["relay_email"] = email
         self._settings["last_login_email"] = email
         self._settings["relay_login_at"] = time.time()
@@ -2331,8 +2341,87 @@ class JobManager:
     async def _drop_session(self) -> None:
         for name in _RELAY_FIELDS:
             self._settings.pop(name, None)
+        clear_image_session(self._settings)
         self._pending_2fa = None
         await self.db.save_settings(self._settings)
+
+    async def list_image_groups(self) -> list[dict]:
+        """当前登录用户可见的分组。只读，不创建密钥，也不改审核分组。"""
+        self.ensure_logged_in()
+        async with self._account_lock:
+            data = await self._call_authed(self.relay.list_groups)
+        return data if isinstance(data, list) else []
+
+    async def ensure_image_key(self, group_id: int) -> str:
+        """准备绑在生图分组上的用户密钥。不读取、不修改审核密钥。"""
+        self.ensure_logged_in()
+        async with self._account_lock:
+            listed = await self._call_authed(self.relay.list_keys)
+            if not isinstance(listed, list):
+                listed = []
+            chosen = self._pick_image_key(listed, group_id)
+            if chosen is None:
+                try:
+                    created = await self._call_authed(
+                        lambda token: self.relay.create_key_named(token, IMAGE_KEY_NAME, group_id)
+                    )
+                except RelayError:
+                    clear_image_session(self._settings)
+                    await self.db.save_settings(self._settings)
+                    raise
+                if not isinstance(created, dict):
+                    created = {}
+                secret = str(created.get("key") or "")
+                if not usable_api_key(secret) or created.get("ip_whitelist"):
+                    clear_image_session(self._settings)
+                    await self.db.save_settings(self._settings)
+                    raise RelayError("中转站没有返回可用的生图密钥", 502)
+                created_id = created.get("id")
+                if created_id is not None and not _same_id(created.get("group_id"), group_id):
+                    updated = await self._call_authed(
+                        lambda token: self.relay.update_key_group(token, int(created_id), group_id)
+                    )
+                    if isinstance(updated, dict) and updated.get("group_id") is not None:
+                        created["group_id"] = updated.get("group_id")
+                if not _same_id(created.get("group_id"), group_id):
+                    clear_image_session(self._settings)
+                    await self.db.save_settings(self._settings)
+                    raise RelayError("生图密钥没有绑到专用分组", 502)
+                self._settings["image_relay_api_key"] = secret.strip()
+                self._settings["image_relay_api_key_id"] = created_id
+                self._settings["image_relay_group_id"] = group_id
+                await self.db.save_settings(self._settings)
+                return secret.strip()
+            self._settings["image_relay_api_key"] = chosen["key"]
+            self._settings["image_relay_api_key_id"] = chosen["id"]
+            self._settings["image_relay_group_id"] = group_id
+            await self.db.save_settings(self._settings)
+            return chosen["key"]
+
+    def _pick_image_key(self, listed: list[dict], group_id: int) -> dict | None:
+        local_key = str(self._settings.get("image_relay_api_key") or "").strip()
+        local_id = self._settings.get("image_relay_api_key_id")
+        first: dict | None = None
+        for item in listed:
+            if str(item.get("name") or "").strip() != IMAGE_KEY_NAME:
+                continue
+            if str(item.get("status") or "active") != "active":
+                continue
+            if item.get("ip_whitelist"):
+                continue
+            if not _same_id(item.get("group_id"), group_id):
+                continue
+            secret = str(item.get("key") or "")
+            usable = usable_api_key(secret)
+            local_match = usable_api_key(local_key) and _same_id(item.get("id"), local_id)
+            if not usable and not local_match:
+                continue
+            record = {"key": secret.strip() if usable else local_key, "id": item.get("id")}
+            if local_match:
+                return record
+            if first is None and usable:
+                first = record
+        return first
 
 
 def _same_id(left: object, right: object) -> bool:
