@@ -1,10 +1,12 @@
 """CPU 优化功能的测试。"""
 
+import asyncio
 import os
 import sys
 import subprocess
 import pytest
 
+from app.core.cpu_limits import NATIVE_THREAD_VARS, limit_native_threads, slot_count
 from app.core.ffmpeg import ffmpeg_threads, hidden_process_kwargs
 from app.core.flash import block_means, _block_means_py
 
@@ -86,10 +88,15 @@ class TestFfmpegThreads:
         assert result <= 4
 
     def test_ffmpeg_threads_env_large(self, monkeypatch):
-        """设置很大的值，但应该被 min(4, ...) 限制。"""
+        """超过 8 的环境变量按 8 封顶，不再原样放开。"""
         monkeypatch.setenv("EVC_FFMPEG_THREADS", "100")
+        assert ffmpeg_threads() == 8
+
+    def test_ffmpeg_threads_env_negative_uses_default(self, monkeypatch):
+        """负数无法作为线程数，回到默认公式。"""
+        monkeypatch.setenv("EVC_FFMPEG_THREADS", "-3")
         result = ffmpeg_threads()
-        assert result == 100  # 环境变量优先，不再限制为 4
+        assert 1 <= result <= 4
 
 
 class TestHiddenProcessKwargs:
@@ -123,3 +130,70 @@ class TestHiddenProcessKwargs:
         # 应该只有 CREATE_NO_WINDOW，没有 BELOW_NORMAL_PRIORITY_CLASS
         below_normal = getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
         assert (result["creationflags"] & below_normal) == 0
+
+
+def test_slot_count_clamps_between_one_and_four(monkeypatch):
+    monkeypatch.delenv("EVC_FFMPEG_SLOTS", raising=False)
+    assert slot_count() == 2
+    monkeypatch.setenv("EVC_FFMPEG_SLOTS", "3")
+    assert slot_count() == 3
+    monkeypatch.setenv("EVC_FFMPEG_SLOTS", "9")
+    assert slot_count() == 4
+    monkeypatch.setenv("EVC_FFMPEG_SLOTS", "0")
+    assert slot_count() == 1
+    monkeypatch.setenv("EVC_FFMPEG_SLOTS", "nope")
+    assert slot_count() == 2
+
+
+def test_native_thread_vars_fill_blanks_and_keep_explicit_values(monkeypatch):
+    for name in NATIVE_THREAD_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("EVC_FFMPEG_THREADS", "1")
+    monkeypatch.setenv("OMP_NUM_THREADS", "3")
+    limit_native_threads()
+    assert os.environ["OMP_NUM_THREADS"] == "3"
+    for name in NATIVE_THREAD_VARS:
+        if name == "OMP_NUM_THREADS":
+            continue
+        assert os.environ[name] == "1"
+
+
+async def test_ffmpeg_slot_lets_only_the_configured_number_overlap(monkeypatch):
+    import app.core.ffmpeg as ffmpeg
+
+    monkeypatch.setenv("EVC_FFMPEG_SLOTS", "1")
+    current = 0
+    peak = 0
+
+    async def hold():
+        nonlocal current, peak
+        async with ffmpeg.ffmpeg_slot():
+            current += 1
+            peak = max(peak, current)
+            await asyncio.sleep(0.05)
+            current -= 1
+
+    await asyncio.gather(*(hold() for _ in range(3)))
+    assert peak == 1
+
+
+async def test_extract_strip_adds_thread_args_and_takes_a_slot(monkeypatch, tmp_path):
+    import app.core.ffmpeg as ffmpeg
+
+    monkeypatch.setattr(ffmpeg, "_VFR_ARGS", ["-fps_mode", "vfr"])
+    monkeypatch.setenv("EVC_FFMPEG_THREADS", "2")
+    seen: dict = {}
+
+    async def fake_run(cmd, *, slot=False):
+        seen["cmd"] = cmd
+        seen["slot"] = slot
+        (tmp_path / "strip_0000.jpg").write_bytes(b"x")
+        return 0, ""
+
+    monkeypatch.setattr(ffmpeg, "_run", fake_run)
+    monkeypatch.setattr(ffmpeg, "resolve_bin", lambda _name: "ffmpeg")
+    count = await ffmpeg.extract_strip(tmp_path / "in.mp4", tmp_path)
+    assert count == 1
+    assert seen["slot"] is True
+    assert seen["cmd"][6:8] == ["-threads", "2"]
+    assert seen["cmd"][-3:-1] == ["-threads", "2"]
