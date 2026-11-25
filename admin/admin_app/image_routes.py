@@ -26,7 +26,6 @@ from admin_app.image_relay import (
     ensure_model_selectable,
     ensure_verified_size_combination,
     estimate_cents,
-    describe_image_group,
     group_model_names,
     image_group_name,
     image_model_metadata,
@@ -144,8 +143,13 @@ def _status_models(group: dict | None, ready: bool) -> list[dict]:
 
 @router.get("/status")
 def image_status(user: Member = Depends(require("image.workbench")), db: Session = Depends(get_db)) -> dict:
-    group, reason = describe_image_group(db, user)
-    ready = group is not None
+    reason = ""
+    group = None
+    try:
+        group, _key = ensure_member_image_key(db, user)
+    except DomainError as exc:
+        reason = exc.detail
+    ready = group is not None and not reason
     live = live_generation_enabled()
     return {
         "logged_in": True,

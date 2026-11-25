@@ -28,6 +28,7 @@ import ipaddress
 import logging
 import os
 import socket
+import threading
 from datetime import timedelta
 from pathlib import Path
 from urllib.parse import urlparse
@@ -49,6 +50,12 @@ DEFAULT_IMAGE_GROUP_NAME = "生图专用-bot创建"
 # 生图密钥名（bot创建）。与审核密钥「电商视频合规」是两把不同的 Key。
 IMAGE_KEY_NAME = "生图专用"
 REVIEW_KEY_NAME = "电商视频合规"
+IMAGE_KEY_FAILED = "生图密钥没有创建成功，请稍后再试。审核功能不受影响。"
+IMAGE_KEY_DENIED = "当前账号还不能绑定生图分组，请联系管理员。审核功能不受影响。"
+IMAGE_KEY_AMBIGUOUS = "当前账号有多把「生图专用」密钥，无法确定使用哪一把。没有新建密钥。"
+IMAGE_KEY_HIDDEN = "密钥「生图专用」已存在，但列表没有返回可用内容。不会改用审核密钥。没有新建密钥。"
+_KEY_LOCKS: dict[str, threading.Lock] = {}
+_KEY_LOCKS_GUARD = threading.Lock()
 IMAGE_PRICE_CENTS = 10
 IMAGE_GENERATIONS_URL = "https://token4u.cc/v1/images/generations"
 IMAGE_GENERATIONS_PATH = "/images/generations"
@@ -142,6 +149,35 @@ def candidate_models() -> tuple[str, ...]:
 def image_group_name() -> str:
     text = os.environ.get("EVC_ADMIN_IMAGE_GROUP_NAME", "").strip()
     return text or DEFAULT_IMAGE_GROUP_NAME
+
+
+def image_group_id() -> int:
+    """生图密钥绑定的分组编号。默认取环境变量，未配置时为 16。"""
+    raw = os.environ.get("EVC_ADMIN_IMAGE_GROUP_ID", "16").strip()
+    if not raw.isdigit() or int(raw) <= 0:
+        raise DomainError(400, "生图分组编号配置不正确，没有新建密钥。")
+    return int(raw)
+
+
+def image_key_idempotency(email: str, group_id: int) -> str:
+    identity = f"evc-admin-image-key:{email.strip().lower()}:{group_id}".encode()
+    return hashlib.sha256(identity).hexdigest()[:32]
+
+
+def image_key_failure(status: int) -> str:
+    if status in {401, 403}:
+        return IMAGE_KEY_DENIED
+    return IMAGE_KEY_FAILED
+
+
+def _key_lock(email: str) -> threading.Lock:
+    identity = email.strip().lower()
+    with _KEY_LOCKS_GUARD:
+        lock = _KEY_LOCKS.get(identity)
+        if lock is None:
+            lock = threading.Lock()
+            _KEY_LOCKS[identity] = lock
+        return lock
 
 
 def image_pricing_metadata() -> dict:
@@ -445,14 +481,19 @@ def _extract_key(data: object) -> str:
     return ""
 
 
-def create_or_find_image_key(base_url: str, access_token: str, group_id: int, email: str) -> str:
-    """用当前用户令牌幂等创建生图专钥。列回时必须同时匹配名称和分组，避免拿到审核钥。"""
+def create_or_find_image_key(
+    base_url: str,
+    access_token: str,
+    group_id: int,
+    email: str,
+    remembered: str = "",
+) -> str:
+    """用当前用户令牌列出或创建「生图专用」。同一邮箱和分组只发一次创建。"""
     if group_id <= 0:
         raise DomainError(400, "生图分组无效")
-    idem = hashlib.sha256(f"evc-admin-image-key:{email}:{group_id}".encode()).hexdigest()[:32]
     headers = {
         "Authorization": f"Bearer {access_token}",
-        "Idempotency-Key": idem,
+        "Idempotency-Key": image_key_idempotency(email, group_id),
         "User-Agent": "evc-admin/0.1.2",
         "Accept": "application/json",
     }
@@ -461,28 +502,39 @@ def create_or_find_image_key(base_url: str, access_token: str, group_id: int, em
         "User-Agent": "evc-admin/0.1.2",
         "Accept": "application/json",
     }
-    with _http_client(httpx.Timeout(20.0, connect=10.0)) as client:
-        listing = client.get(
-            f"{base_url.rstrip('/')}/keys",
-            headers=list_headers,
-            params={"page": 1, "page_size": 100},
-        )
-        if listing.status_code in (401, 403):
-            raise DomainError(401, "登录已失效，请重新登录后再试")
-        key = _key_from_list(listing, group_id)
-        if not key:
+    with _key_lock(email):
+        with _http_client(httpx.Timeout(20.0, connect=10.0)) as client:
+            listing = client.get(
+                f"{base_url.rstrip('/')}/keys",
+                headers=list_headers,
+                params={"page": 1, "page_size": 100},
+            )
+            if listing.status_code in (401, 403):
+                raise DomainError(401, IMAGE_KEY_DENIED)
+            key = _key_from_list(listing, group_id, remembered)
+            if key:
+                return key
             response = client.post(
                 f"{base_url.rstrip('/')}/keys",
                 headers=headers,
                 json={"name": IMAGE_KEY_NAME, "group_id": group_id},
             )
             if response.status_code in (401, 403):
-                raise DomainError(401, "登录已失效，请重新登录后再试")
+                log.warning("image key was not issued")
+                raise DomainError(response.status_code, IMAGE_KEY_DENIED)
             if response.status_code < 400:
                 key = _extract_key(_unwrap(response))
-        if key:
-            return key
-    raise DomainError(502, "没有拿到生图密钥。请重新登录后再试。不会改用审核密钥。")
+            if not key:
+                again = client.get(
+                    f"{base_url.rstrip('/')}/keys",
+                    headers=list_headers,
+                    params={"page": 1, "page_size": 100},
+                )
+                key = _key_from_list(again, group_id, remembered)
+            if key:
+                return key
+    log.warning("image key was not issued")
+    raise DomainError(502, image_key_failure(502))
 
 
 def _key_items(response: httpx.Response) -> list[dict]:
@@ -501,21 +553,36 @@ def _key_items(response: httpx.Response) -> list[dict]:
     return [item for item in items if isinstance(item, dict)]
 
 
-def _key_from_list(response: httpx.Response, group_id: int) -> str:
-    for item in _key_items(response):
+def _named_image_items(items: list[dict]) -> list[dict]:
+    named: list[dict] = []
+    for item in items:
         name = str(item.get("name") or "").strip()
-        # 审核钥即使挂在同一个分组编号上也不取，避免把「电商视频合规」当成生图钥。
         if name == REVIEW_KEY_NAME or name != IMAGE_KEY_NAME:
             continue
+        named.append(item)
+    return named
+
+
+def _key_from_list(response: httpx.Response, group_id: int, remembered: str = "") -> str:
+    named = _named_image_items(_key_items(response))
+    if not named:
+        return ""
+    on_group = []
+    for item in named:
         try:
-            if int(item.get("group_id") or 0) != group_id:
-                continue
+            gid = int(item.get("group_id") or 0)
         except (TypeError, ValueError):
-            continue
-        found = _extract_key(item)
-        if found:
-            return found
-    return ""
+            gid = 0
+        if gid == group_id:
+            on_group.append(item)
+    pool = on_group or (named if len(named) == 1 else [])
+    if not pool:
+        raise DomainError(409, IMAGE_KEY_AMBIGUOUS)
+    pool.sort(key=lambda item: int(item.get("id") or 0))
+    found = _extract_key(pool[0]) or remembered.strip()
+    if not found:
+        raise DomainError(409, IMAGE_KEY_HIDDEN)
+    return found
 
 
 def _access_token(db: Session, member: Member) -> str:
@@ -544,25 +611,25 @@ def describe_image_group(db: Session, member: Member) -> tuple[dict | None, str]
 
 
 def ensure_member_image_key(db: Session, member: Member) -> tuple[dict, str]:
-    """确认专组并取得当前用户自己的生图钥。不读写审核钥 relay_api_key。"""
+    """确认当前用户自己的生图钥。不读写审核钥 relay_api_key。"""
     from admin_app.relay import base_url_of
 
     token = _access_token(db, member)
     if not token:
-        _group, reason = describe_image_group(db, member)
-        raise DomainError(403, reason)
+        raise DomainError(403, "当前账号没有中转站登录态，无法创建生图密钥。请重新登录后再试。不会改用审核密钥。")
     try:
         groups = auth_relay.available_groups(token)
     except auth_relay.RelayLoginError as exc:
         raise DomainError(exc.status if 400 <= exc.status <= 599 else 502, "无法确认当前账号的生图分组，请重新登录后再试。") from exc
-    group = resolve_image_group(groups, name=image_group_name())
-    group_id = int(group["id"])
-    existing = str(member.relay_image_api_key or "").strip()
-    if existing:
-        return group, existing
-    key = create_or_find_image_key(base_url_of(db), token, group_id, member.email)
-    member.relay_image_api_key = key
-    db.commit()
+    try:
+        group = resolve_image_group(groups, name=image_group_name())
+    except DomainError:
+        group = {"id": image_group_id(), "name": image_group_name()}
+    remembered = str(member.relay_image_api_key or "").strip()
+    key = create_or_find_image_key(base_url_of(db), token, image_group_id(), member.email, remembered)
+    if remembered != key:
+        member.relay_image_api_key = key
+        db.commit()
     return group, key
 
 

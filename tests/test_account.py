@@ -44,6 +44,11 @@ class Upstream:
         self.creates = 0
         self.create_body: dict | None = None
         self.create_key_header = ""
+        self.image_creates = 0
+        self.image_create_body: dict | None = None
+        self.image_idempotency = ""
+        self.image_create_failure: tuple[int, str, str] | None = None
+        self.existing_image_keys: list[dict] = []
         self.group_updates: list[dict] = []
         self.updated_key_ids: list[str] = []
         self.verbs: list[str] = []
@@ -123,6 +128,23 @@ class Upstream:
             return envelope(self.groups)
         if path.endswith("/keys") and request.method == "GET":
             return envelope({"items": self._keys(), "total": 1, "page": 1, "page_size": 100, "pages": 1})
+        if path.endswith("/keys") and request.method == "POST" and body.get("name") == "生图专用":
+            self.image_creates += 1
+            self.image_create_body = body
+            self.image_idempotency = request.headers.get("idempotency-key", "")
+            if self.image_create_failure is not None:
+                status, reason, message = self.image_create_failure
+                return failure(status, reason, message)
+            created = {
+                "id": 16,
+                "name": "生图专用",
+                "key": "sk-image-account-key-1616",
+                "status": "active",
+                "ip_whitelist": [],
+                "group_id": body.get("group_id"),
+            }
+            self.created_items.append(created)
+            return envelope(created)
         if path.endswith("/keys") and request.method == "POST":
             self.creates += 1
             self.create_body = body
@@ -305,7 +327,8 @@ class Upstream:
         else:
             base = []
         seen = {item.get("id") for item in base}
-        return base + [item for item in self.created_items if item.get("id") not in seen]
+        extra = self.existing_image_keys + [item for item in self.created_items if item.get("id") not in seen]
+        return base + extra
 
 
 def attach(upstream: Upstream) -> None:
@@ -917,3 +940,104 @@ def test_login_lasts_seven_days_and_remembers_the_email():
         assert expired.json()["remembered_email"] == EMAIL
         assert manager._settings.get("relay_access_token") in (None, "")
         assert manager._settings.get("last_login_email") == EMAIL
+
+
+IMAGE_SECRET = "sk-image-account-key-1616"
+IMAGE_LEAK = "sk-image-leak-must-not-show"
+
+
+def test_login_creates_one_image_key_and_reuses_it(monkeypatch):
+    monkeypatch.delenv("EVC_ADMIN_IMAGE_GROUP_ID", raising=False)
+    upstream = Upstream()
+    with TestClient(create_app()) as client:
+        attach(upstream)
+        body = login(client)
+        assert body["message"] == "已登录"
+        assert body["settings"]["account_logged_in"] is True
+        assert upstream.image_creates == 1
+        assert upstream.image_create_body == {"name": "生图专用", "group_id": 16}
+        assert upstream.create_body == {"name": "电商视频合规", "group_id": TARGET_GROUP_ID}
+        assert IMAGE_SECRET not in json.dumps(body, ensure_ascii=False)
+        assert get_manager()._settings["relay_image_api_key"] == IMAGE_SECRET
+        header = upstream.image_idempotency
+        login(client)
+        assert upstream.image_creates == 1
+        assert upstream.creates == 1
+        assert upstream.image_idempotency == header
+
+
+def test_existing_image_key_is_not_created_again(monkeypatch):
+    monkeypatch.delenv("EVC_ADMIN_IMAGE_GROUP_ID", raising=False)
+    upstream = Upstream()
+    upstream.existing_image_keys = [
+        {"id": 4, "name": "生图专用", "key": IMAGE_SECRET, "group_id": 16, "status": "active", "ip_whitelist": []}
+    ]
+    with TestClient(create_app()) as client:
+        attach(upstream)
+        body = login(client)
+        assert body["message"] == "已登录"
+        assert upstream.image_creates == 0
+        assert upstream.create_body == {"name": "电商视频合规", "group_id": TARGET_GROUP_ID}
+        assert get_manager()._settings["relay_image_api_key"] == IMAGE_SECRET
+        assert IMAGE_SECRET not in json.dumps(body, ensure_ascii=False)
+
+
+def test_image_key_failure_does_not_block_login_or_review(monkeypatch, caplog):
+    import logging
+
+    monkeypatch.delenv("EVC_ADMIN_IMAGE_GROUP_ID", raising=False)
+    upstream = Upstream()
+    upstream.image_create_failure = (500, "UPSTREAM", IMAGE_LEAK)
+    with TestClient(create_app()) as client:
+        attach(upstream)
+        with caplog.at_level(logging.DEBUG):
+            body = login(client)
+        assert body["settings"]["account_logged_in"] is True
+        assert body["settings"]["has_api_key"] is True
+        assert "生图密钥没有创建成功" in body["message"]
+        assert "审核功能不受影响" in body["message"]
+        text = json.dumps(body, ensure_ascii=False)
+        assert IMAGE_LEAK not in text
+        assert IMAGE_LEAK not in caplog.text
+        assert get_manager()._settings["relay_api_key"] == RELAY_KEY
+        assert get_manager()._settings.get("relay_image_api_key") in (None, "")
+        assert upstream.image_creates == 1
+        assert upstream.create_body["name"] == "电商视频合规"
+
+
+def test_ambiguous_image_keys_are_not_duplicated(monkeypatch):
+    monkeypatch.delenv("EVC_ADMIN_IMAGE_GROUP_ID", raising=False)
+    upstream = Upstream()
+    upstream.existing_image_keys = [
+        {"id": 4, "name": "生图专用", "key": IMAGE_SECRET, "group_id": 9, "status": "active"},
+        {"id": 5, "name": "生图专用", "key": "sk-image-other-key-2222", "group_id": 8, "status": "active"},
+    ]
+    with TestClient(create_app()) as client:
+        attach(upstream)
+        body = login(client)
+        assert body["settings"]["account_logged_in"] is True
+        assert body["settings"]["has_api_key"] is True
+        assert "没有新建密钥" in body["message"]
+        assert upstream.image_creates == 0
+        assert IMAGE_SECRET not in json.dumps(body, ensure_ascii=False)
+
+
+def test_concurrent_image_key_ensure_posts_once(monkeypatch):
+    import asyncio
+
+    monkeypatch.delenv("EVC_ADMIN_IMAGE_GROUP_ID", raising=False)
+    upstream = Upstream()
+    with TestClient(create_app()) as client:
+        attach(upstream)
+        login(client)
+        manager = get_manager()
+        manager._settings.pop("relay_image_api_key", None)
+        upstream.created_items = [item for item in upstream.created_items if item.get("name") != "生图专用"]
+        upstream.image_creates = 0
+
+        async def both() -> None:
+            await asyncio.gather(manager.ensure_image_key(), manager.ensure_image_key())
+
+        asyncio.run(both())
+        assert upstream.image_creates == 1
+        assert manager._settings["relay_image_api_key"] == IMAGE_SECRET
