@@ -94,11 +94,41 @@ def ffmpeg_available() -> bool:
     return True
 
 
+def ffmpeg_threads() -> int:
+    """获取 ffmpeg 线程数限制。
+
+    优先使用环境变量 EVC_FFMPEG_THREADS（必须是正整数），
+    否则使用 max(1, min(4, (os.cpu_count() or 2) // 2))
+    """
+    env_val = os.environ.get("EVC_FFMPEG_THREADS", "").strip()
+    if env_val:
+        try:
+            val = int(env_val)
+            if val > 0:
+                return val
+        except ValueError:
+            pass
+    return max(1, min(4, (os.cpu_count() or 2) // 2))
+
+
+def thread_args() -> list[str]:
+    """返回 ffmpeg 线程参数。"""
+    return ["-threads", str(ffmpeg_threads())]
+
+
 def hidden_process_kwargs() -> dict[str, int]:
-    """Windows 上启动 ffmpeg 时不分配控制台，避免打包后的窗口程序弹出黑框。"""
+    """Windows 上启动 ffmpeg 时不分配控制台，避免打包后的窗口程序弹出黑框。
+
+    同时在 Windows 上降低优先级，除非 EVC_FFMPEG_LOW_PRIORITY=0。
+    """
     if sys.platform != "win32":
         return {}
-    return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+    kwargs = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+    if os.environ.get("EVC_FFMPEG_LOW_PRIORITY", "1") != "0":
+        # 按位或上 BELOW_NORMAL_PRIORITY_CLASS
+        below_normal = getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
+        kwargs["creationflags"] |= below_normal
+    return kwargs
 
 
 async def spawn_process(
@@ -106,13 +136,20 @@ async def spawn_process(
     stdout: int | None = asyncio.subprocess.PIPE,
     stderr: int | None = asyncio.subprocess.PIPE,
 ) -> asyncio.subprocess.Process:
-    return await asyncio.create_subprocess_exec(
+    proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=stdout,
         stderr=stderr,
         **hidden_process_kwargs(),
     )
+    # 非 Windows 系统上降低优先级，除非 EVC_FFMPEG_LOW_PRIORITY=0
+    if sys.platform != "win32" and os.environ.get("EVC_FFMPEG_LOW_PRIORITY", "1") != "0":
+        try:
+            os.setpriority(os.PRIO_PROCESS, proc.pid, 10)
+        except (OSError, AttributeError):
+            log.debug("设置进程优先级失败")
+    return proc
 
 
 async def _run(cmd: list[str]) -> tuple[int, str]:
@@ -334,6 +371,7 @@ async def _transcode_preview(
         "-loglevel",
         "error",
         "-y",
+        *thread_args(),
         "-i",
         str(source),
         "-vf",
@@ -357,7 +395,7 @@ async def _transcode_preview(
         cmd.extend(["-c:a", "aac", "-b:a", "128k"])
     else:
         cmd.append("-an")
-    cmd.append(str(dest))
+    cmd.extend([*thread_args(), str(dest)])
     if cancel.is_set():
         raise FFmpegError("预览已取消")
     proc = await spawn_process(*cmd, stdout=asyncio.subprocess.DEVNULL)
@@ -467,6 +505,7 @@ async def extract_frames(
         "error",
         "-nostdin",
         "-y",
+        *thread_args(),
         "-i",
         str(video),
         "-map",
@@ -479,6 +518,7 @@ async def extract_frames(
         str(int(jpeg_q)),
         "-start_number",
         "1",
+        *thread_args(),
         pattern,
     ]
     proc = await spawn_process(*cmd, stdout=asyncio.subprocess.DEVNULL)
@@ -574,10 +614,11 @@ async def extract_one_frame(
         "error",
         "-nostdin",
         "-y",
-        "-i",
-        str(video),
         "-ss",
         f"{start:.3f}",
+        *thread_args(),
+        "-i",
+        str(video),
         "-map",
         "0:v:0",
         "-an",
@@ -587,6 +628,7 @@ async def extract_one_frame(
         vf,
         "-q:v",
         str(int(jpeg_q)),
+        *thread_args(),
         str(dest),
     ]
     if cancel.is_set():
@@ -648,6 +690,7 @@ async def _iter_gray_frames(
         "-loglevel",
         "info",
         "-nostdin",
+        *thread_args(),
         "-i",
         str(video),
         "-map",
@@ -659,6 +702,7 @@ async def _iter_gray_frames(
         "rawvideo",
         "-pix_fmt",
         "gray",
+        *thread_args(),
         "pipe:1",
     ]
     proc = await spawn_process(*cmd)
@@ -717,7 +761,7 @@ async def scan_flashes(
         try:
             import cv2
 
-            cv2.setNumThreads(2)
+            cv2.setNumThreads(1)
             motion = MotionScanner(scanned_w, scanned_h)
         except Exception as exc:
             log.warning("运动扫描不可用，改为只按亮度比较：%s", exc)
@@ -725,14 +769,20 @@ async def scan_flashes(
     times: list[float] = []
     seen = 0
     started = time.perf_counter()
-    async for frame in _iter_gray_frames(video, scanned_w, scanned_h, cancel, times):
+
+    def process_frame(frame: bytes) -> None:
+        """像素计算放到线程里做，不占事件循环。逐帧顺序调用，不会并发。"""
+        nonlocal motion
         scanner.push(block_means(frame, scanned_w, scanned_h))
         if motion is not None:
             try:
-                await asyncio.to_thread(motion.push, bytes(frame))
+                motion.push(frame)
             except Exception as exc:
                 log.warning("运动扫描失败，改为只按亮度比较：%s", exc)
                 motion = None
+
+    async for frame in _iter_gray_frames(video, scanned_w, scanned_h, cancel, times):
+        await asyncio.to_thread(process_frame, bytes(frame))
         seen += 1
     if cancel.is_set() or seen < 3:
         return []
@@ -801,6 +851,7 @@ async def extract_source_frames(
         "error",
         "-nostdin",
         "-y",
+        *thread_args(),
         "-i",
         str(video),
         "-map",
@@ -813,6 +864,7 @@ async def extract_source_frames(
         str(int(jpeg_q)),
         "-start_number",
         "1",
+        *thread_args(),
         pattern,
     ]
     proc = await spawn_process(*cmd, stdout=asyncio.subprocess.DEVNULL)
@@ -961,6 +1013,7 @@ async def extract_audio(
         "error",
         "-nostdin",
         "-y",
+        *thread_args(),
         "-i",
         str(video),
     ]
@@ -968,7 +1021,7 @@ async def extract_audio(
         cmd.extend(["-ss", f"{start:.3f}"])
     if duration is not None and duration > 0:
         cmd.extend(["-t", f"{duration:.3f}"])
-    cmd.extend(["-vn", "-ac", "1", "-ar", "16000", *codec_args, str(dest)])
+    cmd.extend(["-vn", "-ac", "1", "-ar", "16000", *codec_args, *thread_args(), str(dest)])
     proc = await spawn_process(*cmd, stdout=asyncio.subprocess.DEVNULL)
     if on_process:
         on_process(proc)

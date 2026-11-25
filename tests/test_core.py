@@ -109,6 +109,7 @@ def test_dev_mode_resolves_ffmpeg_from_path(monkeypatch):
 
 async def test_spawn_process_hides_console_on_windows(monkeypatch):
     import app.core.ffmpeg as ffmpeg
+    import subprocess
 
     seen: dict = {}
 
@@ -119,9 +120,14 @@ async def test_spawn_process_hides_console_on_windows(monkeypatch):
 
     monkeypatch.setattr(ffmpeg.sys, "platform", "win32")
     monkeypatch.setattr(ffmpeg.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.delenv("EVC_FFMPEG_LOW_PRIORITY", raising=False)
     await ffmpeg.spawn_process("ffmpeg", "-version", stdout=asyncio.subprocess.DEVNULL)
     assert seen["args"] == ("ffmpeg", "-version")
-    assert seen["kwargs"]["creationflags"] == 0x08000000
+    # 应该包含 CREATE_NO_WINDOW 和 BELOW_NORMAL_PRIORITY_CLASS（默认启用）
+    create_no_window = 0x08000000
+    below_normal = getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
+    expected = create_no_window | below_normal
+    assert seen["kwargs"]["creationflags"] == expected
     assert seen["kwargs"]["stdin"] == asyncio.subprocess.DEVNULL
     assert seen["kwargs"]["stdout"] == asyncio.subprocess.DEVNULL
     assert seen["kwargs"]["stderr"] == asyncio.subprocess.PIPE

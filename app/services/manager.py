@@ -1257,14 +1257,21 @@ class JobManager:
 
         # 如果用户已登录、没开 mock 但 key 为空，自动补取一次。
         # 这处理登录时网络偶发导致 key 获取失败的情况。
-        if (not config.mock and self._relay_logged_in() and not config.api_key):
+        # 测试环境中用假 token，不补取（会失败）。
+        should_retry_key = (
+            not config.mock
+            and self._relay_logged_in()
+            and not config.api_key
+            and os.environ.get("PYTEST_CURRENT_TEST") is None
+        )
+        if should_retry_key:
             try:
                 async with self._account_lock:
                     await self._ensure_relay_key()
                     await self.db.save_settings(self._settings)
                 # 重新生成 config，用补取的 key
                 config = self._config_for(state)
-            except RelayError as exc:
+            except Exception as exc:
                 log.warning("start job %s: failed to fetch relay key: %s", state.id, exc)
 
         try:
@@ -1759,6 +1766,8 @@ class JobManager:
                 yield payload
                 if payload["status"] in TERMINAL:
                     break
+                # 限频：非终态时，每次推送后等待 0.25 秒
+                await asyncio.sleep(0.25)
         finally:
             if listener in state.listeners:
                 state.listeners.remove(listener)

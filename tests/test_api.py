@@ -15,6 +15,7 @@ def sign_in() -> None:
     manager = get_manager()
     manager._settings["relay_email"] = "user@example.com"
     manager._settings["relay_access_token"] = "access-token-for-tests"
+    manager._settings["relay_refresh_token"] = "refresh-token-for-tests"
 
 
 def test_windowed_mode_replaces_missing_stdio(monkeypatch, tmp_path):

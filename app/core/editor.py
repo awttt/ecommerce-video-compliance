@@ -11,7 +11,7 @@ import logging
 import re
 from pathlib import Path
 
-from app.core.ffmpeg import FFmpegError, VideoProbe, decode_bytes, resolve_bin, spawn_process
+from app.core.ffmpeg import FFmpegError, VideoProbe, decode_bytes, resolve_bin, spawn_process, thread_args
 from app.schemas import Finding, is_manual_review
 
 log = logging.getLogger(__name__)
@@ -238,12 +238,14 @@ async def detect_silences(source: Path) -> list[tuple[float, float]]:
         binary,
         "-hide_banner",
         "-nostats",
+        *thread_args(),
         "-i",
         str(source),
         "-af",
         "silencedetect=noise=-32dB:d=0.05",
         "-f",
         "null",
+        *thread_args(),
         "-",
     ]
     try:
@@ -304,6 +306,7 @@ async def _render(
         "-loglevel",
         "error",
         "-y",
+        *thread_args(),
         "-i",
         str(source),
         "-filter_complex",
@@ -325,6 +328,7 @@ async def _render(
             "yuv420p",
             "-movflags",
             "+faststart",
+            *thread_args(),
             str(output),
         ]
     )

@@ -10,6 +10,11 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
 # 扫描图长边。再小的话，价格几个字缩没了，小块均值几乎不动。
 SCAN_EDGE = 640
 BLOCK = 32
@@ -51,12 +56,8 @@ def scan_size(width: int, height: int, max_edge: int = SCAN_EDGE) -> tuple[int, 
     return scanned_w, scanned_h
 
 
-def block_means(frame: bytes, width: int, height: int, block: int = BLOCK, stride: int = STRIDE) -> list[int]:
-    """每个小块最暗、最亮各约八分之一像素的平均亮度。
-
-    整块平均会被没变的背景拉平，几个字就看不见。浅色字抬高最亮的一段，
-    深色字压低最暗的一段。边缘不足一块的也算，避免贴在角落。
-    """
+def _block_means_py(frame: bytes, width: int, height: int, block: int = BLOCK, stride: int = STRIDE) -> list[int]:
+    """纯 Python 版本的 block_means，逐块计算。"""
     if width < 2 or height < 2 or len(frame) < width * height:
         return []
     view = memoryview(frame)
@@ -82,6 +83,61 @@ def block_means(frame: bytes, width: int, height: int, block: int = BLOCK, strid
             means.append(dark)
             means.append(bright)
     return means
+
+
+def _block_means_np(frame: bytes, width: int, height: int, block: int, stride: int) -> list[int]:
+    """numpy 版。块起点都是 stride 的整数倍，所以先整体隔 stride 取样，再按块切。
+
+    完整块、下边一行、右边一列、右下角四个区域里，每块大小相同，各自一次排序。
+    """
+    sub = np.frombuffer(frame, np.uint8, width * height).reshape(height, width)[::stride, ::stride]
+    side = block // stride
+    full_rows = height // block
+    full_cols = width // block
+    rows = (height + block - 1) // block
+    cols = (width + block - 1) // block
+    row_cut = full_rows * side
+    col_cut = full_cols * side
+    out = np.zeros((rows, cols, 2), dtype=np.int64)
+    regions = (
+        (slice(0, full_rows), slice(0, full_cols), sub[:row_cut, :col_cut]),
+        (slice(full_rows, rows), slice(0, full_cols), sub[row_cut:, :col_cut]),
+        (slice(0, full_rows), slice(full_cols, cols), sub[:row_cut, col_cut:]),
+        (slice(full_rows, rows), slice(full_cols, cols), sub[row_cut:, col_cut:]),
+    )
+    for row_span, col_span, area in regions:
+        count_r = row_span.stop - row_span.start
+        count_c = col_span.stop - col_span.start
+        if count_r <= 0 or count_c <= 0 or area.size == 0:
+            continue
+        block_h = area.shape[0] // count_r
+        block_w = area.shape[1] // count_c
+        samples = (
+            area.reshape(count_r, block_h, count_c, block_w)
+            .transpose(0, 2, 1, 3)
+            .reshape(count_r, count_c, block_h * block_w)
+        )
+        size = block_h * block_w
+        take = max(1, size // 8)
+        # 只要最暗、最亮各 take 个的和，不用整段排序。
+        samples = np.partition(samples, sorted({take - 1, size - take}), axis=-1)
+        out[row_span, col_span, 0] = samples[..., :take].sum(axis=-1, dtype=np.int64) // take
+        out[row_span, col_span, 1] = samples[..., -take:].sum(axis=-1, dtype=np.int64) // take
+    return out.reshape(-1).tolist()
+
+
+def block_means(frame: bytes, width: int, height: int, block: int = BLOCK, stride: int = STRIDE) -> list[int]:
+    """每个小块最暗、最亮各约八分之一像素的平均亮度。
+
+    整块平均会被没变的背景拉平，几个字就看不见。浅色字抬高最亮的一段，
+    深色字压低最暗的一段。边缘不足一块的也算，避免贴在角落。
+    装了 numpy 时用向量化版本，结果与纯 Python 版逐个相等。
+    """
+    if width < 2 or height < 2 or len(frame) < width * height:
+        return []
+    if np is not None and stride > 0 and block % stride == 0:
+        return _block_means_np(frame, width, height, block, stride)
+    return _block_means_py(frame, width, height, block, stride)
 
 
 def _block_flashed(before: int, middle: int, after: int) -> bool:

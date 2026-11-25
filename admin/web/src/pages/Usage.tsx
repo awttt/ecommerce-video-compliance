@@ -1,15 +1,17 @@
-import { useQuery } from "@tanstack/react-query";
-import { Alert, Card, Col, Progress, Row, Select, Space, Statistic, Table } from "antd";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Alert, App as AntApp, Card, Col, Progress, Row, Select, Space, Statistic, Table } from "antd";
 import { useState } from "react";
 import { useOutletContext } from "react-router-dom";
-import { api } from "../api";
+import { ApiError, api } from "../api";
 import { money, tokenText } from "../format";
-import type { Tenant, UsageMember, UsageSummary, User } from "../types";
+import type { RelayReport, Tenant, UsageMember, UsageSummary, User } from "../types";
 import { PageHead, PageLoading, RefreshButton } from "../ui";
 
 export function Usage() {
   const user = useOutletContext<User>();
   const platform = user.role === "platform_admin";
+  const { message } = AntApp.useApp();
+  const client = useQueryClient();
   const [tenantId, setTenantId] = useState<number | undefined>(undefined);
   const tenants = useQuery({
     queryKey: ["tenants"],
@@ -25,10 +27,32 @@ export function Usage() {
     queryKey: ["usage-members", scope ?? "all"],
     queryFn: () => api<UsageMember[]>(scope ? `/v1/usage/by-member?tenant_id=${scope}` : "/v1/usage/by-member"),
   });
+  const sync = useMutation({
+    mutationFn: () =>
+      api<RelayReport>(scope ? `/v1/relay/sync?tenant_id=${scope}` : "/v1/relay/sync", { method: "POST" }),
+    onSuccess: (data) => {
+      const failed = data.failed?.length ?? 0;
+      if (failed) message.warning(`已刷新，还有 ${failed} 人暂时没读到，请再点一次`);
+      else message.success("已同步额度和用量");
+      void client.invalidateQueries({ queryKey: ["usage"] });
+      void client.invalidateQueries({ queryKey: ["usage-members"] });
+      void client.invalidateQueries({ queryKey: ["members"] });
+      void client.invalidateQueries({ queryKey: ["tenants"] });
+      void client.invalidateQueries({ queryKey: ["quota-summary"] });
+      void client.invalidateQueries({ queryKey: ["relay-status"] });
+      void client.invalidateQueries({ queryKey: ["dashboard"] });
+      void client.invalidateQueries({ queryKey: ["consumption"] });
+    },
+    onError: (error) => message.error(error instanceof ApiError ? error.message : "同步失败"),
+  });
   const data = summary.data;
   const loading = summary.isLoading || members.isLoading || (platform && tenants.isLoading);
-  const refreshing = summary.isFetching || members.isFetching || (platform && tenants.isFetching);
+  const refreshing = sync.isPending || summary.isFetching || members.isFetching || (platform && tenants.isFetching);
   const reload = () => {
+    if (user.relay_live) {
+      sync.mutate();
+      return;
+    }
     void summary.refetch();
     void members.refetch();
     if (platform) void tenants.refetch();
@@ -127,7 +151,7 @@ export function Usage() {
           type="warning"
           showIcon
           message="口径提醒"
-          description="usage_logs.cost 已经是按分组倍率算完的实际扣费，不能再乘一次倍率，否则对账对不上。定时刷新还没挂到进程里，当前数字来自已经落下的快照。"
+          description="点「刷新数据」会从账号服务读取最新余额和用量，再更新这里的数字。usage_logs.cost 已经是按分组倍率算完的实际扣费，不能再乘一次倍率。定时刷新还没挂到进程里。"
         />
       ) : null}
     </>
