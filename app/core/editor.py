@@ -11,7 +11,15 @@ import logging
 import re
 from pathlib import Path
 
-from app.core.ffmpeg import FFmpegError, VideoProbe, decode_bytes, resolve_bin, spawn_process, thread_args
+from app.core.ffmpeg import (
+    FFmpegError,
+    VideoProbe,
+    decode_bytes,
+    ffmpeg_slot,
+    resolve_bin,
+    spawn_process,
+    thread_args,
+)
 from app.schemas import Finding, is_manual_review
 
 log = logging.getLogger(__name__)
@@ -249,8 +257,9 @@ async def detect_silences(source: Path) -> list[tuple[float, float]]:
         "-",
     ]
     try:
-        proc = await spawn_process(*cmd, stdout=asyncio.subprocess.DEVNULL)
-        _, stderr = await proc.communicate()
+        async with ffmpeg_slot():
+            proc = await spawn_process(*cmd, stdout=asyncio.subprocess.DEVNULL)
+            _, stderr = await proc.communicate()
     except OSError:
         log.warning("silence detect failed to start")
         return []
@@ -332,8 +341,9 @@ async def _render(
             str(output),
         ]
     )
-    proc = await spawn_process(*cmd, stdout=asyncio.subprocess.DEVNULL)
-    _, stderr = await proc.communicate()
+    async with ffmpeg_slot():
+        proc = await spawn_process(*cmd, stdout=asyncio.subprocess.DEVNULL)
+        _, stderr = await proc.communicate()
     if proc.returncode != 0:
         detail = decode_bytes(stderr).strip()
         raise FFmpegError(detail or f"ffmpeg 剪辑失败，退出码 {proc.returncode}")

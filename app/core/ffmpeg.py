@@ -11,9 +11,12 @@ import shutil
 import subprocess
 import sys
 import time
+import weakref
 from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
 
+from app.core.cpu_limits import default_thread_count, slot_count, thread_override
 from app.core.flash import (
     FlashSpan,
     FlashScanner,
@@ -97,18 +100,13 @@ def ffmpeg_available() -> bool:
 def ffmpeg_threads() -> int:
     """获取 ffmpeg 线程数限制。
 
-    优先使用环境变量 EVC_FFMPEG_THREADS（必须是正整数），
-    否则使用 max(1, min(4, (os.cpu_count() or 2) // 2))
+    优先使用环境变量 EVC_FFMPEG_THREADS（1 到 8，再大也按 8）。
+    缺省、0、负数或无法解析时固定为 2。
     """
-    env_val = os.environ.get("EVC_FFMPEG_THREADS", "").strip()
-    if env_val:
-        try:
-            val = int(env_val)
-            if val > 0:
-                return val
-        except ValueError:
-            pass
-    return max(1, min(4, (os.cpu_count() or 2) // 2))
+    override = thread_override()
+    if override is not None:
+        return override
+    return default_thread_count()
 
 
 def thread_args() -> list[str]:
@@ -152,7 +150,39 @@ async def spawn_process(
     return proc
 
 
-async def _run(cmd: list[str]) -> tuple[int, str]:
+_slots_by_loop: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _ffmpeg_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    sem = _slots_by_loop.get(loop)
+    if sem is None:
+        sem = asyncio.Semaphore(slot_count())
+        _slots_by_loop[loop] = sem
+    return sem
+
+
+@asynccontextmanager
+async def ffmpeg_slot():
+    """限制同时运行的 ffmpeg。名额按当前事件循环记，读 EVC_FFMPEG_SLOTS。"""
+    sem = _ffmpeg_semaphore()
+    await sem.acquire()
+    try:
+        yield
+    finally:
+        sem.release()
+
+
+async def _run(cmd: list[str], *, slot: bool = False) -> tuple[int, str]:
+    if not slot:
+        return await _communicate(cmd)
+    async with ffmpeg_slot():
+        return await _communicate(cmd)
+
+
+async def _communicate(cmd: list[str]) -> tuple[int, str]:
     proc = await spawn_process(*cmd)
     stdout, stderr = await proc.communicate()
     text = decode_bytes(stdout) + decode_bytes(stderr)
@@ -398,38 +428,39 @@ async def _transcode_preview(
     cmd.extend([*thread_args(), str(dest)])
     if cancel.is_set():
         raise FFmpegError("预览已取消")
-    proc = await spawn_process(*cmd, stdout=asyncio.subprocess.DEVNULL)
-    if on_process is not None:
-        on_process(proc)
-    if cancel.is_set():
-        if proc.returncode is None:
-            proc.kill()
-        await proc.wait()
-        raise FFmpegError("预览已取消")
+    async with ffmpeg_slot():
+        proc = await spawn_process(*cmd, stdout=asyncio.subprocess.DEVNULL)
+        if on_process is not None:
+            on_process(proc)
+        if cancel.is_set():
+            if proc.returncode is None:
+                proc.kill()
+            await proc.wait()
+            raise FFmpegError("预览已取消")
 
-    async def _stop_when_cancelled() -> None:
-        await cancel.wait()
-        if proc.returncode is None:
-            proc.kill()
+        async def _stop_when_cancelled() -> None:
+            await cancel.wait()
+            if proc.returncode is None:
+                proc.kill()
 
-    watcher = asyncio.create_task(_stop_when_cancelled())
-    try:
-        _, stderr = await proc.communicate()
-    except asyncio.CancelledError:
-        if proc.returncode is None:
-            proc.kill()
-        raise
-    finally:
-        watcher.cancel()
+        watcher = asyncio.create_task(_stop_when_cancelled())
         try:
-            await watcher
+            _, stderr = await proc.communicate()
         except asyncio.CancelledError:
-            pass
-    if cancel.is_set():
-        raise FFmpegError("预览已取消")
-    if proc.returncode != 0:
-        detail = decode_bytes(stderr).strip()
-        raise FFmpegError(detail or "预览转码失败")
+            if proc.returncode is None:
+                proc.kill()
+            raise
+        finally:
+            watcher.cancel()
+            try:
+                await watcher
+            except asyncio.CancelledError:
+                pass
+        if cancel.is_set():
+            raise FFmpegError("预览已取消")
+        if proc.returncode != 0:
+            detail = decode_bytes(stderr).strip()
+            raise FFmpegError(detail or "预览转码失败")
 
 
 def _frame_indexes(directory: Path) -> list[tuple[int, Path]]:
@@ -521,59 +552,60 @@ async def extract_frames(
         *thread_args(),
         pattern,
     ]
-    proc = await spawn_process(*cmd, stdout=asyncio.subprocess.DEVNULL)
-    if on_process:
-        on_process(proc)
-    stderr_chunks: list[bytes] = []
-
-    async def read_stderr() -> None:
-        assert proc.stderr is not None
-        while True:
-            line = await proc.stderr.readline()
-            if not line:
-                break
-            stderr_chunks.append(line)
-            if sum(len(chunk) for chunk in stderr_chunks) > 16_384:
-                stderr_chunks.pop(0)
-
-    reader = asyncio.create_task(read_stderr())
-    yielded: set[int] = set()
-    try:
-        while True:
-            if cancel.is_set():
-                break
-            finished = proc.returncode is not None
-            for frame in ready_frames(
-                directory,
-                finished=finished,
-                yielded=yielded,
-                fps=fps,
-                duration=duration,
-            ):
-                yielded.add(frame.index)
-                yield frame
-            if finished:
-                break
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=0.2)
-            except TimeoutError:
-                continue
-        if cancel.is_set() and proc.returncode is None:
-            proc.kill()
-            await proc.wait()
-        elif proc.returncode not in (0, None):
-            detail = decode_bytes(b"".join(stderr_chunks)).strip()
-            raise FFmpegError(detail or f"ffmpeg 抽帧失败，退出码 {proc.returncode}")
-    finally:
-        if proc.returncode is None:
-            proc.kill()
-            try:
-                await proc.wait()
-            except ProcessLookupError:
-                pass
+    async with ffmpeg_slot():
+        proc = await spawn_process(*cmd, stdout=asyncio.subprocess.DEVNULL)
         if on_process:
-            on_process(None)
-        await reader
+            on_process(proc)
+        stderr_chunks: list[bytes] = []
+
+        async def read_stderr() -> None:
+            assert proc.stderr is not None
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    break
+                stderr_chunks.append(line)
+                if sum(len(chunk) for chunk in stderr_chunks) > 16_384:
+                    stderr_chunks.pop(0)
+
+        reader = asyncio.create_task(read_stderr())
+        yielded: set[int] = set()
+        try:
+            while True:
+                if cancel.is_set():
+                    break
+                finished = proc.returncode is not None
+                for frame in ready_frames(
+                    directory,
+                    finished=finished,
+                    yielded=yielded,
+                    fps=fps,
+                    duration=duration,
+                ):
+                    yielded.add(frame.index)
+                    yield frame
+                if finished:
+                    break
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=0.2)
+                except TimeoutError:
+                    continue
+            if cancel.is_set() and proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            elif proc.returncode not in (0, None):
+                detail = decode_bytes(b"".join(stderr_chunks)).strip()
+                raise FFmpegError(detail or f"ffmpeg 抽帧失败，退出码 {proc.returncode}")
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+                try:
+                    await proc.wait()
+                except ProcessLookupError:
+                    pass
+            if on_process:
+                on_process(None)
+            await reader
 
 
 async def extract_one_frame(
@@ -633,28 +665,29 @@ async def extract_one_frame(
     ]
     if cancel.is_set():
         raise FFmpegError("已取消")
-    proc = await spawn_process(*cmd, stdout=asyncio.subprocess.DEVNULL)
-    if on_process:
-        on_process(proc)
-    try:
-        stderr = await proc.stderr.read() if proc.stderr is not None else b""
-        code = await proc.wait()
-        if cancel.is_set():
-            raise FFmpegError("已取消")
-        if code != 0 or not dest.is_file() or dest.stat().st_size <= 0:
-            detail = decode_bytes(stderr).strip()
-            raise FFmpegError(detail or f"ffmpeg 抽帧失败，退出码 {code}")
-    finally:
-        if proc.returncode is None:
-            proc.kill()
-            try:
-                await proc.wait()
-            except ProcessLookupError:
-                pass
+    async with ffmpeg_slot():
+        proc = await spawn_process(*cmd, stdout=asyncio.subprocess.DEVNULL)
         if on_process:
-            on_process(None)
-        if cancel.is_set() and dest.exists():
-            dest.unlink(missing_ok=True)
+            on_process(proc)
+        try:
+            stderr = await proc.stderr.read() if proc.stderr is not None else b""
+            code = await proc.wait()
+            if cancel.is_set():
+                raise FFmpegError("已取消")
+            if code != 0 or not dest.is_file() or dest.stat().st_size <= 0:
+                detail = decode_bytes(stderr).strip()
+                raise FFmpegError(detail or f"ffmpeg 抽帧失败，退出码 {code}")
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+                try:
+                    await proc.wait()
+                except ProcessLookupError:
+                    pass
+            if on_process:
+                on_process(None)
+            if cancel.is_set() and dest.exists():
+                dest.unlink(missing_ok=True)
     return Frame(index=index, start_sec=start, end_sec=end, path=str(dest))
 
 
@@ -705,36 +738,37 @@ async def _iter_gray_frames(
         *thread_args(),
         "pipe:1",
     ]
-    proc = await spawn_process(*cmd)
-    assert proc.stdout is not None
-    assert proc.stderr is not None
+    async with ffmpeg_slot():
+        proc = await spawn_process(*cmd)
+        assert proc.stdout is not None
+        assert proc.stderr is not None
 
-    async def read_stderr() -> None:
-        while True:
-            line = await proc.stderr.readline()
-            if not line:
-                break
-            for match in _PTS_TIME.finditer(decode_bytes(line)):
+        async def read_stderr() -> None:
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    break
+                for match in _PTS_TIME.finditer(decode_bytes(line)):
+                    try:
+                        times.append(float(match.group(1)))
+                    except ValueError:
+                        continue
+
+        reader = asyncio.create_task(read_stderr())
+        try:
+            while not cancel.is_set():
+                frame = await _read_exact(proc.stdout, frame_bytes, cancel)
+                if len(frame) != frame_bytes:
+                    break
+                yield frame
+        finally:
+            if proc.returncode is None:
+                proc.kill()
                 try:
-                    times.append(float(match.group(1)))
-                except ValueError:
-                    continue
-
-    reader = asyncio.create_task(read_stderr())
-    try:
-        while not cancel.is_set():
-            frame = await _read_exact(proc.stdout, frame_bytes, cancel)
-            if len(frame) != frame_bytes:
-                break
-            yield frame
-    finally:
-        if proc.returncode is None:
-            proc.kill()
-            try:
-                await proc.wait()
-            except ProcessLookupError:
-                pass
-        await reader
+                    await proc.wait()
+                except ProcessLookupError:
+                    pass
+            await reader
 
 
 async def scan_flashes(
@@ -867,48 +901,49 @@ async def extract_source_frames(
         *thread_args(),
         pattern,
     ]
-    proc = await spawn_process(*cmd, stdout=asyncio.subprocess.DEVNULL)
-    if on_process:
-        on_process(proc)
-    stderr_chunks: list[bytes] = []
+    async with ffmpeg_slot():
+        proc = await spawn_process(*cmd, stdout=asyncio.subprocess.DEVNULL)
+        if on_process:
+            on_process(proc)
+        stderr_chunks: list[bytes] = []
 
-    async def read_stderr() -> None:
-        assert proc.stderr is not None
-        while True:
-            line = await proc.stderr.readline()
-            if not line:
-                break
-            stderr_chunks.append(line)
-            if sum(len(chunk) for chunk in stderr_chunks) > 16_384:
-                stderr_chunks.pop(0)
+        async def read_stderr() -> None:
+            assert proc.stderr is not None
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    break
+                stderr_chunks.append(line)
+                if sum(len(chunk) for chunk in stderr_chunks) > 16_384:
+                    stderr_chunks.pop(0)
 
-    reader = asyncio.create_task(read_stderr())
-    try:
-        while proc.returncode is None:
+        reader = asyncio.create_task(read_stderr())
+        try:
+            while proc.returncode is None:
+                if cancel.is_set():
+                    break
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=0.3)
+                except TimeoutError:
+                    continue
             if cancel.is_set():
-                break
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=0.3)
-            except TimeoutError:
-                continue
-        if cancel.is_set():
+                if proc.returncode is None:
+                    proc.kill()
+                    await proc.wait()
+                return []
+            if proc.returncode not in (0, None):
+                detail = decode_bytes(b"".join(stderr_chunks)).strip()
+                raise FFmpegError(detail or f"ffmpeg 抽帧失败，退出码 {proc.returncode}")
+        finally:
             if proc.returncode is None:
                 proc.kill()
-                await proc.wait()
-            return []
-        if proc.returncode not in (0, None):
-            detail = decode_bytes(b"".join(stderr_chunks)).strip()
-            raise FFmpegError(detail or f"ffmpeg 抽帧失败，退出码 {proc.returncode}")
-    finally:
-        if proc.returncode is None:
-            proc.kill()
-            try:
-                await proc.wait()
-            except ProcessLookupError:
-                pass
-        if on_process:
-            on_process(None)
-        await reader
+                try:
+                    await proc.wait()
+                except ProcessLookupError:
+                    pass
+            if on_process:
+                on_process(None)
+            await reader
     frames: list[Frame] = []
     for offset, span in enumerate(ordered, start=1):
         path = directory / f"flash_{offset:06d}.jpg"
@@ -943,6 +978,7 @@ async def extract_strip(video: Path, directory: Path) -> int:
         "error",
         "-nostdin",
         "-y",
+        *thread_args(),
         "-i",
         str(video),
         "-map",
@@ -955,9 +991,10 @@ async def extract_strip(video: Path, directory: Path) -> int:
         "8",
         "-start_number",
         "0",
+        *thread_args(),
         pattern,
     ]
-    code, text = await _run(cmd)
+    code, text = await _run(cmd, slot=True)
     files = [path for path in directory.glob("strip_*.jpg") if path.stat().st_size > 0]
     if code != 0 or not files:
         for path in directory.glob("strip_*.jpg"):
@@ -1022,46 +1059,47 @@ async def extract_audio(
     if duration is not None and duration > 0:
         cmd.extend(["-t", f"{duration:.3f}"])
     cmd.extend(["-vn", "-ac", "1", "-ar", "16000", *codec_args, *thread_args(), str(dest)])
-    proc = await spawn_process(*cmd, stdout=asyncio.subprocess.DEVNULL)
-    if on_process:
-        on_process(proc)
-    stderr_chunks: list[bytes] = []
-
-    async def read_stderr() -> None:
-        assert proc.stderr is not None
-        while True:
-            line = await proc.stderr.readline()
-            if not line:
-                break
-            stderr_chunks.append(line)
-            if sum(len(chunk) for chunk in stderr_chunks) > 16_384:
-                stderr_chunks.pop(0)
-
-    reader = asyncio.create_task(read_stderr())
-    try:
-        while proc.returncode is None:
-            if cancel.is_set():
-                break
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=0.3)
-            except TimeoutError:
-                continue
-        if cancel.is_set() and proc.returncode is None:
-            proc.kill()
-            await proc.wait()
-            return
-        if proc.returncode not in (0, None):
-            detail = decode_bytes(b"".join(stderr_chunks)).strip()
-            raise FFmpegError(detail or f"ffmpeg 提取音频失败，退出码 {proc.returncode}")
-        if not dest.is_file() or dest.stat().st_size <= 0:
-            raise FFmpegError("没有提取到音频")
-    finally:
-        if proc.returncode is None:
-            proc.kill()
-            try:
-                await proc.wait()
-            except ProcessLookupError:
-                pass
+    async with ffmpeg_slot():
+        proc = await spawn_process(*cmd, stdout=asyncio.subprocess.DEVNULL)
         if on_process:
-            on_process(None)
-        await reader
+            on_process(proc)
+        stderr_chunks: list[bytes] = []
+
+        async def read_stderr() -> None:
+            assert proc.stderr is not None
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    break
+                stderr_chunks.append(line)
+                if sum(len(chunk) for chunk in stderr_chunks) > 16_384:
+                    stderr_chunks.pop(0)
+
+        reader = asyncio.create_task(read_stderr())
+        try:
+            while proc.returncode is None:
+                if cancel.is_set():
+                    break
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=0.3)
+                except TimeoutError:
+                    continue
+            if cancel.is_set() and proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+                return
+            if proc.returncode not in (0, None):
+                detail = decode_bytes(b"".join(stderr_chunks)).strip()
+                raise FFmpegError(detail or f"ffmpeg 提取音频失败，退出码 {proc.returncode}")
+            if not dest.is_file() or dest.stat().st_size <= 0:
+                raise FFmpegError("没有提取到音频")
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+                try:
+                    await proc.wait()
+                except ProcessLookupError:
+                    pass
+            if on_process:
+                on_process(None)
+            await reader
