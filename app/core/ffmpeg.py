@@ -16,7 +16,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from app.core.cpu_limits import slot_count, thread_override
+from app.core.cpu_limits import default_thread_count, slot_count, thread_override
 from app.core.flash import (
     FlashSpan,
     FlashScanner,
@@ -101,12 +101,12 @@ def ffmpeg_threads() -> int:
     """获取 ffmpeg 线程数限制。
 
     优先使用环境变量 EVC_FFMPEG_THREADS（1 到 8，再大也按 8）。
-    缺省、0、负数或无法解析时使用 max(1, min(4, (os.cpu_count() or 2) // 2))。
+    缺省、0、负数或无法解析时固定为 2。
     """
     override = thread_override()
     if override is not None:
         return override
-    return max(1, min(4, (os.cpu_count() or 2) // 2))
+    return default_thread_count()
 
 
 def thread_args() -> list[str]:

@@ -16,7 +16,7 @@ NATIVE_THREAD_VARS = (
 def thread_override() -> int | None:
     """EVC_FFMPEG_THREADS。1 到 8 原样返回，大于 8 记为 8。
 
-    缺省、0、负数和无法解析时返回 None，由调用方用默认公式。
+    缺省、0、负数和无法解析时返回 None，由调用方用默认值 2。
     """
     raw = os.environ.get("EVC_FFMPEG_THREADS", "").strip()
     if not raw:
@@ -31,8 +31,8 @@ def thread_override() -> int | None:
 
 
 def default_thread_count() -> int:
-    """和 ffmpeg 默认公式相同：不超过 4，也不超过一半逻辑核。"""
-    return max(1, min(4, (os.cpu_count() or 2) // 2))
+    """ffmpeg 和数值库的默认线程数。固定为 2，不随 CPU 核数变化。"""
+    return 2
 
 
 def slot_count() -> int:

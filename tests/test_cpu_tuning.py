@@ -66,26 +66,20 @@ class TestFfmpegThreads:
         assert ffmpeg_threads() == 3
 
     def test_ffmpeg_threads_env_invalid(self, monkeypatch):
-        """设置无效的 EVC_FFMPEG_THREADS 环境变量，回到默认公式。"""
+        """设置无效的 EVC_FFMPEG_THREADS 环境变量，回到默认 2。"""
         monkeypatch.setenv("EVC_FFMPEG_THREADS", "invalid")
-        result = ffmpeg_threads()
-        # 应该使用默认公式：max(1, min(4, (cpu_count or 2) // 2))
-        assert result >= 1
-        assert result <= 4
+        assert ffmpeg_threads() == 2
 
     def test_ffmpeg_threads_env_zero(self, monkeypatch):
-        """设置 0，应该回到默认公式。"""
+        """设置 0，应该回到默认 2。"""
         monkeypatch.setenv("EVC_FFMPEG_THREADS", "0")
-        result = ffmpeg_threads()
-        assert result >= 1
-        assert result <= 4
+        assert ffmpeg_threads() == 2
 
     def test_ffmpeg_threads_no_env(self, monkeypatch):
-        """不设置环境变量，使用默认公式。"""
+        """不设置环境变量时固定为 2，不随 CPU 核数变化。"""
         monkeypatch.delenv("EVC_FFMPEG_THREADS", raising=False)
-        result = ffmpeg_threads()
-        assert result >= 1
-        assert result <= 4
+        monkeypatch.setattr(os, "cpu_count", lambda: 12)
+        assert ffmpeg_threads() == 2
 
     def test_ffmpeg_threads_env_large(self, monkeypatch):
         """超过 8 的环境变量按 8 封顶，不再原样放开。"""
@@ -93,10 +87,9 @@ class TestFfmpegThreads:
         assert ffmpeg_threads() == 8
 
     def test_ffmpeg_threads_env_negative_uses_default(self, monkeypatch):
-        """负数无法作为线程数，回到默认公式。"""
+        """负数无法作为线程数，回到默认 2。"""
         monkeypatch.setenv("EVC_FFMPEG_THREADS", "-3")
-        result = ffmpeg_threads()
-        assert 1 <= result <= 4
+        assert ffmpeg_threads() == 2
 
 
 class TestHiddenProcessKwargs:
