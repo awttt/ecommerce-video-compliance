@@ -401,3 +401,100 @@ def test_recharge_info_and_order_paths_reach_tools_without_admin_token(dist):
         ("GET", "http://tools.test/api/account/recharge/orders/7", None),
         ("POST", "http://tools.test/api/account/recharge/orders/7/cancel", None),
     ]
+
+
+def test_update_proxy_only_forwards_refresh(dist):
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["url"] = str(request.url)
+        return httpx.Response(
+            200,
+            json={"current": "0.1.5", "latest": "0.1.5", "available": False, "check_state": "current"},
+        )
+
+    app = create_console_app(
+        cloud="https://admin.example.test",
+        dist=dist,
+        transport=httpx.MockTransport(handler),
+        tools_url="http://tools.test/",
+    )
+    with TestClient(app) as client:
+        response = client.get("/api/update?refresh=1&evil=1")
+
+    assert response.status_code == 200
+    assert seen["method"] == "GET"
+    assert seen["url"] == "http://tools.test/api/update?refresh=1"
+    assert response.json()["check_state"] == "current"
+
+
+def test_update_proxy_forwards_install(dist):
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["url"] = str(request.url)
+        return httpx.Response(200, json={"current": "0.1.5", "latest": "0.1.6", "phase": "downloading"})
+
+    app = create_console_app(
+        cloud="https://admin.example.test",
+        dist=dist,
+        transport=httpx.MockTransport(handler),
+        tools_url="http://tools.test/",
+    )
+    with TestClient(app) as client:
+        response = client.post("/api/update")
+
+    assert response.status_code == 200
+    assert seen["method"] == "POST"
+    assert seen["url"] == "http://tools.test/api/update"
+    assert response.json()["phase"] == "downloading"
+
+
+def test_update_proxy_passes_install_refusal_through(dist):
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"detail": "只有 Windows 安装版可以在这里更新"})
+
+    app = create_console_app(
+        cloud="https://admin.example.test",
+        dist=dist,
+        transport=httpx.MockTransport(handler),
+        tools_url="http://tools.test/",
+    )
+    with TestClient(app) as client:
+        response = client.post("/api/update")
+
+    assert response.status_code == 409
+    assert "Windows" in response.json()["detail"]
+
+
+def test_update_proxy_needs_the_desktop_shell(dist):
+    app = create_console_app(
+        cloud="https://admin.example.test",
+        dist=dist,
+        transport=httpx.MockTransport(lambda r: httpx.Response(500)),
+        tools_url="",
+    )
+    with TestClient(app) as client:
+        response = client.get("/api/update")
+
+    assert response.status_code == 404
+    assert "只能在桌面客户端" in response.json()["detail"]
+
+
+def test_update_proxy_reports_tools_error(dist):
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no route")
+
+    app = create_console_app(
+        cloud="https://admin.example.test",
+        dist=dist,
+        transport=httpx.MockTransport(handler),
+        tools_url="http://tools.test/",
+    )
+    with TestClient(app) as client:
+        response = client.get("/api/update?refresh=1")
+
+    assert response.status_code == 502
+    assert "连不上本机服务" in response.json()["detail"]

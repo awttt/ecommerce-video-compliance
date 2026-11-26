@@ -158,7 +158,8 @@ class UpdateCenter:
         try:
             release = self._fetch_manifest()
         except Exception:
-            logger.info("检查更新失败")
+            # 带上异常细节，否则日志里只剩一句「检查更新失败」，分不清是 404 还是网络不通。
+            logger.info("检查更新失败", exc_info=True)
             with self._lock:
                 if self._phase in {"downloading", "installing"}:
                     self._check_state = "busy"

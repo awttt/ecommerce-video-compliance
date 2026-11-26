@@ -1,11 +1,10 @@
 import { PictureOutlined, PlusOutlined } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, App as AntApp, Button, Empty, Input, Modal, Popconfirm, Popover, Select, Switch } from "antd";
+import { Alert, App as AntApp, Button, Empty, Input, Modal, Popconfirm, Popover, Select } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import { ApiError } from "../api";
 import { deleteImageJob, downloadImageFile, generateImage, getImageStatus, listImageJobs } from "../imageApi";
 import {
-  estimateCostYuan,
   generationBlockReason,
   imageDownloadName,
   modelOptionLabel,
@@ -284,6 +283,7 @@ export function ImageWorkbench() {
               {references.length > 0 ? `参考图 ${references.length}` : "添加参考图"}
             </Button>
           </Popover>
+          <span className="ig-label">尺寸</span>
           <SizePicker
             label={sizeLabel}
             sizes={sizes}
@@ -293,6 +293,7 @@ export function ImageWorkbench() {
             disabled={!status?.group_ready || generate.isPending}
             onChange={onSizeChange}
           />
+          <span className="ig-label">质量</span>
           <QualityPicker
             label={qualityLabel}
             options={qualities}
@@ -315,21 +316,6 @@ export function ImageWorkbench() {
 
         {disabledReason && !generate.isPending ? <p className="ig-wait">{disabledReason}</p> : null}
 
-        {status ? (
-          <p className="ig-group">
-            <span>模型分组</span>：{status.group_name || "跟随用户分组"}
-            {status.pricing ? ` · 预估 ¥${estimateCostYuan(status.pricing, count)}（${count} 张 × ${status.pricing.display}）` : ""}
-          </p>
-        ) : null}
-        {status && !status.mock ? (
-          <p className="ig-group">真实生图：点击生成会请求网关并按实账扣费。</p>
-        ) : null}
-
-        <div className="ig-async">
-          <Switch size="small" checked={false} disabled />
-          <label>{status?.async_generation.reason || "异步生成（避免网关超时）"}</label>
-          <span className="ig-shortcut">Ctrl/⌘ + Enter</span>
-        </div>
         {generate.error ? (
           <Alert
             type="error"

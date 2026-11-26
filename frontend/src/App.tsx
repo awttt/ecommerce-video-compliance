@@ -48,8 +48,6 @@ import {
   downloadBatchExport,
   downloadExport,
   getHealth,
-  getUpdate,
-  startUpdate,
   getJob,
   getQueue,
   getSettings,
@@ -59,14 +57,12 @@ import {
   retryFailedFrames,
   retrySpeech,
   openDir,
-  type AppUpdate,
   planEdit,
   renderEdit,
   saveCuts,
   saveSettings,
 } from "./api";
 import { LoginPage, RegisterPage } from "./AuthPages";
-import { manualUpdateNotice } from "./updateNotice";
 import { mcpAgentPrompt, mcpEndpoint } from "./mcpPrompt";
 import { showTestMenu } from "./testMenu";
 import { CutTimeline } from "./CutTimeline";
@@ -244,70 +240,9 @@ function accountKeyNotice(text: string): string {
   return "";
 }
 
-const UPDATE_CHECK_MS = 4 * 60 * 60 * 1000;
-const UPDATE_CHECKED_ON = "evc-update-checked-on";
-const UPDATE_CHECKED_AT = "evc-update-checked-at";
-
-function localDay(now = new Date()): string {
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  return `${now.getFullYear()}-${month}-${day}`;
-}
-
-function updateCheckDue(now = Date.now()): boolean {
-  const today = localDay(new Date(now));
-  if ((localStorage.getItem(UPDATE_CHECKED_ON) ?? "") !== today) return true;
-  const lastAt = Number(localStorage.getItem(UPDATE_CHECKED_AT) || "0");
-  return !Number.isFinite(lastAt) || lastAt <= 0 || now - lastAt >= UPDATE_CHECK_MS;
-}
-
-function markUpdateChecked(now = Date.now()) {
-  localStorage.setItem(UPDATE_CHECKED_ON, localDay(new Date(now)));
-  localStorage.setItem(UPDATE_CHECKED_AT, String(now));
-}
-
-function UpdateBanner({
-  info,
-  starting,
-  onStart,
-}: {
-  info: AppUpdate | null;
-  starting: boolean;
-  onStart: () => void;
-}) {
-  if (!info) return null;
-  const working = info.phase === "downloading" || info.phase === "installing" || info.phase === "error";
-  if (!info.available && !working) return null;
-  const percent = info.total > 0 ? Math.min(99, Math.round((info.received / info.total) * 100)) : 0;
-  let text = `发现新版本 ${info.latest}，当前是 ${info.current}。更新会下载安装包并覆盖本机程序，已保存的审核数据会保留。`;
-  if (!info.can_apply) text = `发现新版本 ${info.latest}。只有 Windows 安装版可以在这里直接更新。`;
-  if (info.phase === "downloading") text = info.message || "正在下载安装包";
-  if (info.phase === "installing") text = info.message || "正在安装，程序会关闭并在完成后重新打开";
-  if (info.phase === "error") text = info.message || "更新失败，请稍后再试";
-  return (
-    <Alert
-      style={{ marginBottom: 12 }}
-      type={info.phase === "error" ? "error" : "info"}
-      showIcon
-      message={text}
-      action={
-        info.can_apply && info.phase !== "installing" ? (
-          <Button size="small" type="primary" loading={starting || info.phase === "downloading"} onClick={onStart}>
-            {info.phase === "error" ? "重试" : "立即更新"}
-          </Button>
-        ) : null
-      }
-      description={info.phase === "downloading" ? <Progress percent={percent} size="small" /> : null}
-    />
-  );
-}
-
 export function Shell() {
   const { message } = AntApp.useApp();
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [updateInfo, setUpdateInfo] = useState<AppUpdate | null>(null);
-  const [updateStarting, setUpdateStarting] = useState(false);
-  const [updateChecking, setUpdateChecking] = useState(false);
   const [keyNotice, setKeyNotice] = useState("");
   const [authPage, setAuthPage] = useState<"login" | "register">("login");
   const [bootError, setBootError] = useState("");
@@ -424,77 +359,6 @@ export function Shell() {
       message.error(error.message);
     });
   }, [message]);
-
-  useEffect(() => {
-    let stop = false;
-    let timer = 0;
-    const pull = () => {
-      getUpdate(true)
-        .then((info) => {
-          if (stop) return;
-          setUpdateInfo(info);
-          if (info.check_state === "current" || info.check_state === "available") markUpdateChecked();
-        })
-        .catch(() => undefined);
-    };
-    const arm = (delay: number) => {
-      timer = window.setTimeout(() => {
-        pull();
-        arm(UPDATE_CHECK_MS);
-      }, delay);
-    };
-    // 当天第一次打开查一次。程序一直开着时，从上次检查起每 4 小时再查一次。
-    if (updateCheckDue()) {
-      pull();
-      arm(UPDATE_CHECK_MS);
-    } else {
-      const lastAt = Number(localStorage.getItem(UPDATE_CHECKED_AT) || "0");
-      arm(Math.max(0, UPDATE_CHECK_MS - (Date.now() - lastAt)));
-    }
-    return () => {
-      stop = true;
-      window.clearTimeout(timer);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (updateInfo?.phase !== "downloading" && updateInfo?.phase !== "installing") return undefined;
-    const timer = window.setInterval(() => {
-      getUpdate(false).then(setUpdateInfo).catch(() => undefined);
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [updateInfo?.phase]);
-
-  async function checkForUpdate() {
-    if (updateChecking) return;
-    setUpdateChecking(true);
-    try {
-      const info = await getUpdate(true);
-      setUpdateInfo(info);
-      if (info.check_state === "current" || info.check_state === "available") markUpdateChecked();
-      const notice = manualUpdateNotice(info);
-      if (!notice.text) return;
-      if (notice.level === "success") message.success(notice.text);
-      else if (notice.level === "error") message.error(notice.text);
-      else if (notice.level === "warning") message.warning(notice.text);
-      else message.info(notice.text);
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : "暂时无法检查更新，不能确定是不是最新版本");
-    } finally {
-      setUpdateChecking(false);
-    }
-  }
-
-  async function beginUpdate() {
-    setUpdateStarting(true);
-    try {
-      setUpdateInfo(await startUpdate());
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : "更新失败");
-    } finally {
-      setUpdateStarting(false);
-    }
-  }
 
   const loggedIn = Boolean(settings?.account_logged_in);
   useEffect(() => {
@@ -1109,11 +973,6 @@ export function Shell() {
     );
   }
 
-  const updateBanner = (
-    <UpdateBanner info={updateInfo} starting={updateStarting} onStart={() => void beginUpdate()} />
-  );
-  const aboutNotice = updateInfo ? manualUpdateNotice(updateInfo) : null;
-
   if (!settings.account_logged_in) {
     return authPage === "register" ? (
       <RegisterPage
@@ -1170,7 +1029,6 @@ export function Shell() {
         </nav>
       </header>
       <div className="page">
-        {updateBanner}
         <Card className="workspace">
           <div className="workspace-top">
             <section className="workspace-upload">
@@ -1783,31 +1641,6 @@ export function Shell() {
           <Form.Item label="录音识别引擎" name="asr_engine" rules={[{ required: true }]} extra="口播使用腾讯云录音文件识别大模型 2.0。">
             <Select options={ASR_ENGINE_OPTIONS} />
           </Form.Item>
-          <div className="about-update" style={{ marginTop: 8, paddingTop: 12, borderTop: "1px solid #f0f0f0" }}>
-            <Text strong>关于与更新</Text>
-            <Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 8 }}>
-              当前版本 {updateInfo?.current || "—"}。检查只读取更新清单，不会下载、安装或重启。
-            </Paragraph>
-            {aboutNotice?.text ? (
-              <Paragraph type={aboutNotice.level === "error" ? "danger" : "secondary"} style={{ marginBottom: 8 }}>
-                {aboutNotice.text}
-              </Paragraph>
-            ) : null}
-            <Space>
-              <Button onClick={() => void checkForUpdate()} loading={updateChecking}>
-                检查更新
-              </Button>
-              {aboutNotice?.confirmInstall ? (
-                <Button
-                  type="primary"
-                  onClick={() => void beginUpdate()}
-                  loading={updateStarting || updateInfo?.phase === "downloading"}
-                >
-                  立即更新
-                </Button>
-              ) : null}
-            </Space>
-          </div>
         </Form>
       </Drawer>
 

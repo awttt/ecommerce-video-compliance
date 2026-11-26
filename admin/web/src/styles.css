@@ -1291,7 +1291,6 @@ body,
 
 .ig-heading p,
 .ig-note,
-.ig-group,
 .ig-wait,
 .ig-pop-note {
   margin: 4px 0 0;
@@ -1370,7 +1369,6 @@ body,
 .ig-chips,
 .ig-pop-chips,
 .ig-toolbar,
-.ig-async,
 .ig-history-bar,
 .ig-tile-actions {
   display: flex;
@@ -1419,6 +1417,11 @@ body,
   width: 100%;
 }
 
+.ig-label {
+  color: #737373;
+  font-size: 12px;
+}
+
 .ig-count {
   width: 88px;
 }
@@ -1427,23 +1430,9 @@ body,
   width: 100%;
 }
 
-.ig-group,
 .ig-wait,
 .ig-note {
   margin: 0;
-  font-size: 12px;
-}
-
-.ig-group span {
-  font-weight: 600;
-}
-
-.ig-async {
-  justify-content: space-between;
-}
-
-.ig-shortcut {
-  color: #737373;
   font-size: 12px;
 }
 

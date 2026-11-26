@@ -198,6 +198,41 @@ def create_console_app(
         except Exception:
             return JSONResponse({"detail": "本机服务响应格式错误"}, status_code=502)
 
+    @app.get("/api/update", include_in_schema=False)
+    async def update_status(request: Request) -> Response:
+        """工具端的更新检查。只读更新清单，不下载、不安装，也不重启。"""
+        if not tools_url:
+            return JSONResponse({"detail": "只能在桌面客户端里检查更新"}, status_code=404)
+        params = {key: value for key, value in request.query_params.items() if key == "refresh"}
+        try:
+            async with httpx.AsyncClient(transport=transport, timeout=_PROXY_TIMEOUT) as client:
+                upstream = await client.get(f"{tools_url.rstrip('/')}/api/update", params=params)
+        except httpx.HTTPError as exc:
+            logger.warning("转发更新检查失败：%s", exc)
+            return JSONResponse({"detail": "连不上本机服务，请重启程序后再试"}, status_code=502)
+        return Response(
+            content=upstream.content,
+            status_code=upstream.status_code,
+            media_type="application/json",
+        )
+
+    @app.post("/api/update", include_in_schema=False)
+    async def update_apply() -> Response:
+        """开始下载并安装。能不能装由工具端判断，控制台只负责转发。"""
+        if not tools_url:
+            return JSONResponse({"detail": "只能在桌面客户端里更新"}, status_code=404)
+        try:
+            async with httpx.AsyncClient(transport=transport, timeout=_PROXY_TIMEOUT) as client:
+                upstream = await client.post(f"{tools_url.rstrip('/')}/api/update")
+        except httpx.HTTPError as exc:
+            logger.warning("转发更新安装失败：%s", exc)
+            return JSONResponse({"detail": "连不上本机服务，请重启程序后再试"}, status_code=502)
+        return Response(
+            content=upstream.content,
+            status_code=upstream.status_code,
+            media_type="application/json",
+        )
+
     @app.api_route("/api/account/recharge", methods=["GET"], include_in_schema=False)
     @app.api_route(
         "/api/account/recharge/{path:path}",

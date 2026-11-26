@@ -8,18 +8,21 @@ import {
   PictureOutlined,
   LogoutOutlined,
   SettingOutlined,
+  SyncOutlined,
   TeamOutlined,
   UserOutlined,
   BankOutlined,
   WalletOutlined,
 } from "@ant-design/icons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AutoComplete, Avatar, Badge, Dropdown, Input, Layout, Menu, Spin, Tag, Typography } from "antd";
+import { AutoComplete, Avatar, Badge, Dropdown, Input, Layout, Menu, message, Spin, Tag, Typography } from "antd";
 import type { MenuProps } from "antd";
 import { useEffect, useState, type ReactNode } from "react";
 import { Navigate, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { api, clearSession } from "./api";
 import { toolMenuEntries } from "./toolNav";
+import { readUpdate, startUpdate, updateNotice, updateVisible, type UpdateStatus } from "./updateMenu";
+import { UpdateBanner } from "./UpdateBanner";
 import type { Role, User } from "./types";
 
 const { Header, Sider, Content } = Layout;
@@ -58,6 +61,8 @@ export function AdminLayout() {
   const client = useQueryClient();
   const [collapsed, setCollapsed] = useState(() => location.pathname === "/tools");
   const [searchText, setSearchText] = useState("");
+  const [update, setUpdate] = useState<UpdateStatus | null>(null);
+  const [updateStarting, setUpdateStarting] = useState(false);
   const me = useQuery({ queryKey: ["me"], queryFn: () => api<User>("/v1/auth/me") });
   const search = useQuery({
     queryKey: ["search", searchText],
@@ -69,6 +74,30 @@ export function AdminLayout() {
     if (location.pathname === "/tools") setCollapsed(true);
   }, [location.pathname]);
 
+  // 只有桌面客户端里才有工具端，启动时读一次更新状态，所有页面都能看到提示条。
+  useEffect(() => {
+    if (!window.__EVC_TOOLS_URL__) return undefined;
+    let stop = false;
+    readUpdate(true)
+      .then((info) => {
+        if (!stop) setUpdate(info);
+      })
+      .catch(() => undefined);
+    return () => {
+      stop = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (update?.phase !== "downloading" && update?.phase !== "installing") return undefined;
+    const timer = window.setInterval(() => {
+      readUpdate()
+        .then(setUpdate)
+        .catch(() => undefined);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [update?.phase]);
+
   if (me.isLoading) {
     return (
       <div className="login-screen">
@@ -77,6 +106,35 @@ export function AdminLayout() {
     );
   }
   if (!me.data) return <Navigate to="/login" replace />;
+
+  async function checkUpdate() {
+    const close = message.loading("正在检查更新", 0);
+    try {
+      const info = await readUpdate(true);
+      setUpdate(info);
+      const notice = updateNotice(info);
+      close();
+      if (!notice) return;
+      if (notice.level === "success") message.success(notice.text);
+      else if (notice.level === "error") message.error(notice.text);
+      else if (notice.level === "warning") message.warning(notice.text);
+      else message.info(notice.text);
+    } catch (error) {
+      close();
+      message.error(error instanceof Error ? error.message : "暂时无法检查更新");
+    }
+  }
+
+  async function beginUpdate() {
+    setUpdateStarting(true);
+    try {
+      setUpdate(await startUpdate());
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "更新失败");
+    } finally {
+      setUpdateStarting(false);
+    }
+  }
 
   const user = me.data;
   const toolsUrl = window.__EVC_TOOLS_URL__ ?? "";
@@ -183,8 +241,18 @@ export function AdminLayout() {
                 { key: "name", label: `${user.name} · ${user.role_label}`, disabled: true },
                 { key: "account", icon: <UserOutlined />, label: "个人设置" },
                 { key: "logout", icon: <LogoutOutlined />, label: "退出登录" },
+                ...(toolsUrl
+                  ? [
+                      { key: "update", icon: <SyncOutlined />, label: "检查更新" },
+                      { key: "version", label: `版本号 ${update?.current || "—"}`, disabled: true },
+                    ]
+                  : []),
               ],
               onClick: ({ key }) => {
+                if (key === "update") {
+                  void checkUpdate();
+                  return;
+                }
                 if (key === "account") {
                   navigate("/account");
                   return;
@@ -201,6 +269,11 @@ export function AdminLayout() {
             <Avatar style={{ background: "#e6f4ff", color: "#1677ff", cursor: "pointer" }}>{user.name.slice(0, 1)}</Avatar>
           </Dropdown>
         </Header>
+        {updateVisible(update) ? (
+          <div style={{ padding: "12px 24px 0" }}>
+            <UpdateBanner info={update} starting={updateStarting} onStart={() => void beginUpdate()} />
+          </div>
+        ) : null}
         <Content style={{ padding: location.pathname === "/tools" ? 0 : 24 }}>
           {location.pathname === "/tools" ? (
             <Outlet context={user} />
