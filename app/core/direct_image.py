@@ -18,13 +18,12 @@ import httpx
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response, Response
 
+from app.core.relay import IMAGE_KEY_AMBIGUOUS, IMAGE_KEY_FAILED, IMAGE_KEY_HIDDEN, IMAGE_KEY_NAME
 from app.core.relay import KEY_NAME as REVIEW_KEY_NAME
-from app.core.relay import RelayClient, RelayError
+from app.core.relay import RelayError, image_group_id
 from app.paths import data_dir
 
 log = logging.getLogger(__name__)
-
-IMAGE_KEY_NAME = "生图专用"
 GENERATIONS_URL = "https://token4u.cc/v1/images/generations"
 EDITS_URL = "https://token4u.cc/v1/images/edits"
 _ALLOWED_SIZES = {"auto", "1024x1024", "1024x1536", "1536x1024", "2048x1152", "3840x2160"}
@@ -50,27 +49,52 @@ _FILE_NAME = re.compile(r"^image-[1-4]\.(?:png|jpe?g|webp)$")
 _MEDIA = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
 
 
-def image_key_from_items(items: list[dict]) -> tuple[str, dict]:
-    """只取名称完全是「生图专用」的密钥。审核钥即使同名分组也不用。"""
-    matched = [
+def _item_secret(item: dict) -> str:
+    for field in ("key", "api_key", "secret"):
+        secret = str(item.get(field) or "").strip()
+        if secret:
+            return secret
+    return ""
+
+
+def _item_group_id(item: dict) -> int:
+    try:
+        return int(item.get("group_id") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def choose_image_key(items: list[dict], group_id: int, remembered: str = "") -> tuple[str, dict] | None:
+    """按名称「生图专用」复用已有密钥。没有则返回 None，调用方再创建。不读取审核密钥。"""
+    named = [
         item
         for item in items
         if str(item.get("name") or "").strip() == IMAGE_KEY_NAME
         and str(item.get("name") or "").strip() != REVIEW_KEY_NAME
     ]
-    if not matched:
-        raise LookupError(f"当前账号没有密钥「{IMAGE_KEY_NAME}」。不会改用审核密钥。")
-    if len(matched) > 1:
-        raise LookupError(f"密钥列表里有多个「{IMAGE_KEY_NAME}」，无法确定使用哪一个。")
-    item = matched[0]
-    secret = ""
-    for field in ("key", "api_key", "secret"):
-        secret = str(item.get(field) or "").strip()
-        if secret:
-            break
+    if not named:
+        return None
+    on_group = [item for item in named if _item_group_id(item) == group_id]
+    pool = on_group or (named if len(named) == 1 else [])
+    if not pool:
+        raise LookupError(IMAGE_KEY_AMBIGUOUS)
+    pool.sort(key=lambda item: int(item.get("id") or 0))
+    item = pool[0]
+    secret = _item_secret(item) or remembered.strip()
     if not secret:
-        raise LookupError(f"密钥「{IMAGE_KEY_NAME}」已存在，但列表没有返回可用内容。不会改用审核密钥。")
+        raise LookupError(IMAGE_KEY_HIDDEN)
     return secret, item
+
+
+def image_key_from_items(items: list[dict]) -> tuple[str, dict]:
+    """只取名称完全是「生图专用」的密钥。审核钥即使同名分组也不用。"""
+    try:
+        chosen = choose_image_key(items, image_group_id())
+    except RelayError as exc:
+        raise LookupError(str(exc)) from exc
+    if chosen is None:
+        raise LookupError(f"当前账号没有密钥「{IMAGE_KEY_NAME}」。不会改用审核密钥。")
+    return chosen
 
 
 def _status_payload(*, ready: bool, reason: str, group_name: str) -> dict:
@@ -137,11 +161,18 @@ async def _listed_models(secret: str) -> list[str]:
 async def _account_key() -> tuple[str, dict]:
     from app.services.manager import get_manager
 
-    access, _refresh = get_manager().relay_credentials()
+    manager = get_manager()
+    access, _refresh = manager.relay_credentials()
     if not access:
         raise PermissionError("请先登录后再生图")
-    items = await RelayClient().list_keys(access)
-    return image_key_from_items(items)
+    try:
+        await manager.ensure_image_key()
+    except RelayError as exc:
+        raise LookupError(str(exc)) from None
+    secret = str(manager._settings.get("relay_image_api_key") or "").strip()
+    if not secret:
+        raise LookupError(IMAGE_KEY_FAILED)
+    return secret, {"name": IMAGE_KEY_NAME, "group_name": IMAGE_KEY_NAME}
 
 
 def parse_reference(value: str) -> tuple[str, bytes, str]:

@@ -20,6 +20,11 @@ log = logging.getLogger(__name__)
 AUTH_ROOT = "https://token4u.cc/api/v1"
 CHAT_BASE = "https://token4u.cc/v1"
 KEY_NAME = "电商视频合规"
+IMAGE_KEY_NAME = "生图专用"
+IMAGE_KEY_FAILED = "生图密钥没有创建成功，请稍后再试。审核功能不受影响。"
+IMAGE_KEY_DENIED = "当前账号还不能绑定生图分组，请联系管理员。审核功能不受影响。"
+IMAGE_KEY_AMBIGUOUS = "当前账号有多把「生图专用」密钥，无法确定使用哪一把。没有新建密钥。"
+IMAGE_KEY_HIDDEN = "密钥「生图专用」已存在，但列表没有返回可用内容。不会改用审核密钥。没有新建密钥。"
 # 专属分组，余额计费，1.8 倍（含口播）。用户令牌只有被管理员分配后才能在可用分组里看到它。
 # 编号尚未固定，默认按名称解析；EVC_RELAY_GROUP_ID 只在名称对不上时作备用。
 DEFAULT_RELAY_GROUP_NAME = "电商审核专属-bot创建"
@@ -129,6 +134,27 @@ def relay_group_name() -> str:
     """目标分组名称。空的环境变量沿用专属分组「电商审核专属-bot创建」。"""
     text = os.environ.get("EVC_RELAY_GROUP_NAME", "").strip()
     return text or DEFAULT_RELAY_GROUP_NAME
+
+
+def image_group_id() -> int:
+    """生图密钥绑定的分组编号。默认 16，可用 EVC_ADMIN_IMAGE_GROUP_ID 覆盖。"""
+    raw = os.environ.get("EVC_ADMIN_IMAGE_GROUP_ID", "16").strip()
+    if not raw.isdigit() or int(raw) <= 0:
+        raise RelayError("生图分组编号配置不正确，没有新建密钥。", 400)
+    return int(raw)
+
+
+def image_key_idempotency(email: str, group_id: int) -> str:
+    import hashlib
+
+    identity = f"evc-admin-image-key:{email.strip().lower()}:{group_id}".encode()
+    return hashlib.sha256(identity).hexdigest()[:32]
+
+
+def image_key_failure(status: int) -> str:
+    if status in {401, 403}:
+        return IMAGE_KEY_DENIED
+    return IMAGE_KEY_FAILED
 
 
 def relay_group_id_fallback() -> int | None:
@@ -386,6 +412,17 @@ class RelayClient:
             token=token,
             json={"name": KEY_NAME, "group_id": group_id},
             headers={"Idempotency-Key": uuid.uuid4().hex},
+        )
+        return data if isinstance(data, dict) else {}
+
+    async def create_image_key(self, token: str, group_id: int, email: str) -> dict:
+        """用当前用户令牌创建「生图专用」。幂等键按邮箱和分组固定，不使用审核密钥名。"""
+        data = await self._request(
+            "POST",
+            "/keys",
+            token=token,
+            json={"name": IMAGE_KEY_NAME, "group_id": group_id},
+            headers={"Idempotency-Key": image_key_idempotency(email, group_id)},
         )
         return data if isinstance(data, dict) else {}
 

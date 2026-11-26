@@ -26,6 +26,8 @@ from app.core.relay import (
     RelayError,
     configured_model,
     groups_lookup_failed_message,
+    image_group_id,
+    image_key_failure,
     relay_group_id_fallback,
     relay_group_name,
     resolve_relay_group_id,
@@ -131,6 +133,7 @@ _RELAY_FIELDS = (
     "relay_expires_at",
     "relay_api_key",
     "relay_api_key_id",
+    "relay_image_api_key",
     "relay_balance",
     "relay_frozen_balance",
     "relay_today_cost",
@@ -535,6 +538,7 @@ class JobManager:
         self._resume = asyncio.Event()
         self._resume.set()
         self._account_lock = asyncio.Lock()
+        self._image_key_lock = asyncio.Lock()
         self.relay = RelayClient()
         self._pending_2fa: dict[str, str] | None = None
         self._stopping = False
@@ -2143,6 +2147,7 @@ class JobManager:
         if previous and previous.lower() != email.lower():
             self._settings.pop("relay_api_key", None)
             self._settings.pop("relay_api_key_id", None)
+            self._settings.pop("relay_image_api_key", None)
         self._settings["relay_email"] = email
         self._settings["last_login_email"] = email
         self._settings["relay_login_at"] = time.time()
@@ -2157,18 +2162,31 @@ class JobManager:
         self._apply_profile(user)
         self._pending_2fa = None
         await self.db.save_settings(self._settings)
+        review_note = ""
         try:
             await self._ensure_relay_key()
         except RelayError as exc:
             log.warning("picture key was not issued: %s", exc)
-            await self.db.save_settings(self._settings)
-            return f"已登录。{exc}"
+            review_note = str(exc)
+        image_note = ""
         try:
-            stats = await self._call_authed(self.relay.usage)
-            self._apply_usage(stats if isinstance(stats, dict) else {})
-        except RelayError:
-            pass
+            await self.ensure_image_key()
+        except RelayError as exc:
+            log.warning("image key was not issued")
+            image_note = str(exc)
+        if not review_note:
+            try:
+                stats = await self._call_authed(self.relay.usage)
+                self._apply_usage(stats if isinstance(stats, dict) else {})
+            except RelayError:
+                pass
         await self.db.save_settings(self._settings)
+        if review_note and image_note:
+            return f"已登录。{review_note}{image_note}"
+        if review_note:
+            return f"已登录。{review_note}"
+        if image_note:
+            return f"已登录。{image_note}"
         return "已登录"
 
     def _apply_profile(self, profile: dict) -> None:
@@ -2196,6 +2214,53 @@ class JobManager:
         """丢掉本机记下的密钥指针。中转站上的密钥保留，不删除、不改分组。"""
         self._settings.pop("relay_api_key", None)
         self._settings.pop("relay_api_key_id", None)
+
+    async def ensure_image_key(self) -> None:
+        """登录或打开生图时补齐「生图专用」。失败只抛出固定提示，不改审核密钥。"""
+        from app.core.direct_image import choose_image_key
+
+        group_id = image_group_id()
+        email = str(self._settings.get("relay_email") or "").strip().lower()
+        remembered = str(self._settings.get("relay_image_api_key") or "").strip()
+        async with self._image_key_lock:
+            listed = await self._call_authed(self.relay.list_keys)
+            if not isinstance(listed, list):
+                listed = []
+            try:
+                chosen = choose_image_key(listed, group_id, remembered)
+            except LookupError as exc:
+                raise RelayError(str(exc), 409) from None
+            if chosen is not None:
+                self._settings["relay_image_api_key"] = chosen[0]
+                return
+            try:
+                created = await self._call_authed(
+                    lambda token: self.relay.create_image_key(token, group_id, email)
+                )
+            except RelayError as exc:
+                log.warning("image key was not issued")
+                raise RelayError(image_key_failure(exc.status), exc.status) from None
+            if not isinstance(created, dict):
+                created = {}
+            secret = ""
+            for field in ("key", "api_key", "secret"):
+                secret = str(created.get(field) or "").strip()
+                if secret:
+                    break
+            if not usable_api_key(secret):
+                listed = await self._call_authed(self.relay.list_keys)
+                if not isinstance(listed, list):
+                    listed = []
+                try:
+                    chosen = choose_image_key(listed, group_id, remembered)
+                except LookupError as exc:
+                    raise RelayError(str(exc), 409) from None
+                if chosen is not None:
+                    self._settings["relay_image_api_key"] = chosen[0]
+                    return
+                log.warning("image key was not issued")
+                raise RelayError(image_key_failure(502), 502)
+            self._settings["relay_image_api_key"] = secret
 
     async def _resolve_relay_group_id(self) -> int:
         name = relay_group_name()

@@ -25,6 +25,7 @@ from admin_app.seed import DEMO_PASSWORD
 
 FLARE = "gpt-image-2.5-flare"
 GROUP_NAME = "生图专用-bot创建"
+_CREATED_IMAGE_KEYS: list[dict] = []
 IMAGE_KEY = "sk-image-user-only"
 REVIEW_KEY = "review-key-do-not-touch"
 ADMIN_KEY = "sk-admin-do-not-use"
@@ -44,6 +45,7 @@ def _client(tmp_path, monkeypatch, *, admin_key: str = ""):
         "EVC_ADMIN_IMAGE_ALLOW_UNVERIFIED_SIZES",
         "EVC_ADMIN_IMAGE_ALLOW_UNVERIFIED_QUALITY",
         "EVC_ADMIN_IMAGE_GROUP_NAME",
+        "EVC_ADMIN_IMAGE_GROUP_ID",
         "EVC_ADMIN_IMAGE_MODELS",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -56,6 +58,7 @@ def _client(tmp_path, monkeypatch, *, admin_key: str = ""):
 
     get_settings.cache_clear()
     reset_engine()
+    _CREATED_IMAGE_KEYS.clear()
     import admin_app.auth_relay as auth_relay
 
     monkeypatch.setattr(auth_relay, "login_password", _fake_login)
@@ -103,13 +106,16 @@ def _install_transport(handler) -> list[httpx.Request]:
 def _key_handler(request: httpx.Request) -> httpx.Response:
     assert request.headers.get("authorization") == "Bearer relay-test-access"
     assert request.url.path == "/api/v1/keys"
-    if request.method == "POST":
-        body = json.loads(request.content.decode())
-        assert body == {"name": "生图专用", "group_id": 42}
-        expected = hashlib.sha256(b"evc-admin-image-key:zhang@jiecheng.com:42").hexdigest()[:32]
-        assert request.headers.get("idempotency-key") == expected
-        return httpx.Response(200, json={"code": 0, "data": {"key": IMAGE_KEY}})
-    return httpx.Response(404, json={"code": 404})
+    if request.method == "GET":
+        if not _CREATED_IMAGE_KEYS:
+            return httpx.Response(404, json={"code": 404})
+        return httpx.Response(200, json={"code": 0, "data": {"items": list(_CREATED_IMAGE_KEYS)}})
+    body = json.loads(request.content.decode())
+    assert body == {"name": "生图专用", "group_id": 16}
+    expected = hashlib.sha256(b"evc-admin-image-key:zhang@jiecheng.com:16").hexdigest()[:32]
+    assert request.headers.get("idempotency-key") == expected
+    _CREATED_IMAGE_KEYS.append({"id": 1, "name": "生图专用", "group_id": 16, "key": IMAGE_KEY})
+    return httpx.Response(200, json={"code": 0, "data": {"key": IMAGE_KEY}})
 
 
 def _body(**overrides) -> dict:
@@ -225,51 +231,57 @@ def test_payload_omits_auto_size_and_quality():
 def test_status_requires_login_and_hides_secrets(tmp_path, monkeypatch):
     with _client(tmp_path, monkeypatch) as client:
         assert client.get("/v1/image-workbench/status").status_code == 401
-        _groups(monkeypatch)
-        headers = _login(client, "zhang@jiecheng.com")
-        status = client.get("/v1/image-workbench/status", headers=headers)
-        assert status.status_code == 200, status.text
-        body = status.json()
-        assert body["group_ready"] is True
-        assert body["group_name"] == GROUP_NAME
-        assert "group_id" not in body
-        assert body["mock"] is True
-        assert body["live_enabled"] is False
-        assert body["endpoint"] == {
-            "method": "POST",
-            "url": IMAGE_GENERATIONS_URL,
-            "editable": False,
-        }
-        assert body["references"]["enabled"] is False
-        assert body["async_generation"]["enabled"] is False
-        assert body["pricing"]["price_per_image"] == 0.1
-        assert "0.04" not in json.dumps(body["pricing"])
-        sizes = {item["value"]: item for item in body["sizes"]}
-        assert sizes["2048x1152"]["verified"] is True
-        assert sizes["2048x1152"]["verified_for"] == [FLARE]
-        assert "上游已验证" in sizes["2048x1152"]["note"]
-        assert "本站网关待验" in sizes["2048x1152"]["note"]
-        assert sizes["3840x2160"]["verified_for"] == [FLARE]
-        assert sizes["1024x1024"]["verified"] is False
-        assert sizes["1024x1024"]["gateway_pending"] is True
-        assert sizes["1024x1024"]["enabled"] is True
-        for blocked in ("2560x1440", "2048x2048", "2160x3840"):
-            assert sizes[blocked]["verified"] is False
-            assert sizes[blocked]["enabled"] is False
-        assert "已支持" not in json.dumps(body["sizes"])
-        models = {item["id"]: item for item in body["models"]}
-        assert models[FLARE]["selectable"] is True
-        assert models[FLARE]["ready"] is False
-        assert models[FLARE]["upstream_verified"] is True
-        assert models["gpt-image-2.5-sunburst"]["selectable"] is False
-        assert models["gpt-image-2.5-sunburst"]["ready"] is False
-        me = client.get("/v1/auth/me", headers=headers).json()
-        assert "image.workbench" in me["permissions"]
-        assert IMAGE_KEY not in status.text
-        assert REVIEW_KEY not in status.text
+        seen = _install_transport(_key_handler)
+        try:
+            _groups(monkeypatch)
+            headers = _login(client, "zhang@jiecheng.com")
+            status = client.get("/v1/image-workbench/status", headers=headers)
+            assert status.status_code == 200, status.text
+            body = status.json()
+            assert body["group_ready"] is True
+            assert body["key_ready"] is True
+            assert body["group_name"] == GROUP_NAME
+            assert "group_id" not in body
+            assert body["mock"] is True
+            assert body["live_enabled"] is False
+            assert body["endpoint"] == {
+                "method": "POST",
+                "url": IMAGE_GENERATIONS_URL,
+                "editable": False,
+            }
+            assert body["references"]["enabled"] is False
+            assert body["async_generation"]["enabled"] is False
+            assert body["pricing"]["price_per_image"] == 0.1
+            assert "0.04" not in json.dumps(body["pricing"])
+            sizes = {item["value"]: item for item in body["sizes"]}
+            assert sizes["2048x1152"]["verified"] is True
+            assert sizes["2048x1152"]["verified_for"] == [FLARE]
+            assert "上游已验证" in sizes["2048x1152"]["note"]
+            assert "本站网关待验" in sizes["2048x1152"]["note"]
+            assert sizes["3840x2160"]["verified_for"] == [FLARE]
+            assert sizes["1024x1024"]["verified"] is False
+            assert sizes["1024x1024"]["gateway_pending"] is True
+            assert sizes["1024x1024"]["enabled"] is True
+            for blocked in ("2560x1440", "2048x2048", "2160x3840"):
+                assert sizes[blocked]["verified"] is False
+                assert sizes[blocked]["enabled"] is False
+            assert "已支持" not in json.dumps(body["sizes"])
+            models = {item["id"]: item for item in body["models"]}
+            assert models[FLARE]["selectable"] is True
+            assert models[FLARE]["ready"] is False
+            assert models[FLARE]["upstream_verified"] is True
+            assert models["gpt-image-2.5-sunburst"]["selectable"] is False
+            assert models["gpt-image-2.5-sunburst"]["ready"] is False
+            me = client.get("/v1/auth/me", headers=headers).json()
+            assert "image.workbench" in me["permissions"]
+            assert IMAGE_KEY not in status.text
+            assert REVIEW_KEY not in status.text
+            assert any(request.method == "POST" for request in seen)
+        finally:
+            set_transport(None)
 
 
-def test_missing_group_is_explicit_and_does_not_create_a_key(tmp_path, monkeypatch):
+def test_missing_group_name_still_creates_the_configured_key(tmp_path, monkeypatch):
     with _client(tmp_path, monkeypatch) as client:
         seen = _install_transport(_key_handler)
         try:
@@ -277,18 +289,20 @@ def test_missing_group_is_explicit_and_does_not_create_a_key(tmp_path, monkeypat
                 monkeypatch,
                 [
                     {"id": 15, "name": "电商审核专属-bot创建", "status": "active"},
-                    {"id": 16, "name": "普通GPT", "status": "active"},
+                    {"id": 9, "name": "普通GPT", "status": "active"},
                 ],
             )
             headers = _login(client, "zhang@jiecheng.com")
             status = client.get("/v1/image-workbench/status", headers=headers)
-            assert status.status_code == 200
-            assert status.json()["group_ready"] is False
-            assert "不会改用审核分组" in status.json()["group_reason"]
-            assert all(item["selectable"] is False for item in status.json()["models"])
-            denied = client.post("/v1/image-workbench/generate", headers=headers, json=_body())
-            assert denied.status_code == 403
-            assert seen == []
+            assert status.status_code == 200, status.text
+            assert status.json()["group_ready"] is True
+            created = [request for request in seen if request.method == "POST"]
+            assert len(created) == 1
+            assert json.loads(created[0].content.decode()) == {"name": "生图专用", "group_id": 16}
+            assert "电商视频合规" not in created[0].content.decode()
+            again = client.get("/v1/image-workbench/status", headers=headers)
+            assert again.status_code == 200
+            assert len([request for request in seen if request.method == "POST"]) == 1
         finally:
             set_transport(None)
 
@@ -340,7 +354,9 @@ def test_mock_generation_keeps_review_key_and_isolation(tmp_path, monkeypatch):
             assert again.status_code == 200, again.text
             assert again.json()["est_cost_cents"] == 40
             assert len(again.json()["images"]) == 4
-            assert [request.method for request in seen if request.url.path.endswith("/keys")] == ["GET", "POST"]
+            key_calls = [request.method for request in seen if request.url.path.endswith("/keys")]
+            assert key_calls == ["GET", "POST", "GET"]
+            assert key_calls.count("POST") == 1
 
             member, db = _member("zhang@jiecheng.com")
             assert member.relay_api_key == REVIEW_KEY
@@ -414,7 +430,7 @@ def test_rejected_combinations_do_not_call_upstream(tmp_path, monkeypatch):
 def test_listed_key_ignores_review_key(tmp_path, monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST":
-            return httpx.Response(200, json={"code": 0, "data": {"id": 1}})
+            raise AssertionError("已有生图密钥时不应再创建")
         return httpx.Response(
             200,
             json={
@@ -432,6 +448,7 @@ def test_listed_key_ignores_review_key(tmp_path, monkeypatch):
     with _client(tmp_path, monkeypatch) as client:
         _install_transport(handler)
         try:
+            monkeypatch.setenv("EVC_ADMIN_IMAGE_GROUP_ID", "42")
             _groups(monkeypatch)
             headers = _login(client, "zhang@jiecheng.com")
             created = client.post("/v1/image-workbench/generate", headers=headers, json=_body())
@@ -581,3 +598,80 @@ def test_image_modules_do_not_hardcode_group_number():
         assert "== 16" not in source
         assert 'os.environ.get("EVC_RELAY_GROUP_NAME"' not in source
         assert "relay_group_name" not in source
+
+
+def test_image_key_failure_stays_out_of_logs_and_review_key(tmp_path, monkeypatch, caplog):
+    import logging
+
+    secret = "sk-image-failure-must-stay-out"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(500, json={"message": secret, "key": secret})
+        return httpx.Response(200, json={"code": 0, "data": {"items": []}})
+
+    with _client(tmp_path, monkeypatch) as client:
+        _install_transport(handler)
+        try:
+            _groups(monkeypatch)
+            headers = _login(client, "zhang@jiecheng.com")
+            with caplog.at_level(logging.DEBUG):
+                status = client.get("/v1/image-workbench/status", headers=headers)
+            assert status.status_code == 200, status.text
+            assert "生图密钥没有创建成功" in status.json()["group_reason"]
+            assert "审核功能不受影响" in status.json()["group_reason"]
+            assert secret not in status.text
+            assert secret not in caplog.text
+            member, db = _member("zhang@jiecheng.com")
+            assert member.relay_api_key == ""
+            assert member.relay_image_api_key == ""
+            db.close()
+            with caplog.at_level(logging.DEBUG):
+                denied = client.post("/v1/image-workbench/generate", headers=headers, json=_body())
+            assert denied.status_code == 502, denied.text
+            assert secret not in denied.text
+            assert secret not in caplog.text
+        finally:
+            set_transport(None)
+
+
+def test_concurrent_image_key_create_posts_once():
+    import threading
+
+    posts = {"n": 0}
+    items: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={"code": 0, "data": {"items": list(items)}})
+        posts["n"] += 1
+        items.append({"id": 1, "name": "生图专用", "group_id": 16, "key": IMAGE_KEY})
+        return httpx.Response(200, json={"code": 0, "data": {"key": IMAGE_KEY}})
+
+    set_transport(httpx.MockTransport(handler))
+    try:
+        from admin_app.image_relay import create_or_find_image_key
+
+        errors: list[BaseException] = []
+
+        def work() -> None:
+            try:
+                found = create_or_find_image_key(
+                    "https://token4u.cc/api/v1",
+                    "relay-test-access",
+                    16,
+                    "zhang@jiecheng.com",
+                )
+                assert found == IMAGE_KEY
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=work) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert errors == []
+        assert posts["n"] == 1
+    finally:
+        set_transport(None)
