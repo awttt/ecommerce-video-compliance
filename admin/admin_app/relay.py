@@ -1,6 +1,8 @@
 """中转站管理接口。没有管理密钥时走本地账本，不访问网络，也不读取中转站。"""
 
 import hashlib
+import logging
+import re
 import time
 from datetime import date, timedelta
 
@@ -18,6 +20,8 @@ _NO_KEY = "当前是演示环境，不能同步余额"
 LOOKUP_FAILED = "查询中转站账号失败，请稍后再试。本次没有新建账号。"
 # 管理密钥有每分钟次数上限。调用方看到这句话就停手，不要继续把次数打光。
 RATE_LIMITED = "操作太频繁，请稍后再试"
+_USER_ID = re.compile(r"[A-Za-z0-9_-]{1,40}")
+log = logging.getLogger(__name__)
 
 
 def _user_rows(data: object) -> list:
@@ -65,6 +69,56 @@ def apply_credentials(member: Member, credentials: dict) -> None:
         except (TypeError, ValueError):
             seconds = 3600
         member.relay_token_expires_at = utcnow() + timedelta(seconds=max(60, seconds))
+
+
+def safe_relay_user_id(value: object) -> str:
+    """只接受能放进 /admin/users/{id} 这一段的编号，避免拼出别的路径。"""
+    text = str(value or "").strip()
+    if _USER_ID.fullmatch(text) is None:
+        return ""
+    return text
+
+
+def _positive_group_id(value: object) -> int | None:
+    if isinstance(value, bool) or isinstance(value, float):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str) and value.strip().isdigit():
+        number = int(value.strip())
+        return number if number > 0 else None
+    if isinstance(value, dict):
+        raw = value.get("id") if "id" in value else value.get("group_id")
+        return _positive_group_id(raw)
+    return None
+
+
+def sorted_unique_group_ids(values: list[int]) -> list[int]:
+    """去重后按编号从小到大排列，顺序稳定。"""
+    return sorted({item for item in values if isinstance(item, int) and not isinstance(item, bool) and item > 0})
+
+
+def read_allowed_groups(raw: object) -> list[int] | None:
+    """读出全部分组编号。有任何一项认不出就返回 None，调用方不得据此覆盖原分组。"""
+    if not isinstance(raw, list):
+        return None
+    found: list[int] = []
+    for item in raw:
+        number = _positive_group_id(item)
+        if number is None:
+            return None
+        found.append(number)
+    return sorted_unique_group_ids(found)
+
+
+def configured_image_group_id() -> int:
+    """生图专组编号。默认 16，与建钥使用同一配置。配置不合法时不建号、不改分组。"""
+    from admin_app.image_relay import image_group_id
+
+    try:
+        return image_group_id()
+    except DomainError:
+        raise DomainError(400, "服务配置不完整，请联系平台管理员") from None
 
 
 def _cents(value: object) -> int:
@@ -211,7 +265,11 @@ class HttpRelay:
     def create_user(self, email: str, password: str) -> tuple[str, dict]:
         import httpx
 
-        group = self._configured_group_id()
+        review_group = self._configured_group_id()
+        image_group = configured_image_group_id()
+        groups = sorted_unique_group_ids([review_group, image_group])
+        if review_group not in groups:
+            raise DomainError(400, "服务配置不完整，请联系平台管理员")
         # 同一邮箱的幂等键固定，重试不会在中转站再开一个号。
         try:
             response = self.client.post(
@@ -220,10 +278,11 @@ class HttpRelay:
                     "Idempotency-Key": hashlib.sha256(f"evc-admin-user:{email}".encode()).hexdigest()[:32],
                 },
                 # token4u 受限密钥的 users.create 明确拒绝附带余额，包括 balance: 0。
+                # 审核组和生图专组一起授予。restrict_public_groups 保持原有的 True。
                 json={
                     "email": email,
                     "password": password,
-                    "allowed_groups": [group],
+                    "allowed_groups": groups,
                     "restrict_public_groups": True,
                 },
             )
@@ -350,6 +409,37 @@ class HttpRelay:
             json={"status": status},
         )
         self._raise(response, "更新账号状态")
+
+    def append_image_group(self, relay_user_id: str, image_group_id: int) -> bool:
+        """先读出现有分组，再只追加生图专组。不改余额、倍率、角色，也不调用 replace-group。
+
+        读不到原分组或 restrict_public_groups 时返回 False，避免用残缺列表覆盖。
+        已经有生图专组时不发 PUT。
+        """
+        user_id = safe_relay_user_id(relay_user_id)
+        if not user_id or not isinstance(image_group_id, int) or isinstance(image_group_id, bool) or image_group_id <= 0:
+            return False
+        data = self._get(f"/admin/users/{user_id}")
+        if not isinstance(data, dict):
+            log.warning("image group was not appended")
+            return False
+        current = read_allowed_groups(data.get("allowed_groups"))
+        restrict = data.get("restrict_public_groups")
+        if current is None or not isinstance(restrict, bool):
+            log.warning("image group was not appended")
+            return False
+        if image_group_id in current:
+            return True
+        merged = sorted_unique_group_ids([*current, image_group_id])
+        if any(item not in merged for item in current):
+            log.warning("image group was not appended")
+            return False
+        response = self.client.put(
+            self._url(f"/admin/users/{user_id}"),
+            json={"allowed_groups": merged, "restrict_public_groups": restrict},
+        )
+        self._raise(response, "更新账号分组")
+        return True
 
     def user_snapshot(self, relay_user_id: str) -> dict | None:
         data = self._get(f"/admin/users/{relay_user_id}")
@@ -547,3 +637,46 @@ def get_relay(db: Session) -> LocalRelay | HttpRelay:
     if settings.relay_admin_key:
         return HttpRelay(settings, group_id_of(db), base_url_of(db))
     return LocalRelay(db, group_name_of(db))
+
+
+def grant_member_image_group(db: Session, member: Member, *, user_id_hint: str = "") -> bool:
+    """给已有成员补上生图专组。没有管理密钥、读不到原分组时返回 False，不改其他字段。
+
+    本地没有用户编号时，先用调用方从登录态拿到的编号，否则按邮箱查询。查不到不建号。
+    """
+    if not get_settings().relay_admin_key:
+        return False
+    try:
+        image_group = configured_image_group_id()
+    except DomainError:
+        return False
+    relay = get_relay(db)
+    if not isinstance(relay, HttpRelay):
+        return False
+    user_id = safe_relay_user_id(member.relay_user_id)
+    remembered = bool(user_id)
+    if not user_id:
+        user_id = safe_relay_user_id(user_id_hint)
+    if not user_id:
+        try:
+            found = relay.find_user_by_email(member.email)
+        except DomainError:
+            log.warning("image group was not appended")
+            return False
+        if isinstance(found, dict):
+            user_id = safe_relay_user_id(found.get("id"))
+    if not user_id:
+        return False
+    if not remembered:
+        member.relay_user_id = user_id
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            log.warning("image group was not appended")
+            return False
+    try:
+        return relay.append_image_group(user_id, image_group)
+    except DomainError:
+        log.warning("image group was not appended")
+        return False

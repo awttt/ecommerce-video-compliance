@@ -157,6 +157,46 @@ def image_key_failure(status: int) -> str:
     return IMAGE_KEY_FAILED
 
 
+async def request_image_group_grant(
+    access_token: str,
+    *,
+    base_url: str = "",
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> bool:
+    """请 evc-admin 用管理密钥给当前用户追加生图专组。失败只返回 False，不把令牌写进日志。"""
+    token = str(access_token or "").strip()
+    if not token:
+        return False
+    from app.core.shared_rules import admin_base_url
+
+    base = (base_url or admin_base_url()).rstrip("/")
+    kwargs: dict[str, Any] = {
+        "timeout": httpx.Timeout(20.0, connect=10.0),
+        "headers": {"User-Agent": USER_AGENT},
+        "trust_env": transport is None,
+    }
+    if transport is not None:
+        kwargs["transport"] = transport
+    try:
+        async with httpx.AsyncClient(**kwargs) as client:
+            response = await client.post(
+                f"{base}/v1/account/image-group",
+                json={"access_token": token},
+                headers={"Accept": "application/json", "User-Agent": USER_AGENT},
+            )
+    except httpx.HTTPError:
+        log.warning("image group grant was not completed")
+        return False
+    if response.status_code >= 400:
+        log.warning("image group grant was not completed")
+        return False
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    return isinstance(body, dict) and body.get("ok") is True
+
+
 def relay_group_id_fallback() -> int | None:
     """名称解析失败时的数字分组编号。未配置则只按名称解析。"""
     raw = os.environ.get("EVC_RELAY_GROUP_ID", "").strip()

@@ -1041,3 +1041,178 @@ def test_concurrent_image_key_ensure_posts_once(monkeypatch):
         asyncio.run(both())
         assert upstream.image_creates == 1
         assert manager._settings["relay_image_api_key"] == IMAGE_SECRET
+
+
+def _grant_patch(monkeypatch, upstream: Upstream, grants: list[str], *, allow: bool):
+    async def grant(token: str, **kwargs) -> bool:
+        del kwargs
+        grants.append(token)
+        if allow:
+            upstream.image_create_failure = None
+        return allow
+
+    monkeypatch.setattr("app.core.relay.request_image_group_grant", grant)
+
+
+def test_login_appends_image_group_after_permission_error_and_reuses_the_key(monkeypatch, caplog):
+    import logging
+
+    monkeypatch.delenv("EVC_ADMIN_IMAGE_GROUP_ID", raising=False)
+    upstream = Upstream()
+    upstream.image_create_failure = (403, "GROUP_NOT_ALLOWED", "leak-marker")
+    grants: list[str] = []
+    _grant_patch(monkeypatch, upstream, grants, allow=True)
+    with TestClient(create_app()) as client:
+        attach(upstream)
+        with caplog.at_level(logging.DEBUG):
+            body = login(client)
+        assert body["message"] == "已登录"
+        assert body["settings"]["account_logged_in"] is True
+        assert body["settings"]["has_api_key"] is True
+        assert grants == [ACCESS]
+        assert upstream.image_creates == 2
+        assert upstream.image_create_body == {"name": "生图专用", "group_id": 16}
+        assert upstream.create_body == {"name": "电商视频合规", "group_id": TARGET_GROUP_ID}
+        assert upstream.creates == 1
+        assert upstream.group_updates == []
+        assert not any("replace-group" in path or "/admin/users" in path for path, _body in upstream.calls)
+        text = json.dumps(body, ensure_ascii=False)
+        app_logs = "\n".join(record.getMessage() for record in caplog.records if record.name.startswith("app."))
+        for hidden in (IMAGE_SECRET, ACCESS, REFRESH, PASSWORD, RELAY_KEY, "leak-marker"):
+            assert hidden not in text
+            assert hidden not in app_logs
+        manager = get_manager()
+        assert manager._settings["relay_api_key"] == RELAY_KEY
+        assert manager._settings["relay_image_api_key"] == IMAGE_SECRET
+        login(client)
+        assert upstream.image_creates == 2
+        assert upstream.creates == 1
+        assert grants == [ACCESS]
+
+
+def test_image_use_heals_a_missing_group_without_touching_the_review_key(monkeypatch):
+    import asyncio
+
+    monkeypatch.delenv("EVC_ADMIN_IMAGE_GROUP_ID", raising=False)
+    upstream = Upstream()
+    upstream.existing_image_keys = [
+        {"id": 4, "name": "生图专用", "key": IMAGE_SECRET, "group_id": 16, "status": "active"}
+    ]
+    grants: list[str] = []
+    _grant_patch(monkeypatch, upstream, grants, allow=True)
+    with TestClient(create_app()) as client:
+        attach(upstream)
+        login(client)
+        assert grants == []
+        assert upstream.creates == 1
+        assert upstream.create_body["name"] == "电商视频合规"
+        manager = get_manager()
+        review = manager._settings["relay_api_key"]
+        manager._settings.pop("relay_image_api_key", None)
+        upstream.existing_image_keys = []
+        upstream.created_items = [item for item in upstream.created_items if item.get("name") != "生图专用"]
+        upstream.image_creates = 0
+        upstream.image_create_failure = (403, "GROUP_NOT_ALLOWED", "user is not allowed to bind this group")
+        asyncio.run(manager.ensure_image_key())
+        assert grants == [ACCESS]
+        assert upstream.image_creates == 2
+        assert upstream.image_create_body == {"name": "生图专用", "group_id": 16}
+        assert manager._settings["relay_api_key"] == review
+        assert manager._settings["relay_image_api_key"] == IMAGE_SECRET
+        assert upstream.creates == 1
+        asyncio.run(manager.ensure_image_key())
+        assert upstream.image_creates == 2
+        assert grants == [ACCESS]
+
+
+def test_image_group_grant_is_skipped_for_other_failures(monkeypatch, caplog):
+    import logging
+
+    monkeypatch.delenv("EVC_ADMIN_IMAGE_GROUP_ID", raising=False)
+    upstream = Upstream()
+    upstream.image_create_failure = (500, "UPSTREAM", "leak-marker")
+    grants: list[str] = []
+
+    async def grant(token: str, **kwargs) -> bool:
+        del token, kwargs
+        grants.append("called")
+        return True
+
+    monkeypatch.setattr("app.core.relay.request_image_group_grant", grant)
+    with TestClient(create_app()) as client:
+        attach(upstream)
+        with caplog.at_level(logging.DEBUG):
+            body = login(client)
+        assert grants == []
+        assert upstream.image_creates == 1
+        assert upstream.creates == 1
+        assert upstream.create_body["name"] == "电商视频合规"
+        assert body["settings"]["has_api_key"] is True
+        assert "生图密钥没有创建成功" in body["message"]
+        assert "leak-marker" not in json.dumps(body, ensure_ascii=False)
+        assert "leak-marker" not in caplog.text
+        assert get_manager()._settings["relay_api_key"] == RELAY_KEY
+        assert get_manager()._settings.get("relay_image_api_key") in (None, "")
+
+    upstream = Upstream()
+    upstream.image_create_failure = (403, "GROUP_NOT_ALLOWED", "leak-marker")
+    grants.clear()
+
+    async def deny(token: str, **kwargs) -> bool:
+        del kwargs
+        grants.append(token)
+        return False
+
+    monkeypatch.setattr("app.core.relay.request_image_group_grant", deny)
+    with TestClient(create_app()) as client:
+        attach(upstream)
+        body = login(client)
+        assert grants == [ACCESS]
+        assert upstream.image_creates == 1
+        assert upstream.creates == 1
+        assert "还不能绑定生图分组" in body["message"]
+        assert "审核功能不受影响" in body["message"]
+        assert body["settings"]["account_logged_in"] is True
+        assert body["settings"]["has_api_key"] is True
+        assert "leak-marker" not in json.dumps(body, ensure_ascii=False)
+        assert get_manager()._settings["relay_api_key"] == RELAY_KEY
+        assert get_manager()._settings.get("relay_image_api_key") in (None, "")
+
+
+def test_image_group_grant_request_does_not_log_the_token(caplog):
+    import asyncio
+    import logging
+
+    from app.core.relay import request_image_group_grant
+
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.content.decode())
+        seen["admin"] = request.headers.get("x-api-key")
+        if seen.get("mode") == "deny":
+            return httpx.Response(403, json={"detail": seen["body"]["access_token"]})
+        if seen.get("mode") == "down":
+            raise httpx.ConnectError("down")
+        if seen.get("mode") == "no":
+            return httpx.Response(200, json={"ok": False})
+        return httpx.Response(200, json={"ok": True})
+
+    transport = httpx.MockTransport(handler)
+    with caplog.at_level(logging.DEBUG):
+        assert asyncio.run(
+            request_image_group_grant(ACCESS, base_url="https://admin.example.test", transport=transport)
+        )
+    assert seen["path"] == "/v1/account/image-group"
+    assert seen["body"] == {"access_token": ACCESS}
+    assert seen["admin"] in (None, "")
+    assert ACCESS not in caplog.text
+    seen["mode"] = "no"
+    assert not asyncio.run(request_image_group_grant(ACCESS, base_url="https://admin.example.test", transport=transport))
+    seen["mode"] = "deny"
+    assert not asyncio.run(request_image_group_grant(ACCESS, base_url="https://admin.example.test", transport=transport))
+    assert ACCESS not in caplog.text
+    seen["mode"] = "down"
+    assert not asyncio.run(request_image_group_grant(ACCESS, base_url="https://admin.example.test", transport=transport))
+    assert not asyncio.run(request_image_group_grant("", base_url="https://admin.example.test", transport=transport))

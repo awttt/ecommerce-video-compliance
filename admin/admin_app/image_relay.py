@@ -4,8 +4,9 @@
 生图用「生图专用-bot创建」分组和「生图专用」密钥。不使用审核视频的「电商视频合规」。
 解析不到生图专组就明确失败，绝不改用审核组、普通组或管理密钥。
 
-分组编号只存在于中转站返回的记录里，用来创建这一把专钥。代码不把任何
-固定编号当成授权，也没有编号备用机制。
+分组编号只存在于中转站返回的记录里，用来创建这一把专钥。解析不到生图专组
+时不会改用审核组。老账号建钥若返回权限不足，由本服务用管理密钥读出该用户
+现有的 allowed_groups 和 restrict_public_groups，再只追加生图专组。
 
 计价：本站展示预估 ¥0.10 / 张，一次 4 张 ¥0.40。真实扣费沿用网关按 ImageCount
 的实账，不在这里改 token4u，也不把本站零售价当成上游成本。
@@ -29,6 +30,7 @@ import logging
 import os
 import socket
 import threading
+from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
 from urllib.parse import urlparse
@@ -168,6 +170,29 @@ def image_key_failure(status: int) -> str:
     if status in {401, 403}:
         return IMAGE_KEY_DENIED
     return IMAGE_KEY_FAILED
+
+
+def _reason_code(body: object) -> str:
+    if not isinstance(body, dict):
+        return ""
+    payload = body.get("data") if isinstance(body.get("data"), dict) else body
+    reason = ""
+    if isinstance(payload, dict):
+        reason = str(payload.get("reason") or "").strip().upper()
+    if not reason:
+        reason = str(body.get("reason") or "").strip().upper()
+    return reason
+
+
+def image_group_forbidden(response: httpx.Response) -> bool:
+    """建钥被拒绝是因为不能绑定分组。401 登录失效不在此列，除非原因码明确是分组。"""
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    if _reason_code(body) == "GROUP_NOT_ALLOWED":
+        return True
+    return response.status_code == 403
 
 
 def _key_lock(email: str) -> threading.Lock:
@@ -487,8 +512,12 @@ def create_or_find_image_key(
     group_id: int,
     email: str,
     remembered: str = "",
+    on_group_denied: Callable[[], bool] | None = None,
 ) -> str:
-    """用当前用户令牌列出或创建「生图专用」。同一邮箱和分组只发一次创建。"""
+    """用当前用户令牌列出或创建「生图专用」。同一邮箱和分组只发一次创建。
+
+    建钥返回分组权限不足时，可先调用 on_group_denied 补充分组，再重试一次。
+    """
     if group_id <= 0:
         raise DomainError(400, "生图分组无效")
     headers = {
@@ -519,6 +548,19 @@ def create_or_find_image_key(
                 headers=headers,
                 json={"name": IMAGE_KEY_NAME, "group_id": group_id},
             )
+            if image_group_forbidden(response) and on_group_denied is not None:
+                healed = False
+                try:
+                    healed = bool(on_group_denied())
+                except Exception:
+                    log.warning("image group was not appended")
+                    healed = False
+                if healed:
+                    response = client.post(
+                        f"{base_url.rstrip('/')}/keys",
+                        headers=headers,
+                        json={"name": IMAGE_KEY_NAME, "group_id": group_id},
+                    )
             if response.status_code in (401, 403):
                 log.warning("image key was not issued")
                 raise DomainError(response.status_code, IMAGE_KEY_DENIED)
@@ -626,7 +668,20 @@ def ensure_member_image_key(db: Session, member: Member) -> tuple[dict, str]:
     except DomainError:
         group = {"id": image_group_id(), "name": image_group_name()}
     remembered = str(member.relay_image_api_key or "").strip()
-    key = create_or_find_image_key(base_url_of(db), token, image_group_id(), member.email, remembered)
+
+    def _grant() -> bool:
+        from admin_app.relay import grant_member_image_group
+
+        return grant_member_image_group(db, member)
+
+    key = create_or_find_image_key(
+        base_url_of(db),
+        token,
+        image_group_id(),
+        member.email,
+        remembered,
+        on_group_denied=_grant,
+    )
     if remembered != key:
         member.relay_image_api_key = key
         db.commit()
