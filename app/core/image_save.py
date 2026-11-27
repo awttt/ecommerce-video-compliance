@@ -119,12 +119,22 @@ def _not_a_regular_file(path: Path) -> bool:
     return path.exists() and not path.is_file()
 
 
+def _discard_temporary(temporary: Path) -> None:
+    try:
+        os.unlink(temporary)
+    except OSError:
+        pass
+
+
 def _write_bytes(path: Path, payload: bytes) -> None:
     parent = path.parent
     temporary = parent / f".{path.name}.{os.getpid()}.part"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
+    # Windows 的 os.open 默认按文本模式写，会把图片里的 0x0A 改成 0x0D 0x0A。
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
     descriptor = os.open(temporary, flags, 0o600)
     try:
         written = 0
@@ -135,21 +145,19 @@ def _write_bytes(path: Path, payload: bytes) -> None:
                 raise OSError("short write")
             written += chunk
         os.fsync(descriptor)
-    except Exception:
         os.close(descriptor)
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
-        raise
-    os.close(descriptor)
-    try:
+        descriptor = -1
+        # 先核对临时文件。不一致或替换失败时只删临时文件，不把坏图留在目标路径。
+        if temporary.read_bytes() != payload:
+            raise ValueError("保存后的文件和原图不一致")
         os.replace(temporary, path)
     except Exception:
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        _discard_temporary(temporary)
         raise
 
 
@@ -186,9 +194,10 @@ def save_generated_image(
         return _result(False, "不能保存到生图记录目录")
     try:
         _write_bytes(destination, payload)
-        written = destination.read_bytes()
+    except ValueError as exc:
+        if str(exc) != "保存后的文件和原图不一致":
+            raise
+        return _result(False, "保存后的文件和原图不一致")
     except OSError:
         return _result(False, "没有写到所选位置")
-    if written != payload:
-        return _result(False, "保存后的文件和原图不一致")
-    return _result(True, "", filename=destination.name, count=len(written))
+    return _result(True, "", filename=destination.name, count=len(payload))
