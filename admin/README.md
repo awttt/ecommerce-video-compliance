@@ -1,6 +1,6 @@
 # 御镜视频审核系统 · 管理后台
 
-多商户管理。公司、成员、额度、命中词和用量快照放在这里。平台管理员可直接创建公司管理员，公司管理员可直接创建员工；账号会在 token4u 中开通并绑定现有审核专属分组，后台自动创建审核 Key。中转站只负责算力和扣费。
+多商户管理。公司、成员、额度、命中词和用量快照放在这里。平台管理员可直接创建公司管理员，公司管理员可直接创建员工；账号会在 token4u 中开通，并同时绑定现有审核专属分组和生图专组，后台自动创建审核 Key。中转站只负责算力和扣费。
 
 视频审核不在后台完成，只在桌面客户端里跑。后台只管理租户、成员、额度、规则、用量和审计，不启动识别引擎，也不保存视频和命中结果。这样后台可以单独部署到服务器，不必带上抽帧、画面模型这一类本地依赖。
 
@@ -60,7 +60,7 @@ EVC_ADMIN_CLOUD_DATABASE_URL='postgresql+psycopg://user:pass@host:5432/evc_admin
 
 当前建表用 `create_all`，没有单独的迁移框架；新增列由 `db.init_db` 里的补列逻辑处理。
 
-管理密钥只放环境变量 `EVC_RELAY_ADMIN_KEY`，不进数据库，设置页也看不到。使用 token4u 受限密钥时，至少授予 `users.read`、`users.create`、`users.balance.read`、`users.balance.write`、`users.status.write` 和 `usage.read`。留空时开通成员和划拨额度只写本地账本，不请求中转站，页面也不显示同步按钮。
+管理密钥只放环境变量 `EVC_RELAY_ADMIN_KEY`，不进数据库，设置页也看不到。使用 token4u 受限密钥时，至少授予 `users.read`、`users.create`、`users.balance.read`、`users.balance.write`、`users.status.write` 和 `usage.read`，并允许读取和更新用户的分组列表。留空时开通成员和划拨额度只写本地账本，不请求中转站，页面也不显示同步按钮；老账号缺生图专组时也不会自动补分组。
 
 其他变量：
 
@@ -69,15 +69,15 @@ EVC_ADMIN_CLOUD_DATABASE_URL='postgresql+psycopg://user:pass@host:5432/evc_admin
 - `EVC_ADMIN_JWT_SECRET`：签发登录令牌。正式环境要换成足够长的随机串。
 - `EVC_RELAY_BASE_URL`：中转站管理接口，默认 `https://token4u.cc/api/v1`。
 - `EVC_RELAY_GATEWAY_URL`：推理网关，默认 `https://token4u.cc/v1`。
-- `EVC_RELAY_GROUP_NAME`：新建中转站用户只进这个分组，默认「电商审核专属-bot创建」。
-- `EVC_RELAY_GROUP_ID`：审核专属分组的数字编号，远端建号和自动创建 Key 都绑定这个分组。
+- `EVC_RELAY_GROUP_NAME`：审核专属分组名称，默认「电商审核专属-bot创建」。
+- `EVC_RELAY_GROUP_ID`：审核专属分组的数字编号。新建成员、管理员和租户时，与生图专组一起写入 `allowed_groups`，并保持 `restrict_public_groups`。审核 Key 仍只绑定这个编号。
 - `EVC_RELAY_TIMEZONE`：用量日期，默认 `Asia/Shanghai`。
 - `EVC_ADMIN_IMAGE_GROUP_NAME`：生图专组名，默认「生图专用-bot创建」。不读取上面的审核组名。
-- `EVC_ADMIN_IMAGE_GROUP_ID`：新建「生图专用」密钥时绑定的分组编号，默认 `16`。不读取审核分组编号。
+- `EVC_ADMIN_IMAGE_GROUP_ID`：生图专组编号，默认 `16`。新建账号时和审核组一起授予；老账号建「生图专用」密钥若返回权限不足，会在保留原有分组后追加这个编号。不读取审核分组编号。
 - `EVC_ADMIN_IMAGE_MODELS`：生图候选模型，逗号分隔。默认四个 gpt-image 候选，不表示已经就绪。
 - `EVC_ADMIN_IMAGE_LIVE` 与 `EVC_ADMIN_IMAGE_CONTRACT_OK`：两个同时为 `1` 才允许真实同步生图。默认都关闭，页面只出带 MOCK 标记的占位图。
 
-生图工作台在侧栏「工具」分组，紧挨在「视频审核工具」下面（单独部署、没有视频工具地址时，这一组只显示生图）。接口是 `/v1/image-workbench`。真实调用只同步 POST `https://token4u.cc/v1/images/generations`，用当前用户自己的「生图专用」密钥，不使用审核密钥或管理密钥。打开生图页时，如果 token4u 上还没有这把密钥，会用该成员自己的登录态创建一把并绑到上面的分组编号；创建失败只提示，不影响登录和审核。使用说明见 `docs/admin-image-workbench.md`。
+生图工作台在侧栏「工具」分组，紧挨在「视频审核工具」下面（单独部署、没有视频工具地址时，这一组只显示生图）。接口是 `/v1/image-workbench`。真实调用只同步 POST `https://token4u.cc/v1/images/generations`，用当前用户自己的「生图专用」密钥，不使用审核密钥或管理密钥。打开生图页时，如果 token4u 上还没有这把密钥，会用该成员自己的登录态创建一把并绑到上面的分组编号。若中转站拒绝绑定分组，本服务会用管理密钥读出该用户现有分组，只追加生图专组后再试一次；已经有同名密钥则复用。创建失败只提示，不影响登录和审核，也不改审核密钥。使用说明见 `docs/admin-image-workbench.md`。
 
 ## 和桌面客户端一起分发
 

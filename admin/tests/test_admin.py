@@ -106,6 +106,8 @@ def test_http_relay_matches_token4u_admin_contract(monkeypatch):
     import admin_app.relay as relay
     from admin_app.config import Settings
 
+    monkeypatch.delenv("EVC_ADMIN_IMAGE_GROUP_ID", raising=False)
+
     calls: list[tuple[str, str, dict, object]] = []
 
     class FakeClient:
@@ -193,9 +195,11 @@ def test_http_relay_matches_token4u_admin_contract(monkeypatch):
     assert user_id == "77"
     assert credentials["access_token"] == "user-token"
     user_body = next(body for method, url, _, body in calls if method == "POST" and url.endswith("/admin/users"))
-    assert user_body["allowed_groups"] == [9]
+    assert user_body["allowed_groups"] == [9, 16]
     assert user_body["restrict_public_groups"] is True
     assert "balance" not in user_body
+    key_body = next(body for method, url, _, body in calls if method == "POST" and str(url).endswith("/keys"))
+    assert key_body == {"name": "电商视频合规", "group_id": 9}
 
     sender.add_balance("77", 1000, "idem-add")
     method, _, headers, body = calls[-1]

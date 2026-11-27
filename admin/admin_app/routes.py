@@ -102,6 +102,12 @@ class SsoBody(BaseModel):
     expires_in: int | None = None
 
 
+class ImageGroupBody(BaseModel):
+    """桌面端补生图分组时只带当前用户自己的中转站令牌。不接收用户编号。"""
+
+    access_token: str = ""
+
+
 class TotpBody(BaseModel):
     challenge: str = ""
     totp_code: str = ""
@@ -414,6 +420,37 @@ def sso(body: SsoBody, response: Response, db: Session = Depends(get_db)) -> dic
     )
     db.commit()
     return _issue(db, member, response)
+
+
+@router.post("/account/image-group")
+def ensure_image_group(body: ImageGroupBody, db: Session = Depends(get_db)) -> dict:
+    """老账号缺生图专组时，由本服务用管理密钥追加。响应里只有是否完成，没有密钥。"""
+    from admin_app.relay import grant_member_image_group
+
+    token = body.access_token.strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="缺少登录凭证")
+    try:
+        profile = auth_relay.current_account(token)
+    except auth_relay.RelayLoginError as exc:
+        raise _login_error(exc) from exc
+    email = str(profile.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=502, detail="服务没有返回账号邮箱")
+    member = db.query(Member).filter(Member.email == email).one_or_none()
+    if member is None or member.deleted_at is not None:
+        raise HTTPException(status_code=403, detail="这个账号没有后台权限")
+    _ensure_can_enter(db, member)
+    hint = ""
+    for key in ("id", "user_id"):
+        value = profile.get(key)
+        if isinstance(value, bool) or value is None:
+            continue
+        hint = str(value).strip()
+        if hint:
+            break
+    ok = grant_member_image_group(db, member, user_id_hint=hint)
+    return {"ok": bool(ok)}
 
 
 @router.post("/auth/refresh")

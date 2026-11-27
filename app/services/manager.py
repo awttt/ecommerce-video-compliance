@@ -2233,13 +2233,31 @@ class JobManager:
             if chosen is not None:
                 self._settings["relay_image_api_key"] = chosen[0]
                 return
-            try:
-                created = await self._call_authed(
-                    lambda token: self.relay.create_image_key(token, group_id, email)
-                )
-            except RelayError as exc:
-                log.warning("image key was not issued")
-                raise RelayError(image_key_failure(exc.status), exc.status) from None
+            created: dict = {}
+            healed = False
+            while True:
+                try:
+                    created = await self._call_authed(
+                        lambda token: self.relay.create_image_key(token, group_id, email)
+                    )
+                    break
+                except RelayError as exc:
+                    if exc.status == 403 and not healed:
+                        healed = True
+                        granted = False
+                        try:
+                            from app.core.relay import request_image_group_grant
+
+                            granted = await request_image_group_grant(
+                                str(self._settings.get("relay_access_token") or "")
+                            )
+                        except Exception:
+                            log.warning("image group grant was not completed")
+                            granted = False
+                        if granted:
+                            continue
+                    log.warning("image key was not issued")
+                    raise RelayError(image_key_failure(exc.status), exc.status) from None
             if not isinstance(created, dict):
                 created = {}
             secret = ""
