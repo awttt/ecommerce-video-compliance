@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from app.console import create_console_app
 from app.core.direct_image import store_result_images
 from app.core.desktop_save import DesktopApi, create_desktop_window
-from app.core.image_save import save_generated_image
+from app.core.image_save import _write_bytes, save_generated_image
 
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -241,3 +241,65 @@ def test_unwritable_destination_is_an_error(tmp_path, monkeypatch):
     assert result["cancelled"] is False
     assert result["message"] == "没有写到所选位置"
     assert not (locked / "a.png").exists()
+
+
+def test_open_flags_include_binary_mode_when_the_platform_has_it(tmp_path, monkeypatch):
+    binary = 0x8000
+    monkeypatch.setattr(os, "O_BINARY", binary, raising=False)
+    real_open = os.open
+    opened: list[int] = []
+
+    def spy_open(path, flags, mode=0o777, *, dir_fd=None):
+        opened.append(flags)
+        flags &= ~binary
+        if dir_fd is None:
+            return real_open(path, flags, mode)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", spy_open)
+    destination = tmp_path / "out.png"
+    _write_bytes(destination, PNG)
+
+    assert opened
+    assert all(flags & binary for flags in opened)
+    assert destination.read_bytes() == PNG
+
+
+def test_mismatched_write_is_rejected_and_leaves_no_file(tmp_path, monkeypatch):
+    url = _store(tmp_path, monkeypatch)
+    pictures = tmp_path / "Pictures"
+    pictures.mkdir()
+    target = pictures / "picked.png"
+    real_write = os.write
+
+    def write_like_windows_text_mode(descriptor, data):
+        raw = bytes(data)
+        if not raw or raw not in PNG:
+            return real_write(descriptor, data)
+        translated = raw.replace(b"\n", b"\r\n")
+        if translated == raw:
+            translated = raw + b"\x00"
+        pending = translated
+        while pending:
+            count = real_write(descriptor, pending)
+            if count <= 0:
+                raise OSError("short write")
+            pending = pending[count:]
+        return len(raw)
+
+    monkeypatch.setattr(os, "write", write_like_windows_text_mode)
+
+    with pytest.raises(ValueError, match="^保存后的文件和原图不一致$"):
+        _write_bytes(target, PNG)
+    assert not target.exists()
+    assert list(pictures.iterdir()) == []
+
+    result = save_generated_image(url, "礼盒-1.png", choose_path=lambda _name: str(target))
+
+    assert result["ok"] is False
+    assert result["cancelled"] is False
+    assert result["message"] == "保存后的文件和原图不一致"
+    assert result["bytes"] == 0
+    assert result["filename"] == ""
+    assert not target.exists()
+    assert list(pictures.iterdir()) == []
